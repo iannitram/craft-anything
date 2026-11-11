@@ -438,6 +438,16 @@ impl RebuildRun {
         std::mem::take(&mut *self.notes.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
+    /// Notes a project's earlier run left waiting on disk, when no run of this process has them
+    /// (the app was closed and opened again), oldest first, taken off the disk. A message sent to
+    /// the project carries them: the run it starts clears the folder.
+    pub fn take_left_notes(ws: &Workspace) -> Vec<Note> {
+        notes::take_left(&notes::notes_dir(&ws.inbox_dir()), true)
+            .into_iter()
+            .map(|l| Note { id: 0, text: l.text, shown: l.shown, pictures: l.pictures, questions: Vec::new() })
+            .collect()
+    }
+
     pub fn poll(&mut self) -> Vec<RunEvent> {
         self.rx.try_iter().collect()
     }

@@ -259,7 +259,7 @@ pub fn keep_queue_moving(set: &Arc<Mutex<RunSet>>, engine: &Arc<Engine>, setting
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rebuild::StandIns;
+    use crate::rebuild::{StandIns, notes};
 
     /// A hub whose Builder is an agent app, so queued runs pass the up-front check.
     fn hub() -> AiHub {
@@ -267,6 +267,22 @@ mod tests {
         s.settings.ai = toml::from_str("[[backends]]\nname = \"Agent\"\nkind = \"agent_cli\"\nmodel = \"claude-code\"\n").unwrap();
         assert!(builder_backend(&crate::AiConfig::from_settings(&s.settings), None).is_ok());
         AiHub::new(Arc::new(Engine::new(s)))
+    }
+
+    /// Notes on disk that no run of this process has (the app was closed meanwhile) come back
+    /// oldest first and leave the disk, so the run a message starts doesn't send them twice.
+    #[test]
+    fn notes_left_on_disk_are_taken_once() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = Workspace::create(d.path(), "A", "A game", TargetRef::None).unwrap();
+        let dir = notes::notes_dir(&ws.inbox_dir());
+        for (id, text) in [(2, "second"), (1, "first")] {
+            let left = notes::Left { text: text.into(), shown: text.into(), pictures: Vec::new() };
+            notes::hand_over(&dir, id, text, Some(&left)).unwrap();
+        }
+        let taken = RebuildRun::take_left_notes(&ws);
+        assert_eq!(taken.iter().map(|n| n.text.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+        assert!(RebuildRun::take_left_notes(&ws).is_empty());
     }
 
     #[test]

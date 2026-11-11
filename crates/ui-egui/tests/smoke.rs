@@ -1851,6 +1851,35 @@ fn pausing_a_build_keeps_the_notes_waiting_instead_of_sending_them() {
     assert_eq!(h.state().state.project_input, "Make them blue");
 }
 
+/// A build running with a note waiting, paused with the Pause button and ended.
+fn paused_build_with_a_note()
+-> (Harness<'static, CraftApp>, craft_anything_ai::rebuild::StandIns, craft_anything_engine::workspace::Workspace, tempfile::TempDir) {
+    use craft_anything_ai::rebuild::{RunEvent, StandIns};
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    let d = tempfile::tempdir().unwrap();
+    let a = Workspace::create(d.path(), "Alpha", "A notes app", TargetRef::None).unwrap();
+    let runs = StandIns::new();
+    let (dir, r) = (d.path().to_path_buf(), runs.clone());
+    let mut h = harness(move || stand_in_app(dir, &r));
+    h.run_steps(2);
+    h.state_mut().open_workspace(a.clone());
+    h.state_mut().follow_up(Some("Add tags".into()));
+    h.run_steps(2);
+    h.state_mut().state.project_input = "Make them blue".into();
+    h.state_mut().send_message();
+    h.run_steps(3);
+    h.get_by_label("Pause").click();
+    h.run_steps(2);
+    assert!(runs.send(&a.root, RunEvent::Finished { ok: false, message: "Paused.".into(), paused: true }));
+    h.run_steps(3);
+    (h, runs, a, d)
+}
+
+fn said(app: &CraftApp) -> Vec<String> {
+    use craft_anything_ui_egui::state::FeedItem;
+    app.state.feed.iter().filter_map(|f| if let FeedItem::User(t) = f { Some(t.text().to_string()) } else { None }).collect()
+}
+
 /// "Send now" stops the turn and sends the waiting notes at once; the Pause button of the run that
 /// starts then works (it used to stay on "Pausing…" and ignore clicks).
 #[test]
@@ -1866,8 +1895,10 @@ fn send_now_sends_the_waiting_notes_and_the_next_run_can_be_paused() {
     h.state_mut().open_workspace(a.clone());
     h.state_mut().follow_up(Some("Add tags".into()));
     h.run_steps(2);
-    h.state_mut().state.project_input = "Make them blue".into();
-    h.state_mut().send_message();
+    for note in ["Make them blue", "And sortable"] {
+        h.state_mut().state.project_input = note.into();
+        h.state_mut().send_message();
+    }
     h.run_steps(3);
     h.get_by_label("Send now").click();
     h.run_steps(2);
@@ -1875,10 +1906,116 @@ fn send_now_sends_the_waiting_notes_and_the_next_run_can_be_paused() {
     assert!(runs.send(&a.root, paused));
     h.run_steps(3);
     assert_eq!(runs.started().len(), 2, "the notes start the next run");
-    assert!(h.query_by_label("Pausing\u{2026}").is_none(), "the new run is not being paused");
+    assert_eq!(runs.messages()[1].as_deref(), Some("Make them blue\n\nAnd sortable"), "oldest first, in one message");
+    assert_eq!(said(h.state()).iter().filter(|t| t.contains("Make them blue")).collect::<Vec<_>>(), ["Make them blue\n\nAnd sortable"], "shown once");
+    assert!(h.query_by_label("Pausing…").is_none(), "the new run is not being paused");
     h.get_by_label("Pause").click();
     h.run_steps(2);
-    h.get_by_label("Pausing\u{2026}");
+    h.get_by_label("Pausing…");
+}
+
+/// Pause pressed, then the build ends on its own before it noticed (done, or failed): the notes
+/// still wait, as after a Pause that stopped it.
+#[test]
+fn a_build_that_ends_by_itself_after_pause_keeps_the_notes_waiting() {
+    use craft_anything_ai::rebuild::{RunEvent, StandIns};
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    let d = tempfile::tempdir().unwrap();
+    let a = Workspace::create(d.path(), "Alpha", "A notes app", TargetRef::None).unwrap();
+    let runs = StandIns::new();
+    let (dir, r) = (d.path().to_path_buf(), runs.clone());
+    let mut h = harness(move || stand_in_app(dir, &r));
+    h.run_steps(2);
+    h.state_mut().open_workspace(a.clone());
+    h.state_mut().follow_up(Some("Add tags".into()));
+    h.run_steps(2);
+    h.state_mut().state.project_input = "Make them blue".into();
+    h.state_mut().send_message();
+    h.run_steps(3);
+    h.get_by_label("Pause").click();
+    h.run_steps(2);
+    assert!(runs.send(&a.root, RunEvent::Finished { ok: true, message: "Done.".into(), paused: false }));
+    h.run_steps(3);
+    assert_eq!(runs.started().len(), 1, "Pause never starts a run");
+    h.get_by_label("Make them blue");
+}
+
+/// Continue on a paused build sends the notes it kept, as the message that starts it again.
+#[test]
+fn continuing_a_paused_build_sends_its_waiting_notes_through() {
+    let (mut h, runs, _a, _d) = paused_build_with_a_note();
+    assert_eq!(runs.started().len(), 1);
+    h.state_mut().continue_build();
+    h.run_steps(3);
+    assert_eq!(runs.started().len(), 2, "exactly one new run");
+    assert_eq!(runs.messages()[1].as_deref(), Some("Make them blue"));
+    assert!(runs.continued().is_empty(), "the notes are its message, not still waiting");
+    assert_eq!(said(h.state()).iter().filter(|t| *t == "Make them blue").count(), 1);
+    assert!(h.query_by_label("Take back: puts it in the box again").is_none(), "nothing is left waiting");
+}
+
+/// "Send now" on a build that is already paused sends the notes it kept.
+#[test]
+fn send_now_on_a_paused_build_sends_the_kept_notes() {
+    let (mut h, runs, _a, _d) = paused_build_with_a_note();
+    h.get_by_label("Send now").click();
+    h.run_steps(3);
+    assert_eq!(runs.started().len(), 2);
+    assert_eq!(runs.messages()[1].as_deref(), Some("Make them blue"));
+    assert!(h.query_by_label("Take back: puts it in the box again").is_none());
+}
+
+/// The next message after a Pause carries the kept notes, first, once.
+#[test]
+fn the_next_message_after_a_pause_carries_the_kept_notes_first_and_once() {
+    let (mut h, runs, _a, _d) = paused_build_with_a_note();
+    h.state_mut().state.project_input = "Then add search".into();
+    h.state_mut().send_message();
+    h.run_steps(3);
+    assert_eq!(runs.started().len(), 2);
+    assert_eq!(runs.messages()[1].as_deref(), Some("Make them blue\n\nThen add search"));
+    assert_eq!(said(h.state()).iter().filter(|t| t.contains("Make them blue")).count(), 1, "shown once");
+}
+
+/// The app closed and opened again while a Pause kept a note: the note is on disk only, and the
+/// next message carries it instead of the new run deleting it.
+#[test]
+fn a_note_kept_by_a_pause_survives_the_app_restarting() {
+    use craft_anything_ai::rebuild::{RunSet, StandIns};
+    let (mut h, _runs, _a, _d) = paused_build_with_a_note();
+    let after = StandIns::new();
+    h.state_mut().runs = RunSet::new(1).with_starter(after.starter());
+    h.state_mut().state.project_input = "Then add search".into();
+    h.state_mut().send_message();
+    h.run_steps(3);
+    assert_eq!(after.messages(), [Some("Make them blue\n\nThen add search".to_string())]);
+}
+
+/// Pause was pressed on a project that is no longer open: its notes are kept too.
+#[test]
+fn pausing_a_build_in_another_project_keeps_its_notes() {
+    use craft_anything_ai::rebuild::RunEvent;
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    let d = tempfile::tempdir().unwrap();
+    let a = Workspace::create(d.path(), "Alpha", "A notes app", TargetRef::None).unwrap();
+    let b = Workspace::create(d.path(), "Beta", "A game", TargetRef::None).unwrap();
+    let runs = craft_anything_ai::rebuild::StandIns::new();
+    let (dir, r) = (d.path().to_path_buf(), runs.clone());
+    let mut h = harness(move || stand_in_app(dir, &r));
+    h.run_steps(2);
+    h.state_mut().open_workspace(a.clone());
+    h.state_mut().follow_up(Some("Add tags".into()));
+    h.run_steps(2);
+    h.state_mut().state.project_input = "Make them blue".into();
+    h.state_mut().send_message();
+    h.run_steps(3);
+    h.get_by_label("Pause").click();
+    h.run_steps(2);
+    h.state_mut().open_workspace(b);
+    h.run_steps(2);
+    assert!(runs.send(&a.root, RunEvent::Finished { ok: false, message: "Paused.".into(), paused: true }));
+    h.run_steps(3);
+    assert_eq!(runs.started().len(), 1, "nothing starts in the background");
 }
 
 #[test]

@@ -191,6 +191,9 @@ impl CraftApp {
     }
 
     fn start_run_with(&mut self, ws: Workspace, opts: RunOptions) {
+        // Neither belongs to a run that was replaced before its end was seen.
+        self.pausing.remove(&ws.root);
+        self.sending_now.remove(&ws.root);
         self.preview = None;
         self.state.screen = Screen::Project;
         match self.launch(ws.clone(), opts) {
@@ -258,6 +261,11 @@ impl CraftApp {
         }
         let Some(ws) = self.workspace.clone() else { return };
         let Some(backend) = self.builder_backend(ws.manifest.builder.as_deref()) else { return self.need_builder(false) };
+        // Notes the pause kept go straight through, as the message that starts the run again.
+        let left = self.kept_notes();
+        if !left.is_empty() {
+            return self.send_left(left, None);
+        }
         let ws = Workspace::open(&ws.root).unwrap_or(ws);
         let opts = RunOptions { continuing: true, ..self.run_options(Some(backend), None, None, Vec::new()) };
         self.start_run_with(ws, opts);
@@ -272,10 +280,11 @@ impl CraftApp {
     /// Stop the build's turn and send the waiting notes straight away ("Send now"). A build that
     /// is already paused sends the notes it kept.
     pub fn send_now(&mut self) {
-        if !self.running()
-            && let Some(left) = self.open_run().map(RebuildRun::take_notes).filter(|l| !l.is_empty())
-        {
-            return self.send_left(left);
+        if !self.running() {
+            let left = self.kept_notes();
+            if !left.is_empty() {
+                return self.send_left(left, None);
+            }
         }
         self.stop_build(true);
     }
@@ -294,14 +303,27 @@ impl CraftApp {
         }
     }
 
-    /// Start a run with notes the builder never read (`left`), as the message.
-    fn send_left(&mut self, left: Vec<Note>) {
-        let join = |part: fn(&Note) -> &str| left.iter().map(part).collect::<Vec<_>>().join("\n\n");
-        let (message, shown) = (join(|n| &n.text), join(|n| &n.shown));
-        let pictures: Vec<PathBuf> = left.iter().flat_map(|n| n.pictures.clone()).collect();
-        if matches!(self.state.feed.last(), Some(FeedItem::Paused)) {
+    /// The notes a stopped build kept, taken: from its run, or from the disk when the app was
+    /// closed and opened again meanwhile (the run's files are all that is left of them).
+    fn kept_notes(&self) -> Vec<Note> {
+        match (self.open_run(), &self.workspace) {
+            (Some(run), _) => run.take_notes(),
+            (None, Some(ws)) => RebuildRun::take_left_notes(ws),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Start a run on the open project with notes the builder never read (`left`) as the message,
+    /// followed by what the person sent with them (`own`: message, as shown, pictures).
+    fn send_left(&mut self, left: Vec<Note>, own: Option<(String, String, Vec<PathBuf>)>) {
+        if let Some(ws) = &self.workspace {
+            // These are being sent: none can be taken back now.
+            self.drafts.retain(|_, d| d.root != ws.root);
+        }
+        if !left.is_empty() && matches!(self.state.feed.last(), Some(FeedItem::Paused)) {
             self.state.feed.pop();
         }
+        let (message, shown, pictures) = join_notes(&left, own);
         self.state.feed.push(FeedItem::User(UserItem::new(shown.clone(), pictures.clone())));
         self.resume(Some(message), Some(shown), pictures);
     }
@@ -360,8 +382,10 @@ impl CraftApp {
                 RunEvent::Finished { paused, .. } => {
                     self.asking.remove(root);
                     // The run Pause was pressed for has ended, whatever starts next.
-                    self.pausing.remove(root);
-                    if !self.sending_now.remove(root) && *paused {
+                    let pause_pressed = self.pausing.remove(root);
+                    // Pause keeps the notes however the run ended in the stop window; only
+                    // "Send now" sends them.
+                    if !self.sending_now.remove(root) && (*paused || pause_pressed) {
                         kept.push(root.clone());
                     }
                     clock.saved_again(root, false);
@@ -403,12 +427,10 @@ impl CraftApp {
                     let _ = ws.reload();
                 }
                 if !left.is_empty() {
-                    self.send_left(left);
+                    self.send_left(left, None);
                 }
             } else if !left.is_empty() {
-                let join = |part: fn(&Note) -> &str| left.iter().map(part).collect::<Vec<_>>().join("\n\n");
-                let (message, shown) = (join(|n| &n.text), join(|n| &n.shown));
-                let pictures: Vec<PathBuf> = left.iter().flat_map(|n| n.pictures.clone()).collect();
+                let (message, shown, pictures) = join_notes(&left, None);
                 // Another project's notes start its next run in the background.
                 let Ok(ws) = Workspace::open(&root) else { continue };
                 let Some(backend) = self.builder_backend(ws.manifest.builder.as_deref()) else { continue };
@@ -1812,6 +1834,18 @@ fn check_card(app: &mut CraftApp, ui: &mut Ui, ctx: &egui::Context, ws: &Workspa
     });
 }
 
+/// Notes joined into one message (as the builder reads it, as the feed shows it, and their
+/// pictures), then what the person sent with them.
+fn join_notes(left: &[Note], own: Option<(String, String, Vec<PathBuf>)>) -> (String, String, Vec<PathBuf>) {
+    let (own_message, own_shown, own_pictures) = match own {
+        Some((message, shown, pictures)) => (Some(message), Some(shown), pictures),
+        None => (None, None, Vec::new()),
+    };
+    let join = |part: fn(&Note) -> &str, own: Option<String>| left.iter().map(part).map(String::from).chain(own).collect::<Vec<_>>().join("\n\n");
+    let pictures = left.iter().flat_map(|n| n.pictures.clone()).chain(own_pictures).collect();
+    (join(|n| &n.text, own_message), join(|n| &n.shown, own_shown), pictures)
+}
+
 /// Notes waiting for the builder's next step: each can be taken back, or all sent now.
 fn waiting_notes(app: &mut CraftApp, ui: &mut Ui, waiting: &[Note], t: &Tokens) {
     let running = app.running();
@@ -1825,7 +1859,8 @@ fn waiting_notes(app: &mut CraftApp, ui: &mut Ui, waiting: &[Note], t: &Tokens) 
                 }
                 // Said once, under the last note.
                 if i + 1 == waiting.len() {
-                    if widgets::link(ui, "Send now").on_hover_text(tr("Stops the current step and sends your notes straight away.")).clicked() {
+                    let hover = if running { tr("Stops the current step and sends your notes straight away.") } else { tr("Sends your notes straight away.") };
+                    if widgets::link(ui, "Send now").on_hover_text(hover).clicked() {
                         app.send_now();
                     }
                     let line = if !running {
@@ -2230,14 +2265,9 @@ impl CraftApp {
                 self.drafts.insert(id, Draft { root: ws.root.clone(), text, attachments });
             }
             _ => {
-                // Notes a paused build kept go first, in this message.
-                let left = self.open_run().map(RebuildRun::take_notes).unwrap_or_default();
-                let part = |l: &[Note], f: fn(&Note) -> &str, own: String| l.iter().map(f).map(String::from).chain([own]).collect::<Vec<_>>().join("\n\n");
-                let (message, shown) = (part(&left, |n| &n.text, message), part(&left, |n| &n.shown, shown));
-                let files: Vec<PathBuf> = left.iter().flat_map(|n| n.pictures.clone()).chain(files).collect();
-                self.drafts.retain(|_, d| d.root != ws.root);
-                self.state.feed.push(FeedItem::User(UserItem::new(shown.clone(), files.clone())));
-                self.resume(Some(message), Some(shown), files);
+                // Notes a stopped build kept go first, in this message.
+                let left = self.kept_notes();
+                self.send_left(left, Some((message, shown, files)));
             }
         }
     }

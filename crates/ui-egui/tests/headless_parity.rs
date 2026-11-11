@@ -63,7 +63,7 @@ const ACTIONS: &[Action] = &[
     a("send_message",        "send the project's prompt box (a follow-up)",    Cli("rebuild <target> <request> --continue-in")),
     a("answer_request",      "answer a question or approval card",             Tool(&["project_inbox_answer"])),
     a("pause",               "stop the running build",                         Tool(&["rebuild_stop"])),
-    a("send_now",            "stop the turn and send the waiting notes now",   Tool(&["rebuild_stop"])),
+    a("send_now",            "stop the turn, then send the waiting notes (app only: the tool just stops)", Tool(&["rebuild_stop"])),
     a("unsend",              "take back a note the builder hasn't read yet",   Tool(&["rebuild_note_withdraw"])),
     a("continue_build",      "carry on a build that stopped part-way",         Cli("rebuild <target> <request> --continue-in --resume")),
     a("open_preview",        "open the built website in the browser",          Tool(&["project_preview"])),
