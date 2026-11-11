@@ -263,15 +263,47 @@ impl CraftApp {
         self.start_run_with(ws, opts);
     }
 
+    /// Stop the build where it is. Notes waiting for the builder stay waiting: they go with the
+    /// next thing sent, or when the build carries on.
     pub fn pause(&mut self) {
+        self.stop_build(false);
+    }
+
+    /// Stop the build's turn and send the waiting notes straight away ("Send now"). A build that
+    /// is already paused sends the notes it kept.
+    pub fn send_now(&mut self) {
+        if !self.running()
+            && let Some(left) = self.open_run().map(RebuildRun::take_notes).filter(|l| !l.is_empty())
+        {
+            return self.send_left(left);
+        }
+        self.stop_build(true);
+    }
+
+    fn stop_build(&mut self, send_notes: bool) {
         let Some(root) = self.workspace.as_ref().map(|w| w.root.clone()) else { return };
         match self.runs.stop(&root) {
             Stopped::Unqueued => apply(&mut self.state.feed, &RunEvent::Finished { ok: false, message: "Paused.".into(), paused: true }),
             Stopped::Stopping => {
+                if send_notes {
+                    self.sending_now.insert(root.clone());
+                }
                 self.pausing.insert(root);
             }
             Stopped::Nothing => {}
         }
+    }
+
+    /// Start a run with notes the builder never read (`left`), as the message.
+    fn send_left(&mut self, left: Vec<Note>) {
+        let join = |part: fn(&Note) -> &str| left.iter().map(part).collect::<Vec<_>>().join("\n\n");
+        let (message, shown) = (join(|n| &n.text), join(|n| &n.shown));
+        let pictures: Vec<PathBuf> = left.iter().flat_map(|n| n.pictures.clone()).collect();
+        if matches!(self.state.feed.last(), Some(FeedItem::Paused)) {
+            self.state.feed.pop();
+        }
+        self.state.feed.push(FeedItem::User(UserItem::new(shown.clone(), pictures.clone())));
+        self.resume(Some(message), Some(shown), pictures);
     }
 
     /// Answer a question or approval card. `shown` is what the feed says was answered.
@@ -309,6 +341,8 @@ impl CraftApp {
         }
         let open = self.workspace.as_ref().map(|w| w.root.clone());
         let mut finished = Vec::new();
+        // Runs that ended paused, and weren't stopped by "Send now": their notes stay waiting.
+        let mut kept = Vec::new();
         for (root, e) in &events {
             if open.as_ref() == Some(root) {
                 apply(&mut self.state.feed, e);
@@ -323,8 +357,13 @@ impl CraftApp {
             }
             let clock = self.usage.entry(root.clone()).or_default();
             match e {
-                RunEvent::Finished { .. } => {
+                RunEvent::Finished { paused, .. } => {
                     self.asking.remove(root);
+                    // The run Pause was pressed for has ended, whatever starts next.
+                    self.pausing.remove(root);
+                    if !self.sending_now.remove(root) && *paused {
+                        kept.push(root.clone());
+                    }
                     clock.saved_again(root, false);
                     finished.push(root.clone());
                 }
@@ -345,25 +384,31 @@ impl CraftApp {
         }
         self.refresh_projects();
         for root in finished {
+            if kept.contains(&root) {
+                // Paused with Pause: its waiting notes stay (and can be taken back) until the
+                // person sends something or continues.
+                if open.as_ref() == Some(&root)
+                    && let Some(ws) = self.workspace.as_mut()
+                {
+                    let _ = ws.reload();
+                }
+                continue;
+            }
             // Every note of a finished run was read or goes next: none can be taken back now.
             self.drafts.retain(|_, d| d.root != root);
             // Notes the builder didn't get to (it finished, or "Send now" stopped it) go next.
             let left = self.runs.get(&root).map(RebuildRun::take_notes).unwrap_or_default();
-            let join = |part: fn(&Note) -> &str| left.iter().map(part).collect::<Vec<_>>().join("\n\n");
-            let (message, shown) = (join(|n| &n.text), join(|n| &n.shown));
-            let pictures: Vec<PathBuf> = left.iter().flat_map(|n| n.pictures.clone()).collect();
             if open.as_ref() == Some(&root) {
                 if let Some(ws) = self.workspace.as_mut() {
                     let _ = ws.reload();
                 }
                 if !left.is_empty() {
-                    if matches!(self.state.feed.last(), Some(FeedItem::Paused)) {
-                        self.state.feed.pop();
-                    }
-                    self.state.feed.push(FeedItem::User(UserItem::new(shown.clone(), pictures.clone())));
-                    self.resume(Some(message), Some(shown), pictures);
+                    self.send_left(left);
                 }
             } else if !left.is_empty() {
+                let join = |part: fn(&Note) -> &str| left.iter().map(part).collect::<Vec<_>>().join("\n\n");
+                let (message, shown) = (join(|n| &n.text), join(|n| &n.shown));
+                let pictures: Vec<PathBuf> = left.iter().flat_map(|n| n.pictures.clone()).collect();
                 // Another project's notes start its next run in the background.
                 let Ok(ws) = Workspace::open(&root) else { continue };
                 let Some(backend) = self.builder_backend(ws.manifest.builder.as_deref()) else { continue };
@@ -905,7 +950,8 @@ pub fn show(app: &mut CraftApp, ui: &mut Ui) {
             .frame(egui::Frame::new().fill(t.canvas).inner_margin(Margin::same(20)))
             .show(ui, |ui| egui::ScrollArea::vertical().show(ui, |ui| side(app, ui, &ws)));
     }
-    let waiting = app.open_run().filter(|r| r.is_running()).map(RebuildRun::waiting).unwrap_or_default();
+    // Also after a Pause: the notes it kept are still waiting.
+    let waiting = app.open_run().map(RebuildRun::waiting).unwrap_or_default();
     egui::CentralPanel::default().frame(egui::Frame::new().fill(t.canvas).inner_margin(chat::PANE_MARGIN)).show(ui, |ui| {
         let width = ui.available_width();
         let max_w = width.min(720.0);
@@ -1768,6 +1814,7 @@ fn check_card(app: &mut CraftApp, ui: &mut Ui, ctx: &egui::Context, ws: &Workspa
 
 /// Notes waiting for the builder's next step: each can be taken back, or all sent now.
 fn waiting_notes(app: &mut CraftApp, ui: &mut Ui, waiting: &[Note], t: &Tokens) {
+    let running = app.running();
     let mut take_back = None;
     for (i, note) in waiting.iter().enumerate() {
         ui.push_id(("waiting-note", note.id), |ui| {
@@ -1779,9 +1826,11 @@ fn waiting_notes(app: &mut CraftApp, ui: &mut Ui, waiting: &[Note], t: &Tokens) 
                 // Said once, under the last note.
                 if i + 1 == waiting.len() {
                     if widgets::link(ui, "Send now").on_hover_text(tr("Stops the current step and sends your notes straight away.")).clicked() {
-                        app.pause();
+                        app.send_now();
                     }
-                    let line = if waiting.len() == 1 {
+                    let line = if !running {
+                        tr("Waiting: sent with your next message, or when you continue.")
+                    } else if waiting.len() == 1 {
                         tr("Waiting: the builder reads it at its next step. Up arrow to edit.")
                     } else {
                         tr("Waiting: the builder reads these at its next step. Up arrow to edit the last.")
@@ -2181,6 +2230,12 @@ impl CraftApp {
                 self.drafts.insert(id, Draft { root: ws.root.clone(), text, attachments });
             }
             _ => {
+                // Notes a paused build kept go first, in this message.
+                let left = self.open_run().map(RebuildRun::take_notes).unwrap_or_default();
+                let part = |l: &[Note], f: fn(&Note) -> &str, own: String| l.iter().map(f).map(String::from).chain([own]).collect::<Vec<_>>().join("\n\n");
+                let (message, shown) = (part(&left, |n| &n.text, message), part(&left, |n| &n.shown, shown));
+                let files: Vec<PathBuf> = left.iter().flat_map(|n| n.pictures.clone()).chain(files).collect();
+                self.drafts.retain(|_, d| d.root != ws.root);
                 self.state.feed.push(FeedItem::User(UserItem::new(shown.clone(), files.clone())));
                 self.resume(Some(message), Some(shown), files);
             }

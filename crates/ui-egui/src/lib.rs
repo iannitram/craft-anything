@@ -575,6 +575,9 @@ pub struct CraftApp {
     pub asking: std::collections::HashSet<PathBuf>,
     /// Projects whose Pause was pressed and whose build hasn't stopped yet (#551).
     pub pausing: std::collections::HashSet<PathBuf>,
+    /// Projects stopped by "Send now": their waiting notes go as soon as the build stops. A build
+    /// stopped by Pause keeps its notes waiting instead.
+    pub sending_now: std::collections::HashSet<PathBuf>,
     /// A build asked something since the last frame: the taskbar flashes if the window is behind.
     attention: bool,
     /// Jobs whose result goes into the conversation (a first look, an answer without an AI):
@@ -664,6 +667,7 @@ impl CraftApp {
             chat_jobs: Vec::new(),
             asking: Default::default(),
             pausing: Default::default(),
+            sending_now: Default::default(),
             pending_consent: Default::default(),
             next_consent: 1,
             attention: false,
