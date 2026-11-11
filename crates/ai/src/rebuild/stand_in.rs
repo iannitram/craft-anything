@@ -9,6 +9,8 @@ struct Handle {
     root: PathBuf,
     /// Started to carry on where the last run stopped (`RunOptions::continuing`).
     continuing: bool,
+    /// The message the run was started with.
+    message: Option<String>,
     running: Arc<AtomicBool>,
     tx: Sender<RunEvent>,
     feed: Arc<Mutex<feed::FeedLog>>,
@@ -50,6 +52,7 @@ impl StandIns {
             all.lock().unwrap_or_else(PoisonError::into_inner).push(Handle {
                 root: ws.root.clone(),
                 continuing: opts.continuing,
+                message: opts.message.clone(),
                 running: running.clone(),
                 tx,
                 feed: feed.clone(),
@@ -81,6 +84,11 @@ impl StandIns {
         self.started.lock().unwrap_or_else(PoisonError::into_inner).iter().filter(|h| h.continuing).map(|h| h.root.clone()).collect()
     }
 
+    /// The message each run was started with, in order (`None`: a run without one).
+    pub fn messages(&self) -> Vec<Option<String>> {
+        self.started.lock().unwrap_or_else(PoisonError::into_inner).iter().map(|h| h.message.clone()).collect()
+    }
+
     /// The project's latest run reports `e` (kept in its feed too). A `Finished` ends it.
     /// False when no run was started for it.
     pub fn send(&self, root: &Path, e: RunEvent) -> bool {
@@ -92,6 +100,15 @@ impl StandIns {
         if done {
             h.running.store(false, Ordering::SeqCst);
         }
+        true
+    }
+
+    /// The project's latest run stops working without telling yet (its `Finished` is still on
+    /// its way, as when a run emits it just before it is marked as not running).
+    pub fn stop_quietly(&self, root: &Path) -> bool {
+        let all = self.started.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(h) = all.iter().rev().find(|h| h.root == root) else { return false };
+        h.running.store(false, Ordering::SeqCst);
         true
     }
 
