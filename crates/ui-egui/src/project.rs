@@ -264,7 +264,7 @@ impl CraftApp {
         // Notes the pause kept go straight through, as the message that starts the run again.
         let left = self.kept_notes();
         if !left.is_empty() {
-            return self.send_left(left, None);
+            return self.send_left(left, None, true);
         }
         let ws = Workspace::open(&ws.root).unwrap_or(ws);
         let opts = RunOptions { continuing: true, ..self.run_options(Some(backend), None, None, Vec::new()) };
@@ -281,9 +281,12 @@ impl CraftApp {
     /// is already paused sends the notes it kept.
     pub fn send_now(&mut self) {
         if !self.running() {
+            if !self.builder_ready() {
+                return;
+            }
             let left = self.kept_notes();
             if !left.is_empty() {
-                return self.send_left(left, None);
+                return self.send_left(left, None, false);
             }
         }
         self.stop_build(true);
@@ -291,6 +294,10 @@ impl CraftApp {
 
     fn stop_build(&mut self, send_notes: bool) {
         let Some(root) = self.workspace.as_ref().map(|w| w.root.clone()) else { return };
+        // The last word counts: Pause after Send now keeps the notes.
+        if !send_notes {
+            self.sending_now.remove(&root);
+        }
         match self.runs.stop(&root) {
             Stopped::Unqueued => apply(&mut self.state.feed, &RunEvent::Finished { ok: false, message: "Paused.".into(), paused: true }),
             Stopped::Stopping => {
@@ -301,6 +308,18 @@ impl CraftApp {
             }
             Stopped::Nothing => {}
         }
+    }
+
+    /// A builder is set up to start a run on the open project; when none is, the way to set one
+    /// up is shown. Checked before any waiting note is taken, so a run that can't start loses
+    /// nothing.
+    fn builder_ready(&mut self) -> bool {
+        let Some(ws) = self.workspace.clone() else { return false };
+        if self.builder_backend(ws.manifest.builder.as_deref()).is_some() {
+            return true;
+        }
+        self.need_builder(false);
+        false
     }
 
     /// The notes a stopped build kept, taken: from its run, or from the disk when the app was
@@ -315,7 +334,8 @@ impl CraftApp {
 
     /// Start a run on the open project with notes the builder never read (`left`) as the message,
     /// followed by what the person sent with them (`own`: message, as shown, pictures).
-    fn send_left(&mut self, left: Vec<Note>, own: Option<(String, String, Vec<PathBuf>)>) {
+    /// `continuing`: the run carries on the builder's own conversation (Continue).
+    fn send_left(&mut self, left: Vec<Note>, own: Option<(String, String, Vec<PathBuf>)>, continuing: bool) {
         if let Some(ws) = &self.workspace {
             // These are being sent: none can be taken back now.
             self.drafts.retain(|_, d| d.root != ws.root);
@@ -325,7 +345,7 @@ impl CraftApp {
         }
         let (message, shown, pictures) = join_notes(&left, own);
         self.state.feed.push(FeedItem::User(UserItem::new(shown.clone(), pictures.clone())));
-        self.resume(Some(message), Some(shown), pictures);
+        self.resume_as(Some(message), Some(shown), pictures, continuing);
     }
 
     /// Answer a question or approval card. `shown` is what the feed says was answered.
@@ -427,7 +447,7 @@ impl CraftApp {
                     let _ = ws.reload();
                 }
                 if !left.is_empty() {
-                    self.send_left(left, None);
+                    self.send_left(left, None, false);
                 }
             } else if !left.is_empty() {
                 let (message, shown, pictures) = join_notes(&left, None);
@@ -1912,10 +1932,9 @@ fn composer(app: &mut CraftApp, ui: &mut Ui, width: f32, t: &Tokens, last_waitin
         ui.add_space(4.0);
     }
     // Pause was pressed and the build hasn't stopped yet: the button says so until it does.
+    // The flag is cleared where the run's end is read (`poll_run`), not here: a frame may be drawn
+    // after the run stopped working and before its end was read.
     let open_root = app.workspace.as_ref().map(|w| w.root.clone());
-    if !running && let Some(root) = &open_root {
-        app.pausing.remove(root);
-    }
     let pausing = running && open_root.is_some_and(|r| app.pausing.contains(&r));
     let hint = if app.state.just_ask {
         tr("Ask about the build, e.g. \"where are the latest files?\" Nothing changes and no build starts.")
@@ -2265,9 +2284,16 @@ impl CraftApp {
                 self.drafts.insert(id, Draft { root: ws.root.clone(), text, attachments });
             }
             _ => {
+                // Before any waiting note is taken: with no builder nothing is lost, and what was
+                // typed comes back.
+                if !self.builder_ready() {
+                    self.state.project_input = text;
+                    self.state.project_attachments = attachments;
+                    return;
+                }
                 // Notes a stopped build kept go first, in this message.
                 let left = self.kept_notes();
-                self.send_left(left, Some((message, shown, files)));
+                self.send_left(left, Some((message, shown, files)), false);
             }
         }
     }
@@ -2287,10 +2313,17 @@ impl CraftApp {
     /// Start another run on the open project: with a message (already shown in the app's feed;
     /// `shown` puts it in the saved one, with `pictures`), or none to try again.
     fn resume(&mut self, message: Option<String>, shown: Option<String>, pictures: Vec<PathBuf>) {
+        self.resume_as(message, shown, pictures, false);
+    }
+
+    /// `continuing`: the builder carries on its own conversation, with the message as what it is
+    /// told (Continue with notes), not a new request.
+    fn resume_as(&mut self, message: Option<String>, shown: Option<String>, pictures: Vec<PathBuf>, continuing: bool) {
         let Some(ws) = self.workspace.clone() else { return };
         let ws = Workspace::open(&ws.root).unwrap_or(ws);
         let Some(backend) = self.builder_backend(ws.manifest.builder.as_deref()) else { return self.need_builder(false) };
-        self.start_run(ws, Some(backend), message, shown, pictures);
+        let opts = RunOptions { continuing, ..self.run_options(Some(backend), message, shown, pictures) };
+        self.start_run_with(ws, opts);
     }
 }
 

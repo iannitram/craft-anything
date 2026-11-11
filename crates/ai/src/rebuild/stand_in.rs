@@ -103,6 +103,15 @@ impl StandIns {
         true
     }
 
+    /// The project's latest run stops working without telling yet (its `Finished` is still on
+    /// its way, as when a run emits it just before it is marked as not running).
+    pub fn stop_quietly(&self, root: &Path) -> bool {
+        let all = self.started.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(h) = all.iter().rev().find(|h| h.root == root) else { return false };
+        h.running.store(false, Ordering::SeqCst);
+        true
+    }
+
     /// The project's latest run finishes well ("Done.").
     pub fn finish(&self, root: &Path) -> bool {
         self.send(root, RunEvent::Finished { ok: true, message: "Done.".into(), paused: false })
