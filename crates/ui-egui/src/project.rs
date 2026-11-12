@@ -308,7 +308,11 @@ impl CraftApp {
             self.sending_now.remove(&root);
         }
         match self.runs.stop(&root) {
-            Stopped::Unqueued => apply(&mut self.state.feed, &RunEvent::Finished { ok: false, message: "Paused.".into(), paused: true }),
+            Stopped::Unqueued => {
+                apply(&mut self.state.feed, &RunEvent::Finished { ok: false, message: "Paused.".into(), paused: true });
+                // A loop's queued run taken off the queue never reports its end: the loop ends here.
+                self.end_loop(&root, craft_anything_ai::rebuild::build_loop::LoopEnd::Stopped);
+            }
             Stopped::Stopping => {
                 if send_notes {
                     self.sending_now.insert(root.clone());
@@ -444,7 +448,9 @@ impl CraftApp {
                     self.asking.remove(root);
                     // The run Pause was pressed for has ended, whatever starts next.
                     let pause_pressed = self.pausing.remove(root);
-                    if self.loops.contains_key(root) {
+                    // "Send now" stops a loop's run only to send the notes: the run they start
+                    // carries the loop on.
+                    if self.loops.contains_key(root) && !self.sending_now.contains(root) {
                         loop_runs.push((root.clone(), *ok, *paused || pause_pressed));
                     }
                     // Pause keeps the notes however the run ended in the stop window; only

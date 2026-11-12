@@ -9,6 +9,7 @@ use craft_anything_ai::rebuild::{self, RebuildRun, RunEvent, RunOptions};
 use craft_anything_ai::{AgentEvent, AiHub, BackendKind};
 use craft_anything_engine::inbox::{Answer, Request, RequestKind, now_ms};
 use craft_anything_engine::workspace::Workspace;
+use craft_anything_engine::workspace::build_loop::LoopSettings;
 use craft_anything_evidence::ToolError;
 use std::io::{BufRead as _, Write as _};
 use std::path::PathBuf;
@@ -167,6 +168,9 @@ fn run(cli: &Cli, a: &RebuildArgs) -> Result<bool, ToolError> {
     let shown = message.clone();
     let good_enough = engine.session().settings.build.good_enough;
     let root = ws.root.clone();
+    // `--loop` runs the saved loop even when it's saved switched off; switching it off while it
+    // runs (in the app, or a builder's `project_loop_set`) ends it, as in the app.
+    let saved_off_at_start = ws.manifest.build_loop.as_ref().is_some_and(|s| !s.on);
     let mut build_loop = a.build_loop.then(|| {
         let settings = ws.manifest.build_loop.clone().unwrap_or_default();
         let state = LoopState::start(settings, now_ms(), loop_rules::fingerprint(&ws));
@@ -195,14 +199,34 @@ fn run(cli: &Cli, a: &RebuildArgs) -> Result<bool, ToolError> {
             (Some(why), _, _) => Some(why),
             (None, _, true) => Some(LoopEnd::Stopped),
             (None, false, _) => Some(LoopEnd::Failed),
-            (None, true, false) => match state.after_run(now_ms(), loop_rules::fingerprint(&Workspace::open(&root)?)) {
-                Next::Run => None,
-                Next::End(why) => Some(why),
-            },
+            (None, true, false) => {
+                let ws = Workspace::open(&root)?;
+                // Settings changed while the run worked count from the next run, as in the app.
+                let switched_off = match ws.manifest.build_loop.clone() {
+                    Some(s) if !s.on && !saved_off_at_start => Some(LoopEnd::Stopped),
+                    Some(s) => {
+                        state.update(LoopSettings { on: true, ..s }, now_ms());
+                        None
+                    }
+                    None => None,
+                };
+                switched_off.or_else(|| {
+                    let unreported = state.tokens_unreported;
+                    let next = state.after_run(now_ms(), loop_rules::fingerprint(&ws));
+                    if !unreported && state.tokens_unreported && state.settings.tokens.on {
+                        eprintln!("This builder doesn't say how many tokens it uses, so the token budget can't end the loop.");
+                    }
+                    match next {
+                        Next::Run => None,
+                        Next::End(why) => Some(why),
+                    }
+                })
+            }
         };
         if let Some(why) = end {
             println!("{}", why.words());
-            return Ok(ok);
+            // A limit ending the loop is how it's meant to end, even when it stopped a run.
+            return Ok(ok || matches!(why, LoopEnd::Runs(_) | LoopEnd::Tokens(_) | LoopEnd::Time(_) | LoopEnd::Stalled(_)));
         }
         println!("Build loop: {}. A fresh builder carries on.", state.status());
         let opts = RunOptions {

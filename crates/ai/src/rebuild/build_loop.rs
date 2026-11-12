@@ -71,8 +71,13 @@ pub struct LoopState {
     pub tokens: u64,
     /// Runs in a row that changed nothing.
     pub stalls: u32,
+    /// A run ended well without its builder reporting any tokens: the token budget can't end
+    /// this loop (some builders don't say what they use).
+    pub tokens_unreported: bool,
     /// The project's progress fingerprint when the current run started.
     progress: u64,
+    /// Tokens counted when the current run started.
+    run_tokens_from: u64,
 }
 
 impl LoopState {
@@ -80,7 +85,7 @@ impl LoopState {
     pub fn start(settings: LoopSettings, now_ms: u64, fingerprint: u64) -> LoopState {
         let settings = settings.sanitized();
         let deadline_ms = settings.stop_at.get().and_then(|at| deadline_ms(now_ms, at));
-        LoopState { settings, deadline_ms, runs: 0, tokens: 0, stalls: 0, progress: fingerprint }
+        LoopState { settings, deadline_ms, runs: 0, tokens: 0, stalls: 0, tokens_unreported: false, progress: fingerprint, run_tokens_from: 0 }
     }
 
     /// The project's fingerprint as the loop starts (worked out on a worker after `start`).
@@ -118,6 +123,10 @@ impl LoopState {
     /// next run.
     pub fn after_run(&mut self, now_ms: u64, fingerprint: u64) -> Next {
         self.runs = self.runs.saturating_add(1);
+        if self.tokens == self.run_tokens_from {
+            self.tokens_unreported = true;
+        }
+        self.run_tokens_from = self.tokens;
         self.stalls = if fingerprint == self.progress { self.stalls.saturating_add(1) } else { 0 };
         self.progress = fingerprint;
         if let Some(end) = self.over_limit_now(now_ms) {
@@ -197,8 +206,13 @@ pub fn fingerprint(ws: &Workspace) -> u64 {
     let mut seen = 0usize;
     hash_tree(&inv.join("unknowns"), &mut h, &mut seen, &|_| false, true);
     let app = ws.app_dir();
+    // Build output and the checks' captures change on every run whatever the builder did.
+    let checks = ws.checks_dir();
     let skip = |p: &Path| {
-        p.file_name().and_then(|n| n.to_str()).is_some_and(|n| matches!(n, "target" | "node_modules" | "dist" | "build" | ".git")) || ws.is_own_record(p)
+        p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+            matches!(n, "target" | "node_modules" | "dist" | "build" | ".git" | "__pycache__" | ".venv" | ".next" | ".godot" | ".gradle" | ".dart_tool")
+        }) || p.starts_with(&checks)
+            || ws.is_own_record(p)
     };
     let mut seen = 0usize;
     hash_tree(&app, &mut h, &mut seen, &skip, false);
@@ -319,5 +333,31 @@ mod tests {
         std::fs::create_dir_all(ws.app_dir()).unwrap();
         std::fs::write(ws.app_dir().join("main.js"), "x").unwrap();
         assert_ne!(fingerprint(&ws), b, "so is a new file in the app");
+    }
+
+    #[test]
+    fn a_builder_that_reports_no_tokens_is_noticed() {
+        let mut s = LoopState::start(settings(), 0, 0);
+        s.add_tokens(500);
+        assert_eq!(s.after_run(0, 1), Next::Run);
+        assert!(!s.tokens_unreported);
+        assert_eq!(s.after_run(0, 2), Next::Run);
+        assert!(s.tokens_unreported, "a run that ended well with no tokens counted");
+    }
+
+    #[test]
+    fn checks_in_an_app_edited_in_place_are_not_progress() {
+        let d = tempfile::tempdir().unwrap();
+        let mine = d.path().join("mine");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(mine.join("index.html"), "x").unwrap();
+        let ws = Workspace::create_at(&mine, "Mine", "Add tabs", TargetRef::None, Some(craft_anything_engine::workspace::ExistingFiles::Edit)).unwrap();
+        assert_eq!(ws.app_dir(), ws.root, "the app is the project folder");
+        let a = fingerprint(&ws);
+        std::fs::create_dir_all(ws.checks_dir().join("round-1")).unwrap();
+        std::fs::write(ws.checks_dir().join("round-1").join("shot.png"), "png").unwrap();
+        assert_eq!(fingerprint(&ws), a, "a check's capture isn't the builder's progress");
+        std::fs::write(mine.join("index.html"), "xy").unwrap();
+        assert_ne!(fingerprint(&ws), a, "a changed app file is");
     }
 }

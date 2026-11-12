@@ -1058,7 +1058,7 @@ impl CraftApp {
                     let _ = ws.reload();
                 }
             }
-            ("project_loop_set", Err(e)) => self.toast(format!("{} {}", tr("The build loop's settings weren't saved."), e.for_people()), true),
+            ("project_loop_set", Err(e)) => self.toast(crate::i18n::trf("The build loop's settings weren't saved. {why}", &[("why", &e.for_people())]), true),
             ("project_questions_set", Ok(v)) => {
                 // What was saved (the person's other changes on disk come along).
                 if let Some(ws) = self.workspace.as_mut().filter(|w| v["project"].as_str().is_some_and(|p| w.root == std::path::Path::new(p))) {

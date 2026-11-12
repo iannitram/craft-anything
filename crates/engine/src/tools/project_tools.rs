@@ -433,7 +433,9 @@ pub struct LoopParams {
 fn project_loop_set(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
     let p: LoopParams = parse_params(params)?;
     let mut ws = open(&p.project)?;
-    let before = ws.manifest.build_loop.clone().unwrap_or_default();
+    // Settings edited by hand are read as the loop would use them, so a read changes nothing
+    // and switching off stays possible for an agent.
+    let before = ws.manifest.build_loop.clone().unwrap_or_default().sanitized();
     let mut next = before.clone();
     if let Some(on) = p.on {
         next.on = on;

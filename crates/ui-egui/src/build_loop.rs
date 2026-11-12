@@ -6,7 +6,7 @@ use crate::i18n::{tr, trf};
 use crate::theme::{self, Tokens};
 use crate::{CraftApp, Done, widgets};
 use craft_anything_ai::rebuild::Stopped;
-use craft_anything_ai::rebuild::build_loop::{self as rules, LoopEnd, LoopState, Next};
+use craft_anything_ai::rebuild::build_loop::{self as rules, LoopEnd, LoopState, Next, tokens_words};
 use craft_anything_engine::feed::{self, FeedItem, UserItem};
 use craft_anything_engine::inbox::now_ms;
 use craft_anything_engine::workspace::build_loop::{ClockTime, DEFAULT_LOOP_PROMPT, LoopSettings, MAX_ROUNDS_PER_RUN};
@@ -74,7 +74,12 @@ impl CraftApp {
             // Switched off while the run worked: it ends here.
             _ => return self.end_loop(&root, LoopEnd::Stopped),
         }
-        match l.state.after_run(now, fingerprint) {
+        let unreported = l.state.tokens_unreported;
+        let next = l.state.after_run(now, fingerprint);
+        if !unreported && l.state.tokens_unreported && l.state.settings.tokens.on {
+            self.toast(tr("This builder doesn't say how many tokens it uses, so the token budget can't end the loop."), true);
+        }
+        match next {
             Next::Run => self.next_loop_run(&root),
             Next::End(why) => self.end_loop(&root, why),
         }
@@ -113,7 +118,7 @@ impl CraftApp {
     }
 
     fn loop_failed(&mut self, root: &Path, why: &str) {
-        self.toast(format!("{} {why}", tr("The build loop couldn't start its next run.")), true);
+        self.toast(trf("The build loop couldn't start its next run. {why}", &[("why", why)]), true);
         self.end_loop(root, LoopEnd::Failed);
     }
 
@@ -122,7 +127,7 @@ impl CraftApp {
         if self.loops.remove(root).is_none() {
             return;
         }
-        let words = why.words();
+        let words = end_words(why);
         self.toast(words.clone(), matches!(why, LoopEnd::Failed));
         if why == LoopEnd::Stopped {
             return;
@@ -229,7 +234,7 @@ pub(crate) fn popover(app: &mut CraftApp, button: &egui::Response) {
     };
     let mut draft = draft;
     let busy = app.runs.is_running(&root) || app.runs.position(&root).is_some();
-    let status = app.loops.get(&root).map(|l| if l.between { tr("Starting the next run…") } else { l.state.status() });
+    let status = app.loops.get(&root).map(|l| if l.between { tr("Starting the next run…") } else { status_words(&l.state) });
     let was_on = draft.settings.on;
     let mut editing = false;
     let mut start_now = false;
@@ -244,7 +249,7 @@ pub(crate) fn popover(app: &mut CraftApp, button: &egui::Response) {
         ui.add(egui::Label::new(RichText::new(note).size(theme::SMALL).color(t.text_faint)).wrap());
         ui.add_space(6.0);
         ui.label(RichText::new(tr("Each run is told")).size(theme::SMALL).color(t.text_dim));
-        let prompt = ui.add(egui::TextEdit::multiline(&mut s.prompt).hint_text(tr(DEFAULT_LOOP_PROMPT)).desired_rows(4).desired_width(f32::INFINITY));
+        let prompt = ui.add(egui::TextEdit::multiline(&mut s.prompt).hint_text(DEFAULT_LOOP_PROMPT).desired_rows(4).desired_width(f32::INFINITY));
         editing |= prompt.has_focus();
         if !s.prompt.trim().is_empty() && widgets::link(ui, "Use the built-in prompt").clicked() {
             s.prompt.clear();
@@ -368,6 +373,38 @@ fn parse_hour(s: &str) -> Option<f64> {
         None => return None,
     };
     Some(f64::from(h))
+}
+
+/// Why a loop ended, in the person's language (`LoopEnd::words` is the CLI's).
+fn end_words(why: LoopEnd) -> String {
+    match why {
+        LoopEnd::Runs(1) => tr("The loop ended: it did its 1 run."),
+        LoopEnd::Runs(n) => trf("The loop ended: it did its {n} runs.", &[("n", &n.to_string())]),
+        LoopEnd::Tokens(n) => trf("The loop ended: its runs used {n} tokens, its budget.", &[("n", &tokens_words(n))]),
+        LoopEnd::Time(t) => trf("The loop ended: it's {time}, its stop time.", &[("time", &t.words())]),
+        LoopEnd::Stalled(1) => tr("The loop ended: a run changed nothing."),
+        LoopEnd::Stalled(n) => trf("The loop ended: {n} runs in a row changed nothing.", &[("n", &n.to_string())]),
+        LoopEnd::Failed => tr("The loop ended: a run didn't finish well."),
+        LoopEnd::Stopped => tr("The loop stopped."),
+    }
+}
+
+/// Where a loop is, for the popover: "Run 3 of 10 · 1.2M tokens · until 7am".
+fn status_words(state: &LoopState) -> String {
+    let run = state.runs.saturating_add(1).to_string();
+    let mut parts = vec![match state.settings.runs.get() {
+        Some(n) => trf("Run {run} of {n}", &[("run", &run), ("n", &n.to_string())]),
+        None => trf("Run {run}", &[("run", &run)]),
+    }];
+    parts.push(match state.settings.tokens.get() {
+        _ if state.tokens_unreported => tr("tokens not reported by this builder"),
+        Some(b) => trf("{used} of {budget} tokens", &[("used", &tokens_words(state.tokens)), ("budget", &tokens_words(b))]),
+        None => trf("{used} tokens", &[("used", &tokens_words(state.tokens))]),
+    });
+    if let Some(at) = state.settings.stop_at.get().filter(|_| state.deadline_ms.is_some()) {
+        parts.push(trf("until {time}", &[("time", &at.words())]));
+    }
+    parts.join(" · ")
 }
 
 #[cfg(test)]
