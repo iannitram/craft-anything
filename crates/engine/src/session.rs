@@ -137,15 +137,6 @@ impl Session {
         targets
     }
 
-    /// Like [`Self::shared_targets`], but only the targets at or inside `root`: one project's own
-    /// original. The session is shared by every project open in the app, so a builder handed
-    /// all of them could start with another project's program selected.
-    pub fn shared_targets_within(&self, root: &std::path::Path) -> Vec<crate::target::TargetContext> {
-        let mut targets = self.shared_targets();
-        targets.retain(|target| target.path.starts_with(root));
-        targets
-    }
-
     /// Restore a bounded target handoff before serving MCP. Validate every target before
     /// changing the session; the last entry is the desktop's active target.
     pub fn restore_targets(&mut self, targets: &[crate::target::TargetContext]) -> Result<(), ToolError> {

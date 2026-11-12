@@ -2,6 +2,7 @@
 //! Ghidra's analysis in Deep mode) and write the notes the builder reads.
 
 use super::*;
+use craft_anything_engine::target::TargetContext;
 
 /// An Electron program is the Chromium and Node runtime, and analysing that takes hours: the app's
 /// own logic is the JavaScript in `resources/app.asar` beside it, which the study maps (#947).
@@ -19,6 +20,25 @@ pub(super) fn program_to_reopen(target: &TargetRef, kind: &dyn TargetKind, deep:
     let TargetRef::Local { path } = target else { return None };
     let program = locate(path, kind.studies_folder()).0;
     program.exists().then_some(program)
+}
+
+/// The targets open in the session that belong to this project (#13): the session serves every
+/// project open in the app, so a builder handed all of them could start with another project's
+/// program selected. A project opens its picked path or, in Deep mode, the program [`locate`]
+/// finds for it, which may sit outside that path (beside a launcher script, or in a game folder
+/// above an inner folder the person picked). Order is kept, so the active one stays last.
+/// `all` is read from the session first: locating reads the disk, which never happens under its lock.
+pub(super) fn own_targets(all: Vec<TargetContext>, target: &TargetRef, studies_folder: bool, deep: bool) -> Vec<TargetContext> {
+    let TargetRef::Local { path } = target else { return Vec::new() };
+    if all.is_empty() {
+        return all;
+    }
+    let mut roots = vec![path.clone()];
+    // Clean room never looks inside the original, so nothing is located there.
+    if deep {
+        roots.push(locate(path, studies_folder).0);
+    }
+    all.into_iter().filter(|t| roots.iter().any(|root| t.path.starts_with(root))).collect()
 }
 
 /// The builder's tools run on another computer: a coding agent over SSH starts its own tool
@@ -40,11 +60,8 @@ impl Worker {
         }
         // Nothing to look for when this project's program is open already (another project's
         // doesn't count: the builder is handed only its own).
-        let already_open = match &ws.manifest.target {
-            TargetRef::Local { path } => !self.engine.session().shared_targets_within(path).is_empty(),
-            _ => false,
-        };
-        if already_open {
+        let open = self.engine.session().shared_targets();
+        if !own_targets(open, &ws.manifest.target, kind.studies_folder(), deep).is_empty() {
             return Ok(());
         }
         let Some(program) = program_to_reopen(&ws.manifest.target, kind, deep) else { return Ok(()) };

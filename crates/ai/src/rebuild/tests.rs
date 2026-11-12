@@ -2466,7 +2466,7 @@ mod picking_up_a_build {
 
     /// #13: one session serves every open project; a builder is handed only its own project's
     /// program, even when another project's program is the session's active one. Removing the
-    /// `shared_targets_within` filter in `agent_spec` fails this test.
+    /// `study::own_targets` filter in `agent_spec` fails this test.
     #[test]
     fn a_builder_is_handed_only_its_own_projects_target() {
         let d = tempfile::tempdir().unwrap();
@@ -2498,6 +2498,47 @@ mod picking_up_a_build {
         assert_eq!(handed, vec![program_a.clone()], "only project A's program, selected (last)");
         let none = w.agent_spec(&ws_none, &entry, &RunOptions::default()).unwrap();
         assert!(none.targets.is_empty(), "a project with no target is handed none");
+    }
+
+    /// #13 (review): a project whose target is a launcher script opens the program the script
+    /// starts, a file beside it rather than under the picked path. That program is still its own:
+    /// the builder is handed it, selected, and not the other project's.
+    #[test]
+    fn a_builder_is_handed_the_program_its_launcher_starts() {
+        let d = tempfile::tempdir().unwrap();
+        let game = d.path().join("game");
+        std::fs::create_dir_all(&game).unwrap();
+        let program = game.join("Game");
+        std::fs::write(&program, b"the game's program").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let launcher = game.join("run.sh");
+        std::fs::write(&launcher, "#!/bin/sh\nexec ./Game\n").unwrap();
+        let other = d.path().join("other.bin");
+        std::fs::write(&other, b"another project's program").unwrap();
+        let mut ws = Workspace::create(d.path(), "Launcher", "Copy this app", TargetRef::Local { path: launcher.clone() }).unwrap();
+        let entry = crate::BackendEntry {
+            config: crate::BackendConfig {
+                name: "Claude".into(),
+                kind: BackendKind::AgentCli,
+                model: "claude-code".into(),
+                base_url: None,
+                ssh_host: None,
+                enabled: true,
+            },
+            options: crate::BackendOptions::default(),
+        };
+        let mut w = check_worker(&ws, true);
+        let app = kind("app");
+        // A later run reopens the located program, then another project's program becomes active.
+        w.reopen_target(&mut ws, app.as_ref(), false, true).unwrap();
+        w.call("core_target_open", serde_json::json!({"path": other.display().to_string()})).unwrap();
+        assert_eq!(w.engine.session().shared_targets().len(), 2, "both programs are open in the session");
+        // Its program counts as open: a further run doesn't open it again.
+        w.reopen_target(&mut ws, app.as_ref(), false, true).unwrap();
+        assert_eq!(w.engine.session().shared_targets().len(), 2, "the launcher's program isn't opened twice");
+        let spec = w.agent_spec(&ws, &entry, &RunOptions::default()).unwrap();
+        let handed: Vec<PathBuf> = spec.targets.iter().map(|t| t.path.clone()).collect();
+        assert_eq!(handed, vec![program.clone()], "the program the launcher starts, selected (last)");
     }
 
     /// Add the local API backend the transcript tests start.

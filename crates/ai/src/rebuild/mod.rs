@@ -778,14 +778,13 @@ impl Worker {
     /// is held by the first until the statement ends, and the second then waits forever. A saved
     /// Claude `--resume` that would continue the project's Deep session in Clean room is refused.
     fn agent_spec(&self, ws: &Workspace, entry: &crate::BackendEntry, opts: &RunOptions) -> Result<CliSpec, ToolError> {
-        let (deep, config_dir, targets) = {
+        let (deep, config_dir, open) = {
             let session = self.engine.session();
-            let own = match &ws.manifest.target {
-                TargetRef::Local { path } => session.shared_targets_within(path),
-                _ => Vec::new(),
-            };
-            (!session.clean_room(), session.config_dir(), own)
+            (!session.clean_room(), session.config_dir(), session.shared_targets())
         };
+        // Only this project's own program (#13), found the way the run found it.
+        let studies_folder = opts.kinds.detect(&ws.manifest.request, &ws.manifest.target, &ws.manifest.stack).is_some_and(|k| k.studies_folder());
+        let targets = study::own_targets(open, &ws.manifest.target, studies_folder, deep);
         // A fresh builder resumes nothing, so it can't carry a Deep session into Clean room.
         if !opts.fresh_session {
             refuse_deep_session_reuse_in_clean_room(ws, &entry.config.model, &entry.options.args, deep)?;
