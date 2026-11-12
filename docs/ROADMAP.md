@@ -1481,6 +1481,16 @@ Gaps found while using the app for real projects.
 - [ ] A queued run's request lives in its `RunOptions` and the in-memory queue; an app exit before
       it starts loses it. Let the run side keep it (a queue record or a left note) across a restart
 
+- [x] A build loop: a project can keep building run after run, each run a fresh builder (a clean
+      context) that carries on from the investigation's handoff with the person's prompt, until a
+      limit they chose ends it: number of runs, a token budget, a stop time on their clock, or runs
+      in a row that changed nothing. The settings button beside Send holds the loop checkbox, the
+      prompt, rounds per run and the limits, saved per project (`project_loop_set`; an agent may only
+      switch the loop off); `rebuild --loop` runs it headless. A limit reached mid-run stops that run
+      — branch feature/build-loop
+- [ ] Live check: a loop of three short runs on a real project ends on its runs limit, and a stop
+      time a few minutes away stops a run in progress
+
 ### R2.10 Pinned builds
 Owner: maintainers · Status: in progress
 Keep a build that works at hand: pin it, and open it from the sidebar whatever the builder does

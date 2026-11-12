@@ -41,6 +41,9 @@ pub struct PromptBox<'a> {
     /// Earlier prompts, oldest first, for Up and Down; read only when a key asks for them.
     pub history: Option<&'a dyn Fn() -> Vec<Prompt>>,
     pub font_size: f32,
+    /// A settings button to the right of Send (the build loop's), lit while what it sets is on;
+    /// `None` hides it. The caller opens its popover from [`PromptOut::settings`].
+    pub settings: Option<bool>,
 }
 
 /// Going through earlier prompts: how far back (0 is what was being typed), and what the box
@@ -129,6 +132,8 @@ pub struct PromptOut {
     /// Up or Down moved to another prompt: the pictures the box should hold now (the draft's own
     /// when it came back to what was being typed). `None` leaves them as they are.
     pub restore: Option<Vec<PathBuf>>,
+    /// The settings button, for the caller's popover to open from.
+    pub settings: Option<egui::Response>,
 }
 
 pub fn show(ui: &mut Ui, text: &mut String, attachments: &[PathBuf], b: PromptBox) -> PromptOut {
@@ -264,6 +269,10 @@ pub fn show(ui: &mut Ui, text: &mut String, attachments: &[PathBuf], b: PromptBo
                 }
                 ui.label(RichText::new(tr("Enter to send · Shift+Enter for a new line")).size(theme::CAPTION).color(t.text_faint));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Right to left: the settings button goes to the right of Send.
+                    if let Some(lit) = b.settings {
+                        out.settings = Some(icons::button(ui, "settings", 32.0, lit, "Build loop settings"));
+                    }
                     if b.send {
                         let ready = !text.trim().is_empty();
                         if send_button(ui, ready).clicked() && ready {
@@ -455,6 +464,7 @@ mod tests {
                     recall: false,
                     history: None,
                     font_size: 14.0,
+                    settings: None,
                 };
                 show(ui, text, &files, b);
             },
@@ -512,6 +522,7 @@ mod tests {
                         recall: false,
                         history: None,
                         font_size: 14.0,
+                        settings: None,
                     };
                     if show(ui, &mut String::new(), &[], b).stop {
                         self.stops += 1;

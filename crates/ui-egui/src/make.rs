@@ -241,6 +241,7 @@ fn request_box(app: &mut CraftApp, ui: &mut Ui, hint: &str, attach: Option<&str>
             recall: false,
             history: None,
             font_size: theme::LEAD,
+            settings: None,
         },
     );
     if let Some(i) = out.remove {

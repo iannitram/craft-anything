@@ -28,6 +28,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
 
+pub mod build_loop;
 pub mod progress;
 
 pub const MANIFEST: &str = "craft.json";
@@ -474,6 +475,11 @@ pub struct Manifest {
     /// saves, which costs at most one more reminder, so the format version stays.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub decompiled: bool,
+    /// The person's build loop for this project (runs that follow each other until a limit ends
+    /// them); none: never set. The person's, like the budget. An older build drops it when it
+    /// saves, which only turns the loop off, so the format version stays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_loop: Option<build_loop::LoopSettings>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -516,6 +522,7 @@ impl Manifest {
             awaiting_check: false,
             not_working_checks: 0,
             decompiled: false,
+            build_loop: None,
         }
     }
 
@@ -540,6 +547,7 @@ impl Manifest {
         self.questions = other.questions;
         self.approvals.clone_from(&other.approvals);
         self.name.clone_from(&other.name);
+        self.build_loop.clone_from(&other.build_loop);
     }
 }
 

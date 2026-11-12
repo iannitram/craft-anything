@@ -160,7 +160,7 @@ impl CraftApp {
         }
     }
 
-    fn run_options(&self, backend: Option<String>, message: Option<String>, shown: Option<String>, pictures: Vec<PathBuf>) -> RunOptions {
+    pub(crate) fn run_options(&self, backend: Option<String>, message: Option<String>, shown: Option<String>, pictures: Vec<PathBuf>) -> RunOptions {
         let build = &self.settings.build;
         // Each event repaints the window, so a build needs no timer to show its progress.
         let wake = self.jobs.repaint_ctx().cloned().map_or_else(Default::default, |ctx| rebuild::Wake::new(move || ctx.request_repaint()));
@@ -180,7 +180,7 @@ impl CraftApp {
     }
 
     /// Start a run, or queue it when as many as Settings allows are already building.
-    fn launch(&mut self, ws: Workspace, opts: RunOptions) -> Result<Started, craft_anything_engine::evidence::ToolError> {
+    pub(crate) fn launch(&mut self, ws: Workspace, opts: RunOptions) -> Result<Started, craft_anything_engine::evidence::ToolError> {
         self.runs.set_limit(self.settings.build.parallel);
         self.runs.start(&self.hub, ws, opts)
     }
@@ -192,7 +192,11 @@ impl CraftApp {
         self.start_run_with(ws, opts);
     }
 
-    fn start_run_with(&mut self, ws: Workspace, opts: RunOptions) {
+    fn start_run_with(&mut self, ws: Workspace, mut opts: RunOptions) {
+        // A build loop's runs each get its rounds.
+        if let Some(l) = self.loops.get(&ws.root) {
+            opts.max_rounds = l.state.settings.rounds();
+        }
         // Neither belongs to a run that was replaced before its end was seen.
         self.pausing.remove(&ws.root);
         self.sending_now.remove(&ws.root);
@@ -304,7 +308,11 @@ impl CraftApp {
             self.sending_now.remove(&root);
         }
         match self.runs.stop(&root) {
-            Stopped::Unqueued => apply(&mut self.state.feed, &RunEvent::Finished { ok: false, message: "Paused.".into(), paused: true }),
+            Stopped::Unqueued => {
+                apply(&mut self.state.feed, &RunEvent::Finished { ok: false, message: "Paused.".into(), paused: true });
+                // A loop's queued run taken off the queue never reports its end: the loop ends here.
+                self.end_loop(&root, craft_anything_ai::rebuild::build_loop::LoopEnd::Stopped);
+            }
             Stopped::Stopping => {
                 if send_notes {
                     self.sending_now.insert(root.clone());
@@ -326,7 +334,7 @@ impl CraftApp {
 
     /// The AI that builds `ws` now ([`Self::builder_wanted`]). A pick that differs from the project's
     /// saved one is saved with the project, so the next run, the CLI and the feed agree with it.
-    fn builder_now(&mut self, ws: &mut Workspace, first: Option<&str>) -> Option<String> {
+    pub(crate) fn builder_now(&mut self, ws: &mut Workspace, first: Option<&str>) -> Option<String> {
         let wanted = self.builder_wanted(ws, first);
         let name = self.builder_backend(wanted.as_deref())?;
         if wanted.as_deref() == Some(name.as_str()) && ws.manifest.builder.as_deref() != Some(name.as_str()) {
@@ -409,6 +417,8 @@ impl CraftApp {
     /// Every run's events: the open project's go to the screen (each run keeps its own
     /// project's feed). Queued runs start as others finish.
     pub fn poll_run(&mut self) {
+        // A loop's stop time or token budget can end its run between events.
+        self.check_loops();
         self.runs.set_limit(self.settings.build.parallel);
         let events = self.runs.poll(&self.hub);
         if events.is_empty() {
@@ -418,6 +428,10 @@ impl CraftApp {
         let mut finished = Vec::new();
         // Runs that ended paused, and weren't stopped by "Send now": their notes stay waiting.
         let mut kept = Vec::new();
+        // Runs of a build loop that ended: (project, ended well, paused).
+        let mut loop_runs = Vec::new();
+        // Loop runs "Send now" stopped: the notes' run carries the loop on, when one starts.
+        let mut sent_now_loops = Vec::new();
         for (root, e) in &events {
             if open.as_ref() == Some(root) {
                 apply(&mut self.state.feed, e);
@@ -432,10 +446,16 @@ impl CraftApp {
             }
             let clock = self.usage.entry(root.clone()).or_default();
             match e {
-                RunEvent::Finished { paused, .. } => {
+                RunEvent::Finished { ok, paused, .. } => {
                     self.asking.remove(root);
                     // The run Pause was pressed for has ended, whatever starts next.
                     let pause_pressed = self.pausing.remove(root);
+                    // "Send now" stops a loop's run only to send the notes: the run they start
+                    // carries the loop on.
+                    if self.loops.contains_key(root) {
+                        let ended = (root.clone(), *ok, *paused || pause_pressed);
+                        if self.sending_now.contains(root) { sent_now_loops.push(ended) } else { loop_runs.push(ended) }
+                    }
                     // Pause keeps the notes however the run ended in the stop window; only
                     // "Send now" sends them.
                     if !self.sending_now.remove(root) && (*paused || pause_pressed) {
@@ -447,6 +467,9 @@ impl CraftApp {
                 RunEvent::Agent(AgentEvent::TurnDone { input_tokens, output_tokens, cost_usd, cost_is_estimate, .. }) => {
                     clock.saved_again(root, true);
                     self.session_usage.add_turn(*input_tokens, *output_tokens, *cost_usd, *cost_is_estimate);
+                    if let Some(l) = self.loops.get_mut(root) {
+                        l.state.add_tokens(input_tokens.saturating_add(*output_tokens));
+                    }
                 }
                 // A run's first event is its first step: the clock starts there.
                 _ if !clock.working() => clock.saved_again(root, true),
@@ -455,6 +478,9 @@ impl CraftApp {
         }
         if events.iter().any(|(root, _)| open.as_ref() == Some(root)) {
             self.refresh_side_panel();
+        }
+        for (root, ok, paused) in loop_runs {
+            self.loop_run_ended(&root, ok, paused);
         }
         if finished.is_empty() {
             return;
@@ -491,6 +517,14 @@ impl CraftApp {
                 if let Err(e) = self.launch(ws, opts) {
                     self.toast(e.message, true);
                 }
+            }
+        }
+        // No notes were left to send (taken back, or read just before the stop), or a limit
+        // already came: the stopped run ends the loop's count as any other run would.
+        for (root, ok, paused) in sent_now_loops {
+            let limit_came = self.loops.get(&root).is_some_and(|l| l.ending.is_some());
+            if limit_came || (!self.runs.is_running(&root) && self.runs.position(&root).is_none()) {
+                self.loop_run_ended(&root, ok, paused);
             }
         }
     }
@@ -1968,7 +2002,7 @@ fn composer(app: &mut CraftApp, ui: &mut Ui, width: f32, t: &Tokens, last_waitin
     // The flag is cleared where the run's end is read (`poll_run`), not here: a frame may be drawn
     // after the run stopped working and before its end was read.
     let open_root = app.workspace.as_ref().map(|w| w.root.clone());
-    let pausing = running && open_root.is_some_and(|r| app.pausing.contains(&r));
+    let pausing = running && open_root.as_ref().is_some_and(|r| app.pausing.contains(r));
     let hint = if app.state.just_ask {
         tr("Ask about the build, e.g. \"where are the latest files?\" Nothing changes and no build starts.")
     } else if running {
@@ -1980,6 +2014,9 @@ fn composer(app: &mut CraftApp, ui: &mut Ui, width: f32, t: &Tokens, last_waitin
             .map(|ws| outcome_words(&app.kinds, ws).change_hint)
             .unwrap_or("Ask for a change, e.g. \"make the header blue\" or \"add a contact form\""))
     };
+    // The build loop's button is lit while the loop is switched on or a loop is going.
+    let loop_lit = open_root.as_ref().is_some_and(|r| app.loops.contains_key(r))
+        || app.workspace.as_ref().is_some_and(|w| w.manifest.build_loop.as_ref().is_some_and(|l| l.on));
     ui.allocate_ui(Vec2::new(width, 0.0), |ui| {
         let previews = app.previews(ui.ctx(), &app.state.project_attachments.clone());
         let history = || {
@@ -2003,6 +2040,7 @@ fn composer(app: &mut CraftApp, ui: &mut Ui, width: f32, t: &Tokens, last_waitin
                 recall: last_waiting.is_some(),
                 history: Some(&history),
                 font_size: theme::BODY,
+                settings: Some(loop_lit),
             },
         );
         // Like the x on a note: the last one waiting comes back into the box to be edited.
@@ -2026,6 +2064,9 @@ fn composer(app: &mut CraftApp, ui: &mut Ui, width: f32, t: &Tokens, last_waitin
         }
         if out.stop {
             app.pause();
+        }
+        if let Some(button) = &out.settings {
+            crate::build_loop::popover(app, button);
         }
         if out.send {
             // /approvals changes a choice and sends nothing.
@@ -2324,9 +2365,12 @@ impl CraftApp {
                     self.state.project_attachments = attachments;
                     return;
                 }
+                // With the build loop switched on, the run this starts is the loop's first.
+                self.begin_loop_if_on(&ws.root, ws.manifest.build_loop.as_ref());
                 // Notes a stopped build kept go first, in this message.
                 let left = self.kept_notes();
                 self.send_left(left, Some((message, shown, files)), false);
+                self.drop_loop_unless_running(&ws.root);
             }
         }
     }

@@ -200,6 +200,7 @@ mod tests {
                     recall: false,
                     history: None,
                     font_size: 14.0,
+                    settings: None,
                 };
                 if crate::prompt_box::show(ui, text, &[], b).paste {
                     *pastes += 1;

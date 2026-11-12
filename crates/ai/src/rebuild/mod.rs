@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 
 pub mod activity;
 mod brief;
+pub mod build_loop;
 mod check;
 pub mod feed;
 mod kept_check;
@@ -152,6 +153,10 @@ pub struct RunOptions {
     /// A free session is read first; this is the fallback while it is held; the saved settings
     /// are the last fallback.
     pub clean_room: Option<bool>,
+    /// Start a new builder with a clean context (the next run of a build loop): no saved agent
+    /// session is resumed and an API conversation starts over. What the builder knows comes from
+    /// the project: its investigation memory (the last builder's handoff), the capture and app/.
+    pub fresh_session: bool,
 }
 
 impl Default for RunOptions {
@@ -169,6 +174,7 @@ impl Default for RunOptions {
             adapters: Default::default(),
             wake: Wake::default(),
             clean_room: None,
+            fresh_session: false,
         }
     }
 }
@@ -291,7 +297,7 @@ impl RebuildRun {
                 // the run which conversation it continues. Only a genuinely fresh build (no
                 // continuation and no study kept in this mode) starts a new one.
                 let continuing = opts.continuing || (opts.message.is_none() && kept_without_api.in_mode);
-                if !continuing && !ws.capture_dir().exists() {
+                if opts.fresh_session || (!continuing && !ws.capture_dir().exists()) {
                     let _ = std::fs::remove_file(ws.transcript_path());
                 }
                 Some(hub.start_builder(&entry, opts.beginner, Some(ws.transcript_path()), run_deep)?)
@@ -776,7 +782,10 @@ impl Worker {
             let session = self.engine.session();
             (!session.clean_room(), session.config_dir(), session.shared_targets())
         };
-        refuse_deep_session_reuse_in_clean_room(ws, &entry.config.model, &entry.options.args, deep)?;
+        // A fresh builder resumes nothing, so it can't carry a Deep session into Clean room.
+        if !opts.fresh_session {
+            refuse_deep_session_reuse_in_clean_room(ws, &entry.config.model, &entry.options.args, deep)?;
+        }
         Ok(CliSpec {
             builder: Some(Builder { investigation: Some(ws.investigation_dir()), inbox: ws.inbox_dir() }),
             deep,
@@ -784,7 +793,7 @@ impl Worker {
             logs: Some(crate::failure_log::dir_in(&config_dir)),
             key: crate::cli_agents::acp::key_for(&self.keys, &entry.config.model, &entry.config.name, entry.config.kind),
             cost_totals: Some(crate::cli_agents::claude_cost::path_in(&config_dir)),
-            resume: ws.manifest.agent_session_for_mode(&entry.config.model, deep).map(str::to_string),
+            resume: (!opts.fresh_session).then(|| ws.manifest.agent_session_for_mode(&entry.config.model, deep)).flatten().map(str::to_string),
             preamble: Some(
                 "You work inside Craft Anything for a person who doesn't code. The message below is your task.
 

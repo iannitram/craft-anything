@@ -6,6 +6,22 @@ workspace clippy, layers, fmt and the secret scan of all history were clean. Chi
 
 ## What works, and how it was checked
 
+### Build loop (R2.9)
+
+A project's build loop (the settings button beside Send, or `rebuild --loop`) starts each next
+run with a fresh builder told the person's prompt, and ends on the limits they switched on: runs,
+tokens, a stop time, or stalled runs (a fingerprint of the investigation's state, unknowns and
+the build's files that didn't change). Unit tests cover the settings' defaults and ranges, times
+read as "7am" and "4:45pm", each limit ending the loop, a stop time already past rolling to the
+next day, an agent being refused anything but switching the loop off, a builder that reports
+no tokens being noticed (its token budget can't end the loop; the app and CLI say so), and a
+check's captures in an app edited in place not counting as progress. Pausing a queued loop run
+ends the loop; "Send now" carries it on with the notes' run. The CLI reads the saved settings
+again after each run, as the app does, and exits 0 when a limit ends the loop. Tried live with
+`rebuild --loop` (Antigravity, 2 runs of 1 round on a static page): run 2 started with a fresh
+builder after run 1 ended well, tokens were counted (257k after run 1), and the loop ended with
+"The loop ended: it did its 2 runs." The app's popover has not been tried live yet.
+
 ### Local Codex discovery and sign-in (R2.2)
 
 macOS Dock launches can find an executable Codex CLI bundled with ChatGPT.app or
