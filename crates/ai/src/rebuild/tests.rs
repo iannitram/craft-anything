@@ -4227,8 +4227,10 @@ fn a_fresh_loop_run_resumes_no_session_the_last_run_kept() {
     let bin = tempfile::tempdir().unwrap();
     let program = bin.path().join("claude");
     let log = bin.path().join("calls.log");
+    // One line per call: the arguments carry the prompt, which has line breaks of its own.
     let script = r#"#!/bin/sh
-echo "$*" >> '__LOG__'
+printf '%s\n' "$*" | tr '\n' ' ' >> '__LOG__'
+echo >> '__LOG__'
 n=$(wc -l < '__LOG__' | tr -d ' ')
 cat >/dev/null
 printf '%s\n' "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"loop-$n\"}"
