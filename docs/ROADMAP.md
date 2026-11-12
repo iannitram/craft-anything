@@ -1472,6 +1472,12 @@ Gaps found while using the app for real projects.
       keeps its live feed when it is already building, and keeps a queued request with its options;
       a start that fails keeps the Make draft
       — claimed: AlexJoaquimPereira, branch bugfix/r2.9-attached-builder-feed
+- [x] A project builds with the AI the person picked now, not only the one it was first built with:
+      Continue, a message to a paused build, notes that start another project's run, and a request
+      made in Make for a folder that already holds a project all use the AI picked for that start
+      (Make's, when one is picked there), else the one picked at the top, else the project's saved
+      builder; the pick is saved with the project. Found when a project kept building with DeepSeek
+      Harness while Antigravity was picked everywhere — branch fix/build-uses-chosen-ai
 - [ ] A queued run's request lives in its `RunOptions` and the in-memory queue; an app exit before
       it starts loses it. Let the run side keep it (a queue record or a left note) across a restart
 
