@@ -111,12 +111,13 @@ impl CraftApp {
             rebuild::project::apply_new_project_fields(&mut ws, attached, engine.map(|b| b.stack()), budget, generate, draft.ai.as_deref())
                 .map_err(|e| e.for_people())?;
             let pictures = ws.add_references(&draft.pictures).err().map(|e| e.message);
-            Ok(Done::Created { ws: Box::new(ws), request, backend, pictures, attached })
+            Ok(Done::Created { ws: Box::new(ws), request, backend, ai: draft.ai, pictures, attached })
         }));
     }
 
     /// A project from [`Self::start_make`] was made: its build starts.
-    pub(crate) fn created(&mut self, ws: Workspace, request: String, backend: String, pictures: Option<String>, attached: bool) {
+    /// `ai`: the AI picked in Make, if one was (`None`: Automatic).
+    pub(crate) fn created(&mut self, mut ws: Workspace, request: String, backend: String, ai: Option<String>, pictures: Option<String>, attached: bool) {
         if let Some(e) = pictures {
             self.toast(format!("{} {}", tr("Couldn't add the pictures:"), e), true);
         }
@@ -126,6 +127,14 @@ impl CraftApp {
         self.projects.insert(0, ws.clone());
         let root = ws.root.clone();
         let message = rebuild::project::attached_request(attached, &request);
+        // A folder that already held a project builds with the AI picked for it now (in Make, else
+        // at the top), and only then the one it saved; a new one uses the one Make was started with.
+        let backend = if attached {
+            let Some(now) = self.builder_now(&mut ws, ai.as_deref()) else { return self.need_builder(false) };
+            now
+        } else {
+            backend
+        };
         // A project already building keeps its live conversation; the request stays in Make for
         // the person to send later, because a second start can't run beside it.
         if self.runs.is_running(&root) || self.runs.position(&root).is_some() {
@@ -136,13 +145,6 @@ impl CraftApp {
             self.start_run(ws, Some(backend), message, None, Vec::new());
             return;
         }
-        // An attached project uses the builder it saved; a new one uses the one Make was started with.
-        let backend = if attached {
-            let Some(saved) = self.builder_backend(ws.manifest.builder.as_deref()) else { return self.need_builder(false) };
-            saved
-        } else {
-            backend
-        };
         if attached {
             // The project already has a conversation: keep it, and append the request. The run
             // records the request in the feed when it starts; the app only reads the feed.
@@ -260,13 +262,16 @@ impl CraftApp {
             return;
         }
         let Some(ws) = self.workspace.clone() else { return };
-        let Some(backend) = self.builder_backend(ws.manifest.builder.as_deref()) else { return self.need_builder(false) };
+        if !self.builder_ready() {
+            return;
+        }
         // Notes the pause kept go straight through, as the message that starts the run again.
         let left = self.kept_notes();
         if !left.is_empty() {
             return self.send_left(left, None, true);
         }
-        let ws = Workspace::open(&ws.root).unwrap_or(ws);
+        let mut ws = Workspace::open(&ws.root).unwrap_or(ws);
+        let Some(backend) = self.builder_now(&mut ws, None) else { return self.need_builder(false) };
         let opts = RunOptions { continuing: true, ..self.run_options(Some(backend), None, None, Vec::new()) };
         self.start_run_with(ws, opts);
     }
@@ -310,12 +315,40 @@ impl CraftApp {
         }
     }
 
+    /// The AI `ws` builds with when it starts again: `first` (one picked for this start) while it
+    /// can build, else the one picked at the top (the person's latest choice, and what the picker
+    /// shows), else the one the project saved.
+    fn builder_wanted(&self, ws: &Workspace, first: Option<&str>) -> Option<String> {
+        let choices = self.builder_choices();
+        let usable = |b: &&str| choices.iter().any(|c| c.name == *b);
+        first.filter(usable).or_else(|| self.state.backend.as_deref().filter(usable)).map(str::to_string).or_else(|| ws.manifest.builder.clone())
+    }
+
+    /// The AI that builds `ws` now ([`Self::builder_wanted`]). A pick that differs from the project's
+    /// saved one is saved with the project, so the next run, the CLI and the feed agree with it.
+    fn builder_now(&mut self, ws: &mut Workspace, first: Option<&str>) -> Option<String> {
+        let wanted = self.builder_wanted(ws, first);
+        let name = self.builder_backend(wanted.as_deref())?;
+        if wanted.as_deref() == Some(name.as_str()) && ws.manifest.builder.as_deref() != Some(name.as_str()) {
+            match ws.set_person(|m| m.builder = Some(name.clone())) {
+                Ok(()) => {
+                    if let Some(open) = self.workspace.as_mut().filter(|o| o.root == ws.root) {
+                        open.manifest.builder = Some(name.clone());
+                    }
+                }
+                Err(e) => self.toast(e.message, true),
+            }
+        }
+        Some(name)
+    }
+
     /// A builder is set up to start a run on the open project; when none is, the way to set one
     /// up is shown. Checked before any waiting note is taken, so a run that can't start loses
     /// nothing.
     fn builder_ready(&mut self) -> bool {
         let Some(ws) = self.workspace.clone() else { return false };
-        if self.builder_backend(ws.manifest.builder.as_deref()).is_some() {
+        let wanted = self.builder_wanted(&ws, None);
+        if self.builder_backend(wanted.as_deref()).is_some() {
             return true;
         }
         self.need_builder(false);
@@ -452,8 +485,8 @@ impl CraftApp {
             } else if !left.is_empty() {
                 let (message, shown, pictures) = join_notes(&left, None);
                 // Another project's notes start its next run in the background.
-                let Ok(ws) = Workspace::open(&root) else { continue };
-                let Some(backend) = self.builder_backend(ws.manifest.builder.as_deref()) else { continue };
+                let Ok(mut ws) = Workspace::open(&root) else { continue };
+                let Some(backend) = self.builder_now(&mut ws, None) else { continue };
                 let opts = self.run_options(Some(backend), Some(message), Some(shown), pictures);
                 if let Err(e) = self.launch(ws, opts) {
                     self.toast(e.message, true);
@@ -2320,8 +2353,8 @@ impl CraftApp {
     /// told (Continue with notes), not a new request.
     fn resume_as(&mut self, message: Option<String>, shown: Option<String>, pictures: Vec<PathBuf>, continuing: bool) {
         let Some(ws) = self.workspace.clone() else { return };
-        let ws = Workspace::open(&ws.root).unwrap_or(ws);
-        let Some(backend) = self.builder_backend(ws.manifest.builder.as_deref()) else { return self.need_builder(false) };
+        let mut ws = Workspace::open(&ws.root).unwrap_or(ws);
+        let Some(backend) = self.builder_now(&mut ws, None) else { return self.need_builder(false) };
         let opts = RunOptions { continuing, ..self.run_options(Some(backend), message, shown, pictures) };
         self.start_run_with(ws, opts);
     }
@@ -2674,7 +2707,7 @@ mod tests {
         let ws = Workspace::create(d.path(), "Notes", "A notes app", TargetRef::None).unwrap();
         let mut app = crate::demo::app(crate::demo::engine(craft_anything_engine::Mode::Beginner, true));
         assert!(app.projects.is_empty());
-        app.created(ws.clone(), "A notes app".into(), "test-backend".into(), None, false);
+        app.created(ws.clone(), "A notes app".into(), "test-backend".into(), None, None, false);
         assert!(!app.projects.is_empty(), "project is added to app.projects immediately");
         assert_eq!(app.projects[0].root, ws.root);
     }
@@ -2722,7 +2755,7 @@ mod tests {
         cfg.upsert(BackendEntry { config: local, options: Default::default() });
         app.hub.save_config(&cfg).unwrap();
         // "Off" isn't a backend: the attached project must use the builder it saved instead.
-        app.created(ws.clone(), "add a jump".into(), "Off".into(), None, true);
+        app.created(ws.clone(), "add a jump".into(), "Off".into(), None, None, true);
         assert!(app.state.feed.iter().any(|i| matches!(i, FeedItem::User(u) if u.text() == "earlier message")), "the saved feed is kept: {:?}", app.state.feed);
         assert!(app.state.feed.iter().any(|i| matches!(i, FeedItem::User(u) if u.text() == "add a jump")), "the new request is appended: {:?}", app.state.feed);
         let saved_feed = craft_anything_ai::rebuild::feed::load(&ws);
@@ -2738,6 +2771,41 @@ mod tests {
         assert!(saved.generate_assets, "the saved asset setting is kept");
         assert_eq!(saved.stack, "Godot", "the saved stack is kept");
         app.runs.stop_all();
+    }
+
+    /// A request typed in Make for a folder that already holds a project builds with the AI the
+    /// person picked (in Make, else at the top), not the one the project was first built with.
+    #[test]
+    fn an_attached_project_builds_with_the_ai_picked_now() {
+        use craft_anything_ai::{AiConfig, BackendConfig, BackendEntry, BackendKind};
+        let local = |name: &str| BackendConfig {
+            name: name.into(),
+            kind: BackendKind::OpenaiCompatible,
+            model: "qwen3:8b".into(),
+            // Nothing listens there: the run only has to start.
+            base_url: Some("http://127.0.0.1:0/v1".into()),
+            ssh_host: None,
+            enabled: true,
+        };
+        let start = |top: Option<&str>, make: Option<&str>| {
+            let d = tempfile::tempdir().unwrap();
+            let mut ws = Workspace::create(d.path(), "Notes", "A notes app", TargetRef::None).unwrap();
+            ws.set_person(|m| m.builder = Some("Saved".into())).unwrap();
+            let mut app = crate::demo::app(crate::demo::engine(craft_anything_engine::Mode::Beginner, true));
+            app.backends = vec![local("Saved"), local("Top"), local("Make")];
+            let mut cfg = AiConfig::default();
+            for b in &app.backends {
+                cfg.upsert(BackendEntry { config: b.clone(), options: Default::default() });
+            }
+            app.hub.save_config(&cfg).unwrap();
+            app.state.backend = top.map(str::to_string);
+            app.created(ws.clone(), "add a jump".into(), "Saved".into(), make.map(str::to_string), None, true);
+            app.runs.stop_all();
+            Workspace::open(&ws.root).unwrap().manifest.builder
+        };
+        assert_eq!(start(Some("Top"), None).as_deref(), Some("Top"), "the AI picked at the top builds, and the project keeps it");
+        assert_eq!(start(Some("Top"), Some("Make")).as_deref(), Some("Make"), "an AI picked in Make comes first");
+        assert_eq!(start(Some("Gone"), None).as_deref(), Some("Saved"), "a pick that can't build leaves the saved one");
     }
 }
 

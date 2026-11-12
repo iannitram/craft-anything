@@ -267,6 +267,8 @@ pub enum Done {
         ws: Box<craft_anything_engine::workspace::Workspace>,
         request: String,
         backend: String,
+        /// The AI picked in Make, if one was.
+        ai: Option<String>,
         /// Why the pictures couldn't be copied, if they couldn't.
         pictures: Option<String>,
         /// The folder already held a project: the request is its follow-up, not a new project's.
@@ -1544,7 +1546,7 @@ impl CraftApp {
             }
             Done::Facts(f) => self.facts_read(job, Some(f)),
             Done::PicturesAdded(added) => self.pictures_added(added),
-            Done::Created { ws, request, backend, pictures, attached } => self.created(*ws, request, backend, pictures, attached),
+            Done::Created { ws, request, backend, ai, pictures, attached } => self.created(*ws, request, backend, ai, pictures, attached),
             Done::Thumb { path, image } => self.thumb_ready(path, image),
             Done::Preview { path, image } => self.preview_ready(path, image),
             Done::Tool { tool, params, route, result } => self.tool_done(tool, params, route, result),
