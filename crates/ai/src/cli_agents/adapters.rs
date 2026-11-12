@@ -173,6 +173,11 @@ pub trait AgentAdapter: Send + Sync {
     fn resumes(&self) -> bool {
         false
     }
+    /// It will really continue the saved session with these backend options: the retry
+    /// text and the command line must agree, or a "carry on" reaches a fresh session.
+    fn resumes_with(&self, _options: &BackendOptions, _question: bool) -> bool {
+        self.resumes()
+    }
     /// It honours [`ArgsCx::question`]: it can be held to reading only, using a fresh session
     /// or leaving a resumed session unchanged. Questions go only to adapters that say so.
     fn answers_questions(&self) -> bool {
@@ -831,7 +836,7 @@ impl AgentAdapter for Codex {
     fn args(&self, cx: &ArgsCx) -> Vec<String> {
         // A question never resumes: Codex can't fork, so it would change the builder's session.
         // Backend args `exec resume` doesn't accept (`--sandbox`, `-C`…) start a fresh session.
-        let resume = cx.resume.filter(|_| !cx.question && codex_resume_accepts(&cx.options.args));
+        let resume = cx.resume.filter(|_| self.resumes_with(cx.options, cx.question));
         let mut v = vec!["exec".to_string()];
         if resume.is_some() {
             v.push("resume".into());
@@ -882,6 +887,11 @@ impl AgentAdapter for Codex {
     /// `codex exec resume` continues the thread whose id `parse` records.
     fn resumes(&self) -> bool {
         true
+    }
+
+    /// A question never resumes (Codex can't fork), nor do backend args `exec resume` refuses.
+    fn resumes_with(&self, options: &BackendOptions, question: bool) -> bool {
+        !question && codex_resume_accepts(&options.args)
     }
 
     /// A thread Codex doesn't have (the project came from another computer) is only on stderr.
@@ -974,9 +984,10 @@ impl AgentAdapter for Codex {
 const CODEX_NO_ROLLOUT: &str = "no rollout found for thread id";
 
 /// Whether `codex exec resume` takes every one of the backend's extra args (checked against
-/// codex-cli 0.167). Anything else, such as `--sandbox` or `-C`, would break the resume.
+/// codex-cli 0.167). Anything else, such as `--sandbox` or `-C`, would break the resume, and
+/// `--ephemeral` saves no thread to continue.
 fn codex_resume_accepts(args: &[String]) -> bool {
-    const FLAGS: &[&str] = &["--json", "--skip-git-repo-check", "--ephemeral", "--dangerously-bypass-approvals-and-sandbox"];
+    const FLAGS: &[&str] = &["--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"];
     const WITH_VALUE: &[&str] = &["-c", "--config", "-m", "--model", "-i", "--image", "--output-last-message"];
     let mut it = args.iter();
     while let Some(a) = it.next() {
