@@ -987,6 +987,7 @@ impl Worker {
         }
         let mut refinements = 0;
         let mut reminded = false;
+        let mut turns_sent = 0u32;
         // The builder finished and only the check didn't: the build is there to check.
         let mut only_check = carrying_on && !first && opts.message.is_none() && ws.manifest.awaiting_check;
         loop {
@@ -1006,6 +1007,14 @@ impl Worker {
                 };
                 self.step(ws, Step::Build, Status::Building, doing)?;
                 ws.manifest.awaiting_check = false;
+                // A coding agent with no session to continue (each turn is a new process) knows
+                // nothing of the turns before: later prompts carry the brief, as the first did.
+                if turns_sent > 0 && !api_loop && agent.session_id().is_none() {
+                    let image_model = image_model.as_deref();
+                    let cx = BriefCx { ws, deep, ghidra, editor: self.editor.as_deref(), assets: self.assets, image_model, sees_pictures };
+                    prompt = format!("{}\n\n{prompt}", brief(kind, &cx, opts.message.as_deref()));
+                }
+                turns_sent += 1;
                 let reply = self.turn(ws, agent.as_mut(), &prompt, deep, fresh.take());
                 // Kept even when the turn failed: the conversation is still worth carrying.
                 if let Some(a) = &keeper {
@@ -1070,7 +1079,7 @@ impl Worker {
                 }
                 if !reminded && needs_decompile_reminder(deep, &ws.manifest) {
                     reminded = true;
-                    prompt = DECOMPILE_FIRST.to_string();
+                    prompt = decompile_first(ws);
                     continue;
                 }
             }
