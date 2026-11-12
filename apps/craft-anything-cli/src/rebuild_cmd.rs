@@ -229,17 +229,16 @@ fn run(cli: &Cli, a: &RebuildArgs) -> Result<bool, ToolError> {
             return Ok(ok || matches!(why, LoopEnd::Runs(_) | LoopEnd::Tokens(_) | LoopEnd::Time(_) | LoopEnd::Stalled(_)));
         }
         println!("Build loop: {}. A fresh builder carries on.", state.status());
-        let opts = RunOptions {
+        let base = RunOptions {
             backend: a.backend.clone(),
             message: Some(state.settings.prompt().to_string()),
             shown: Some(format!("Build loop, run {}: a fresh builder carries on from the last one's handoff.", state.runs.saturating_add(1))),
-            fresh_session: true,
-            max_rounds: state.settings.rounds(),
             good_enough,
             beginner: !cli.json,
             clean_room: Some(engine.session().clean_room()),
             ..RunOptions::default()
         };
+        let opts = loop_rules::run_options(base, &state.settings);
         run = RebuildRun::start(&hub, Workspace::open(&root)?, opts)?;
     }
 }

@@ -92,7 +92,7 @@ impl CraftApp {
             return;
         }
         let Some(l) = self.loops.get(root) else { return };
-        let (prompt, rounds, run) = (l.state.settings.prompt().to_string(), l.state.settings.rounds(), l.state.runs.saturating_add(1));
+        let (prompt, settings, run) = (l.state.settings.prompt().to_string(), l.state.settings.clone(), l.state.runs.saturating_add(1));
         let open = self.workspace.as_ref().is_some_and(|w| w.root == root);
         let mut ws = match self.workspace.clone().filter(|_| open).map_or_else(|| Workspace::open(root), Ok) {
             Ok(ws) => ws,
@@ -103,9 +103,8 @@ impl CraftApp {
             return self.loop_failed(root, &tr("No AI is set up to build with."));
         };
         let shown = trf("Build loop, run {n}: a fresh builder carries on from the last one's handoff.", &[("n", &run.to_string())]);
-        let mut opts = self.run_options(Some(backend), Some(prompt), Some(shown.clone()), Vec::new());
-        opts.fresh_session = true;
-        opts.max_rounds = rounds;
+        let opts =
+            craft_anything_ai::rebuild::build_loop::run_options(self.run_options(Some(backend), Some(prompt), Some(shown.clone()), Vec::new()), &settings);
         if open {
             self.pausing.remove(root);
             self.sending_now.remove(root);
