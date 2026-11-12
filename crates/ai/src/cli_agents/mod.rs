@@ -348,6 +348,12 @@ pub enum Access {
 }
 
 /// argv (after the program) for one prompt.
+/// A retried turn says "carry on" only when it really continues the saved session; a fresh
+/// session needs the original message.
+fn turn_text<'a>(retry: bool, resumes: bool, resume: Option<&str>, text: &'a str) -> &'a str {
+    if retry && resumes && resume.is_some() { crate::failure::CONTINUE_TURN } else { text }
+}
+
 pub fn build_args(
     adapter: &dyn AgentAdapter,
     opts: &BackendOptions,
@@ -1004,7 +1010,8 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
         mcp.command = path;
     }
     let resume = session.lock().unwrap_or_else(PoisonError::into_inner).clone();
-    let text = if retry && adapter.resumes() && resume.is_some() { crate::failure::CONTINUE_TURN } else { text };
+    let resumes = adapter.resumes_with(&spec.options, spec.question);
+    let text = turn_text(retry, resumes, resume.as_deref(), text);
     let builder = spec.builder.is_some();
     // A question goes only to an agent that can be held to reading (a fallback adapter can't).
     if spec.question && !adapter.answers_questions() {
@@ -1016,7 +1023,7 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
         return nothing_done(&name);
     }
     let access = access_for(spec.builder.is_some(), spec.deep, spec.question);
-    let args = build_args(adapter.as_ref(), &spec.options, text, &preamble, &mcp, if adapter.resumes() { resume.as_deref() } else { None }, access);
+    let args = build_args(adapter.as_ref(), &spec.options, text, &preamble, &mcp, if resumes { resume.as_deref() } else { None }, access);
     let shown = FailureContext::new(&program, &args, text, remote.as_deref(), spec);
     // A builder turn may take hours and sit silent for long stretches: Ghidra's first look at a big
     // game, an engine build, or the person answering a question. Claude Code's own limits are
@@ -2034,6 +2041,20 @@ mod tests {
         // Accepted extras keep the resume.
         let a = build_args(codex.as_ref(), &with(&["-c", "model_reasoning_effort=\"low\""]), "q", "P:", &mcp(), Some("abc"), Access::Analyse);
         assert_eq!(&a[..2], &["exec".to_string(), "resume".to_string()]);
+    }
+
+    /// A retry that can't resume (extra args `exec resume` refuses) resends the original message.
+    #[test]
+    fn a_codex_retry_that_starts_fresh_resends_the_original_message() {
+        let codex = adapter_for("codex");
+        let with = |args: &[&str]| BackendOptions { args: args.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        let fresh = codex.resumes_with(&with(&["--sandbox", "danger-full-access"]), false);
+        assert_eq!(turn_text(true, fresh, Some("abc"), "Build it"), "Build it");
+        assert!(!codex.resumes_with(&with(&["--ephemeral"]), false));
+        assert!(!codex.resumes_with(&BackendOptions::default(), true));
+        let resumed = codex.resumes_with(&BackendOptions::default(), false);
+        assert_eq!(turn_text(true, resumed, Some("abc"), "Build it"), crate::failure::CONTINUE_TURN);
+        assert_eq!(turn_text(false, resumed, Some("abc"), "Build it"), "Build it");
     }
 
     /// Codex names a thread it doesn't have only on stderr; the next message starts fresh.
