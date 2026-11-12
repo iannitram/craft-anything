@@ -89,11 +89,12 @@ impl CraftApp {
         let Some(l) = self.loops.get(root) else { return };
         let (prompt, rounds, run) = (l.state.settings.prompt().to_string(), l.state.settings.rounds(), l.state.runs.saturating_add(1));
         let open = self.workspace.as_ref().is_some_and(|w| w.root == root);
-        let ws = match self.workspace.clone().filter(|_| open).map_or_else(|| Workspace::open(root), Ok) {
+        let mut ws = match self.workspace.clone().filter(|_| open).map_or_else(|| Workspace::open(root), Ok) {
             Ok(ws) => ws,
             Err(e) => return self.loop_failed(root, &e.message),
         };
-        let Some(backend) = self.builder_backend(ws.manifest.builder.as_deref()) else {
+        // The AI picked now, as for any other start (else the project's saved one).
+        let Some(backend) = self.builder_now(&mut ws, None) else {
             return self.loop_failed(root, &tr("No AI is set up to build with."));
         };
         let shown = trf("Build loop, run {n}: a fresh builder carries on from the last one's handoff.", &[("n", &run.to_string())]);

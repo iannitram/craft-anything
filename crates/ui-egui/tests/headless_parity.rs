@@ -170,7 +170,7 @@ const PLUMBING: &[(&str, &str)] = &[
     ("select_backend", "part of choose_backend; also selects an AI that finished connecting"),
     ("tick", "the frame loop"), ("show", "drawing"), ("toasts", "drawing"), ("shortcuts", "keys"),
     ("builder_backend", "part of start_make"), ("need_builder", "part of start_make"), ("start_run", "part of start_make"), ("start_run_with", "part of start_run and continue_build"),
-    ("resume", "part of follow_up"), ("resume_as", "part of resume"), ("builder_ready", "shows the way to set up a builder before a send takes any notes"), ("builder_now", "part of resume and created: the picked AI, saved as the project's builder (rebuild --backend in the CLI)"), ("poll_run", "polling"), ("launch", "part of start_run: RunSet::start, the queue rebuild_start uses too"),
+    ("resume", "part of follow_up"), ("resume_as", "part of resume"), ("builder_ready", "shows the way to set up a builder before a send takes any notes"), ("read_loop_progress", "part of the build loop: reads its progress on a worker"), ("next_loop_run", "part of the build loop (rebuild --loop in the CLI)"), ("loop_failed", "part of the build loop: ends it with why"), ("start_loop_now", "the build loop's Start now: project_loop_set, then rebuild --loop in the CLI"), ("poll_run", "polling"), 
     ("thumb_ready", "a job's result"), ("thumb", "drawing"), ("refresh_side_panel", "a view tally"),
     ("previews", "drawing"), ("preview", "drawing"), ("preview_ready", "a job's result"),
 ];

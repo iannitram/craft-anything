@@ -46,7 +46,7 @@ pub fn tokens_words(n: u64) -> String {
         1_000..1_000_000 => format!("{}k", n / 1_000),
         _ => {
             let tenths = n / 100_000;
-            if tenths % 10 == 0 { format!("{}M", tenths / 10) } else { format!("{}.{}M", tenths / 10, tenths % 10) }
+            if tenths.is_multiple_of(10) { format!("{}M", tenths / 10) } else { format!("{}.{}M", tenths / 10, tenths % 10) }
         }
     }
 }

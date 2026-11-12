@@ -330,7 +330,7 @@ impl CraftApp {
 
     /// The AI that builds `ws` now ([`Self::builder_wanted`]). A pick that differs from the project's
     /// saved one is saved with the project, so the next run, the CLI and the feed agree with it.
-    fn builder_now(&mut self, ws: &mut Workspace, first: Option<&str>) -> Option<String> {
+    pub(crate) fn builder_now(&mut self, ws: &mut Workspace, first: Option<&str>) -> Option<String> {
         let wanted = self.builder_wanted(ws, first);
         let name = self.builder_backend(wanted.as_deref())?;
         if wanted.as_deref() == Some(name.as_str()) && ws.manifest.builder.as_deref() != Some(name.as_str()) {

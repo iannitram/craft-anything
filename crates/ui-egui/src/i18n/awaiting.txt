@@ -4,3 +4,26 @@
 # here is translated in every catalog or no longer shown: the translation PR takes it out.
 Sends your notes straight away.
 Waiting: sent with your next message, or when you continue.
+Build loop, run {n}: a fresh builder carries on from the last one's handoff.
+Build loop settings
+Check the build loop's progress
+Each run is told
+End the loop
+It starts with your next message, or now.
+Loop the build
+million tokens
+No AI is set up to build with.
+No limit is on: the loop runs until you pause it.
+Rounds per run
+runs
+runs in a row that change nothing
+Save the build loop's settings
+Set a project's build loop
+Starting the next run…
+Start now
+Stop after
+Stop at
+The run going now finishes; no new one starts.
+Token budget
+Use the built-in prompt
+When a run ends well, a fresh builder (a clean context) carries on from the last one's handoff, until a limit below ends the loop.
