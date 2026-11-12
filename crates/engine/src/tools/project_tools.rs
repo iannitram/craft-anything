@@ -370,6 +370,14 @@ fn project_build_finish(_ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput,
     let p: FinishParams = parse_params(params)?;
     let mut ws = open(&p.project)?;
     ws.set_status(Status::Ready, CALLED_DONE)?;
+    // Called done: a later Try again must not start already stalled on the old unchanged-turn count.
+    let reset = crate::workspace::progress::BuildProgress::load(&ws.root).and_then(|mut progress| {
+        progress.reset();
+        progress.save(&ws.root)
+    });
+    if let Err(e) = reset {
+        log::warn!("couldn't reset the unchanged-turn count: {}", e.message);
+    }
     let mut items = feed::load(&ws);
     items.push(feed::FeedItem::Step { step: Step::Done, text: CALLED_DONE.into() });
     feed::save(&ws.root, &items)?;

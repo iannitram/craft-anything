@@ -1687,7 +1687,12 @@ mod picking_up_a_build {
                 std::fs::write(&file, (left - 1).to_string()).unwrap();
                 return Err(ToolError::new(ErrorCode::EngineMissing, "the WebSocket is closed"));
             }
-            Ok(CheckResult::new(self.id(), cx.round, true, "Fine."))
+            let mut result = CheckResult::new(self.id(), cx.round, true, "Fine.");
+            // A working build with something still unmet that no edit to the files can settle.
+            if cx.ws.root.join("unmet-check").is_file() {
+                result.unknowns.push("The likeness couldn't be confirmed.".into());
+            }
+            Ok(result)
         }
     }
 
@@ -2801,6 +2806,33 @@ mod picking_up_a_build {
                 if message.contains("changed no files in app/") && message.contains("app/ has no files yet"))),
             "the stop says app/ is empty: {feed:?}"
         );
+    }
+
+    /// A finished app (files in app/, a working build) whose last unmet check can't be settled by
+    /// editing: two unchanged builder turns end the run Ready, naming what is unmet, and Try again
+    /// on it ends Ready too, without another builder turn.
+    #[test]
+    fn two_unchanged_turns_on_finished_work_end_ready_not_in_an_error() {
+        let b = bench();
+        let ws = worked_on(&b);
+        std::fs::write(ws.app_dir().join("index.html"), "<h1>Bakery</h1>").unwrap();
+        std::fs::write(ws.root.join("unmet-check"), "1").unwrap();
+        let (ok, feed) = try_it(&b, &ws);
+        assert!(ok, "finished work isn't an error: {feed:?}");
+        assert_eq!(prompts_given(&b), 2, "it stops refining after two unchanged turns");
+        let saved = Workspace::open(&ws.root).unwrap();
+        assert_eq!(saved.manifest.status, Status::Ready);
+        assert!(
+            feed.iter().any(|i| matches!(i, feed::FeedItem::Step { step: Step::Done, text } if text.contains("nothing left to change"))),
+            "the summary says the builder found nothing to change: {feed:?}"
+        );
+        assert!(!feed.iter().any(|i| matches!(i, feed::FeedItem::Error { .. })), "{feed:?}");
+
+        // Try again starts with the count at its limit: still Ready, and no builder turn is paid for.
+        let (ok, feed) = try_it(&b, &ws);
+        assert!(ok, "{feed:?}");
+        assert_eq!(prompts_given(&b), 2, "a resumed run on finished work asks the builder for nothing");
+        assert_eq!(Workspace::open(&ws.root).unwrap().manifest.status, Status::Ready);
     }
 
     /// The empty-folder wording is only for an empty app/: a folder with files gets the plain stop.
