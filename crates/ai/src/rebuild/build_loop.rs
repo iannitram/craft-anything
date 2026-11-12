@@ -159,8 +159,6 @@ impl LoopState {
     }
 }
 
-/// The next time `at` comes round on this computer's clock after `now_ms` (ms since the epoch).
-/// A time that's now or already past today means tomorrow's.
 /// What makes a run one of the loop's: a fresh builder, which resumes none of the last run's
 /// conversation (that only grows), with the loop's rounds per run. The app and the CLI both start a
 /// loop's runs through this, so the test below covers both.
@@ -170,6 +168,8 @@ pub fn run_options(mut opts: super::RunOptions, settings: &LoopSettings) -> supe
     opts
 }
 
+/// The next time `at` comes round on this computer's clock after `now_ms` (ms since the epoch).
+/// A time that's now or already past today means tomorrow's.
 pub fn deadline_ms(now_ms: u64, at: ClockTime) -> Option<u64> {
     let tz = jiff::tz::TimeZone::system();
     deadline_in(&tz, now_ms, at)
