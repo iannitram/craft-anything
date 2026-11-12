@@ -430,6 +430,8 @@ impl CraftApp {
         let mut kept = Vec::new();
         // Runs of a build loop that ended: (project, ended well, paused).
         let mut loop_runs = Vec::new();
+        // Loop runs "Send now" stopped: the notes' run carries the loop on, when one starts.
+        let mut sent_now_loops = Vec::new();
         for (root, e) in &events {
             if open.as_ref() == Some(root) {
                 apply(&mut self.state.feed, e);
@@ -450,8 +452,9 @@ impl CraftApp {
                     let pause_pressed = self.pausing.remove(root);
                     // "Send now" stops a loop's run only to send the notes: the run they start
                     // carries the loop on.
-                    if self.loops.contains_key(root) && !self.sending_now.contains(root) {
-                        loop_runs.push((root.clone(), *ok, *paused || pause_pressed));
+                    if self.loops.contains_key(root) {
+                        let ended = (root.clone(), *ok, *paused || pause_pressed);
+                        if self.sending_now.contains(root) { sent_now_loops.push(ended) } else { loop_runs.push(ended) }
                     }
                     // Pause keeps the notes however the run ended in the stop window; only
                     // "Send now" sends them.
@@ -514,6 +517,14 @@ impl CraftApp {
                 if let Err(e) = self.launch(ws, opts) {
                     self.toast(e.message, true);
                 }
+            }
+        }
+        // No notes were left to send (taken back, or read just before the stop), or a limit
+        // already came: the stopped run ends the loop's count as any other run would.
+        for (root, ok, paused) in sent_now_loops {
+            let limit_came = self.loops.get(&root).is_some_and(|l| l.ending.is_some());
+            if limit_came || (!self.runs.is_running(&root) && self.runs.position(&root).is_none()) {
+                self.loop_run_ended(&root, ok, paused);
             }
         }
     }
