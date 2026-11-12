@@ -892,7 +892,9 @@ impl AgentAdapter for Codex {
         p.session_missing = true;
         vec![AgentEvent::Error {
             message: "Codex's earlier conversation about this project isn't on this computer.".into(),
-            remediation: Some("It was started on another computer or in another folder. Ask again: a new conversation starts from what the project already has.".into()),
+            remediation: Some(
+                "It was started on another computer or in another folder. Ask again: a new conversation starts from what the project already has.".into(),
+            ),
             log: None,
         }]
     }
