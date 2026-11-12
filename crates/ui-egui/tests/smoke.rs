@@ -3332,3 +3332,51 @@ fn a_very_long_app_file_name_keeps_start_inside_the_window() {
     let start = h.get_by_label("Start").rect();
     assert!(start.left() >= 0.0 && start.right() <= content.right(), "Start ({start:?}) stays inside the window ({content:?})");
 }
+
+/// The AI the person has picked at the top is the one that builds when a project starts again, not
+/// the one the project was first built with: on Continue and when a message goes to a paused build.
+#[test]
+fn a_paused_build_starts_again_with_the_ai_picked_now() {
+    use craft_anything_ai::rebuild::{RunEvent, StandIns};
+    use craft_anything_ai::{BackendConfig, BackendKind};
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    let d = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::create(d.path(), "Alpha", "A notes app", TargetRef::None).unwrap();
+    ws.set_person(|m| m.builder = Some("Claude Code".into())).unwrap();
+    let runs = StandIns::new();
+    let (dir, r) = (d.path().to_path_buf(), runs.clone());
+    let mut h = harness(move || {
+        let mut a = stand_in_app(dir, &r);
+        let agent = |name: &str, model: &str| BackendConfig {
+            name: name.into(),
+            kind: BackendKind::AgentCli,
+            model: model.into(),
+            base_url: None,
+            ssh_host: None,
+            enabled: true,
+        };
+        a.backends = vec![agent("Claude Code", "claude-code"), agent("Codex", "codex")];
+        a
+    });
+    h.run_steps(2);
+    h.state_mut().open_workspace(ws.clone());
+    // Built with Claude Code, then the person picks Codex and pauses.
+    h.state_mut().continue_build();
+    h.run_steps(2);
+    h.state_mut().choose_backend(Some("Codex".into()));
+    assert!(runs.send(&ws.root, RunEvent::Finished { ok: false, message: "Paused.".into(), paused: true }));
+    h.run_steps(3);
+    h.state_mut().continue_build();
+    h.run_steps(2);
+    assert_eq!(runs.backends(), [Some("Claude Code".into()), Some("Codex".into())], "Continue builds with the AI picked now");
+    assert_eq!(Workspace::open(&ws.root).unwrap().manifest.builder.as_deref(), Some("Codex"), "and the project remembers it");
+    // Changing the pick again, then a message to the paused build.
+    assert!(runs.send(&ws.root, RunEvent::Finished { ok: false, message: "Paused.".into(), paused: true }));
+    h.run_steps(3);
+    h.state_mut().choose_backend(Some("Claude Code".into()));
+    h.state_mut().state.project_input = "Make them blue".into();
+    h.state_mut().send_message();
+    h.run_steps(2);
+    assert_eq!(runs.backends().last(), Some(&Some("Claude Code".into())), "a message builds with the AI picked now");
+    assert_eq!(Workspace::open(&ws.root).unwrap().manifest.builder.as_deref(), Some("Claude Code"));
+}

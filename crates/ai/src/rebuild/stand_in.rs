@@ -9,6 +9,7 @@ struct Handle {
     root: PathBuf,
     /// Started to carry on where the last run stopped (`RunOptions::continuing`).
     continuing: bool,
+    backend: Option<String>,
     running: Arc<AtomicBool>,
     tx: Sender<RunEvent>,
     feed: Arc<Mutex<feed::FeedLog>>,
@@ -50,6 +51,7 @@ impl StandIns {
             all.lock().unwrap_or_else(PoisonError::into_inner).push(Handle {
                 root: ws.root.clone(),
                 continuing: opts.continuing,
+                backend: opts.backend.clone(),
                 running: running.clone(),
                 tx,
                 feed: feed.clone(),
@@ -79,6 +81,11 @@ impl StandIns {
     /// The runs started to carry on where the last one stopped, by project folder, in order.
     pub fn continued(&self) -> Vec<PathBuf> {
         self.started.lock().unwrap_or_else(PoisonError::into_inner).iter().filter(|h| h.continuing).map(|h| h.root.clone()).collect()
+    }
+
+    /// The AI each run was started with, in order (`None`: the project's own).
+    pub fn backends(&self) -> Vec<Option<String>> {
+        self.started.lock().unwrap_or_else(PoisonError::into_inner).iter().map(|h| h.backend.clone()).collect()
     }
 
     /// The project's latest run reports `e` (kept in its feed too). A `Finished` ends it.
