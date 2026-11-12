@@ -87,8 +87,12 @@ pub fn apply(feed: &mut Vec<FeedItem>, e: &RunEvent) {
             }
             // An agent error already explains itself; don't say it twice.
             let explained = matches!(feed.last(), Some(FeedItem::Error { .. }));
+            // The same end read twice (taken off the queue while the project was opened, then
+            // polled; see `RebuildRun::feed_now`) says it once.
             if *paused {
-                feed.push(FeedItem::Paused);
+                if !matches!(feed.last(), Some(FeedItem::Paused)) {
+                    feed.push(FeedItem::Paused);
+                }
             } else if !ok && !explained {
                 feed.push(FeedItem::Error { message: message.clone(), remediation: None, log: None });
             }

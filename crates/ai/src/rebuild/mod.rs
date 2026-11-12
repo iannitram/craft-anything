@@ -262,6 +262,9 @@ pub struct RebuildRun {
     pub root: PathBuf,
     started: Instant,
     activity: Arc<activity::Activity>,
+    /// The run's end, taken off the queue by [`RebuildRun::feed_now`] and not yet read by
+    /// [`RebuildRun::poll`]: whoever polls must still see the run end (#1620).
+    held: Vec<RunEvent>,
 }
 
 impl RebuildRun {
@@ -372,7 +375,7 @@ impl RebuildRun {
             })
             .map_err(|e| ToolError::internal(e.to_string()))?;
         let activity = feed.lock().unwrap_or_else(PoisonError::into_inner).activity();
-        let run = RebuildRun { rx, stop, inbox, running, preview, notes, clean_room, feed, root, started: Instant::now(), activity };
+        let run = RebuildRun { rx, stop, inbox, running, preview, notes, clean_room, feed, root, started: Instant::now(), activity, held: Vec::new() };
         // Waiting again with files of their own: the builder takes them at its next step or after
         // its turn, and a run that ends first hands them to the next one, as with any note.
         for n in left {
@@ -444,14 +447,24 @@ impl RebuildRun {
     }
 
     pub fn poll(&mut self) -> Vec<RunEvent> {
-        self.rx.try_iter().collect()
+        let mut events = std::mem::take(&mut self.held);
+        events.extend(self.rx.try_iter());
+        events
     }
 
     /// The project's conversation as the run has it now, for showing a project that is already
-    /// building. Events not yet polled are in it, so they're dropped from the queue.
+    /// building. Events not yet polled are in it, so they're dropped from the queue, except the
+    /// run's end: the run sends `Finished` just before it stops counting as running, so a project
+    /// opened in that moment would otherwise lose it, and its holder would never see the run end
+    /// (Pause left on "Pausing…", notes never sent, the clock still going; #1620). Applying it to
+    /// the feed again changes nothing ([`feed::apply`]).
     pub fn feed_now(&mut self) -> Vec<feed::FeedItem> {
         let feed = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
-        while self.rx.try_recv().is_ok() {}
+        for e in self.rx.try_iter() {
+            if matches!(e, RunEvent::Finished { .. }) {
+                self.held.push(e);
+            }
+        }
         feed.items().to_vec()
     }
 
@@ -567,6 +580,15 @@ struct UsageClock {
 
 /// How often a long agent turn saves the time worked so far, so a crash loses little of it.
 const USAGE_FLUSH: Duration = Duration::from_secs(60);
+
+/// How long a builder may have nothing running without having said its turn was done before the
+/// run takes the turn as ended (#1620). Agents say it within moments of stopping.
+const TURN_END_GRACE: Duration = Duration::from_secs(3);
+
+/// How long a builder asked to stop (Pause, Send now) may keep its turn going before the run
+/// stops without it (#1620). Its program is stopped by then; this covers a runner that never
+/// reports it.
+const STOP_GRACE: Duration = Duration::from_secs(10);
 
 /// Record `e` in the feed, send it and wake the window, under one lock.
 fn emit_event(feed: &Mutex<feed::FeedLog>, tx: &Sender<RunEvent>, wake: &Wake, e: RunEvent) {
@@ -1333,10 +1355,27 @@ impl Worker {
         // session when its last one finishes: the refresh waits for a free moment, so the loop
         // keeps reading what that tool says meanwhile.
         let mut refresh = false;
+        // Since when the agent has had nothing running without saying its turn was done, and
+        // since when it was asked to stop.
+        let mut idle_since: Option<Instant> = None;
+        let mut stop_asked: Option<Instant> = None;
         loop {
             if self.stop.is_cancelled() {
                 agent.stop();
+                stop_asked.get_or_insert_with(Instant::now);
             }
+            // A turn whose agent ended without its `TurnDone` (the builder's program gone, a
+            // runner that lost it) would hold the run here for good: the feed's typing dots, Pause
+            // on "Pausing…", the status Building and its clock saved every minute, a waiting
+            // note never sent (#1620). Every agent says the turn is done the moment it stops
+            // working, so one that has been idle for `TURN_END_GRACE` with nothing said has ended.
+            // And once Pause asked it to stop, it gets `STOP_GRACE` to do so: a stop is a stop.
+            let idle = !agent.is_busy();
+            let ended_quietly = idle && idle_since.get_or_insert_with(Instant::now).elapsed() >= TURN_END_GRACE;
+            if !idle {
+                idle_since = None;
+            }
+            let stop_ignored = stop_asked.is_some_and(|at| at.elapsed() >= STOP_GRACE);
             for e in agent.poll() {
                 refresh |= matches!(e, AgentEvent::ToolFinished { .. });
                 if matches!(e, AgentEvent::TurnDone { .. }) {
@@ -1383,6 +1422,20 @@ impl Worker {
             if refresh && let Some(mut session) = self.engine.try_session() {
                 refresh_investigation(&mut session, ws);
                 refresh = false;
+            }
+            if ended_quietly || stop_ignored {
+                let why = if stop_ignored { "didn't stop when asked; the run stops without it" } else { "ended its turn without saying so" };
+                log::warn!("The builder {why}.");
+                refresh_investigation(&mut self.engine.session(), ws);
+                // Said as the agent would have, so the feed ends its message and the clocks the turn.
+                let done = AgentEvent::TurnDone { backend: String::new(), input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false };
+                self.emit(RunEvent::Agent(done));
+                self.relay_read_notes(ws);
+                self.stop.check()?;
+                if let Some((m, r)) = failed {
+                    return Err(ToolError::new(ErrorCode::ProgramFailed, m).with_remediation(r.unwrap_or_default()));
+                }
+                return Ok(reply);
             }
             self.relay_inbox();
             self.relay_read_notes(ws);
