@@ -988,6 +988,8 @@ impl Worker {
         let mut refinements = 0;
         let mut reminded = false;
         let mut turns_sent = 0u32;
+        // Set when the builder changed nothing on finished work: the run ends Ready and says so.
+        let mut nothing_left_to_change = false;
         // The builder finished and only the check didn't: the build is there to check.
         let mut only_check = carrying_on && !first && opts.message.is_none() && ws.manifest.awaiting_check;
         loop {
@@ -996,6 +998,12 @@ impl Worker {
                 if let Some(fingerprint) = self.progress_fingerprint(ws, &mut progress, &mut progress_available, &mut fingerprints)? {
                     progress.before_turn(fingerprint);
                     if progress.stalled() {
+                        // Try again on finished work: the last checks found a working build in a
+                        // non-empty app/, so there is nothing to refine by editing files.
+                        if finished_work(ws) {
+                            nothing_left_to_change = true;
+                            break;
+                        }
                         return Err(no_build_progress(ws));
                     }
                     progress.save(&ws.root)?;
@@ -1116,6 +1124,10 @@ impl Worker {
                     progress.before_turn(fingerprint);
                     progress.save(&ws.root)?;
                     if progress.stalled() {
+                        if finished_work(ws) {
+                            nothing_left_to_change = true;
+                            break;
+                        }
                         return Err(no_build_progress(ws));
                     }
                 }
@@ -1151,6 +1163,9 @@ impl Worker {
         // The last round's checks, all of them: the last one alone (say a mechanics sheet) isn't the verdict.
         let last_round: Vec<CheckResult> = last.map(|l| ws.manifest.checks.iter().filter(|c| c.round == l.round).cloned().collect()).unwrap_or_default();
         let mut summary = if last_round.is_empty() { "Ready.".to_string() } else { format!("Ready: {}.", self_check::summary(&last_round, opts.good_enough)) };
+        if nothing_left_to_change {
+            summary.push_str(" The builder found nothing left to change in the files, so the checks above that aren't met are left as they are.");
+        }
         // What the builder couldn't find out is said, not hidden.
         match self_check::open_questions(ws).len() {
             0 => {}
@@ -1560,6 +1575,14 @@ fn not_working(ws: &Workspace) -> ToolError {
 /// The builder's next request when app/ holds no files: write the project first, then say what the
 /// build printed. The reporter's agent claimed `npm run build` had passed while app/ was empty (#736).
 const NO_PROJECT_PROMPT: &str = "The check found no project: app/ has no files, so nothing has been written yet and nothing can be built. Create the project's files in app/ now (for a website, a package.json and an index.html or the source files), then build it. Reply with the exact command you ran and the last lines of its output. Say something is built only when that output says so.";
+
+/// Whether the work is finished as far as editing files can tell: app/ holds files and every check
+/// of the latest round found a working build. A stall on this ends Ready; on an empty app/ or a
+/// build that doesn't work it stays an error (#736).
+fn finished_work(ws: &Workspace) -> bool {
+    let Some(latest) = ws.manifest.checks.iter().map(|c| c.round).max() else { return false };
+    !app_is_empty(ws) && ws.manifest.checks.iter().filter(|c| c.round == latest).all(|c| c.passed)
+}
 
 fn no_build_progress(ws: &Workspace) -> ToolError {
     let stop = format!("The build stopped after two builder turns changed no files in {}.", ws.app_place());
