@@ -101,6 +101,16 @@ fn program_from_outside(sees: bool) -> String {
 
 /// The first message to the builder: the request, the evidence, the kind's goal and stack steps,
 /// the shared rules, then the kind's own sections. `extra`: what the person also said.
+/// [`DECOMPILE_FIRST`] with where to look: the original and the project's folder, so a builder
+/// that starts fresh doesn't go searching the whole computer.
+pub(super) fn decompile_first(ws: &Workspace) -> String {
+    let target = match &ws.manifest.target {
+        TargetRef::Local { path } => format!("The original is at {}. ", path.display()),
+        _ => String::new(),
+    };
+    format!("{DECOMPILE_FIRST}\n\n{target}This project is in {} (work only there; never open another project's files).", ws.root.display())
+}
+
 pub(super) fn brief(kind: &dyn TargetKind, cx: &BriefCx, extra: Option<&str>) -> String {
     let ws = cx.ws;
     let m = &ws.manifest;

@@ -2627,6 +2627,26 @@ mod picking_up_a_build {
         let _ = ok;
     }
 
+    /// #1793: a builder that reports no session (each turn is a new process) is sent the brief
+    /// again with the in-run decompile reminder, so it knows the project and its folder.
+    #[test]
+    fn a_builder_with_no_session_gets_the_brief_with_the_decompile_reminder() {
+        let b = bench();
+        let target = b.projects.join("target-bare.bin");
+        std::fs::write(&target, b"\x7fELF not really").unwrap();
+        let ws = Workspace::create(&b.projects, "bare", "Recreate this app", TargetRef::Local { path: target.clone() }).unwrap();
+        let (_ok, feed) = try_with(&b, &ws, RunOptions::default());
+        let told = std::fs::read_to_string(&b.prompts).unwrap_or_default();
+        let turns: Vec<&str> = told.split("\n===\n").filter(|t| !t.trim().is_empty()).collect();
+        assert!(turns.len() >= 2, "the reminder is a second turn: {told}\n{feed:?}");
+        let root = ws.root.display().to_string();
+        assert!(turns[0].contains("Their request"), "the first turn has the brief: {told}");
+        let second = turns[1];
+        assert!(second.contains("You haven't decompiled anything yet"), "{second}");
+        assert!(second.contains("Their request"), "the second turn carries the brief too: {second}");
+        assert!(second.contains(&root) && second.contains(&target.display().to_string()), "and names the project and the original: {second}");
+    }
+
     /// A capture with no recorded mode (a failed study, or one copied in) isn't usable: a run
     /// studies again. A recorded capture is usable only in its own mode.
     #[test]
