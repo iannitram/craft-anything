@@ -138,7 +138,7 @@ impl AgentAdapter for OpenCode {
     fn missing_flags_error(&self) -> Option<(&'static str, &'static str)> {
         Some((
             "This OpenCode's `run --help` doesn't list --standalone, so it looks like OpenCode 1.x. Craft Anything needs OpenCode 2.",
-            "Install OpenCode 2 (`npm install -g @opencode/cli`) and remove the old `opencode-ai` package, or choose the OpenCode 2 program in Settings → AI.",
+            "Remove the old `opencode-ai` package (`npm uninstall -g opencode-ai`), then install OpenCode 2 (`npm install -g @opencode/cli`), or choose the OpenCode 2 program in Settings → AI.",
         ))
     }
 
