@@ -553,6 +553,13 @@ disk ("Checking" while nothing runs) reads as a stuck build that can't be retrie
 but headless chat waits for `TurnDone`, not just an idle worker. Preflight failures and cancellation
 must finish the event sequence too; regression tests check both the error/status and the terminal event.
 Worker-thread creation failures need the same terminal event even though no worker ever started.
+The waiter must not depend on it alone either: a build's run waited for its builder's `TurnDone`
+with no limit, so a turn that ended without one (or a stop the runner never reported) held the
+build on "Pausing…" with its status Building and its clock saved every minute (#1620). A loop that
+waits for another part's end also watches whether that part is still working, and a stop gets a
+bounded grace. And `feed_now` emptied the run's queue, `Finished` included, when a project was
+opened in the moment between the run's end and its "not running" flag: a queue drained for a
+snapshot keeps the events its holder must act on.
 
 **A conditional call erased the skipped path's value.** The ARM decoder discarded conditions on
 calls, and value flow replaced the earlier register definitions as if every call executed. Keep

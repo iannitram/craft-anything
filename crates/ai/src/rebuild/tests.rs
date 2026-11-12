@@ -7,6 +7,9 @@ mod note_progress;
 #[path = "stall_tests.rs"]
 mod stall;
 
+#[path = "turn_end_tests.rs"]
+mod turn_end;
+
 // Helpers that take a built-in kind's id, so each test reads as one line.
 fn kind(id: &str) -> Arc<dyn TargetKind> {
     KindRegistry::built_in().get(id).unwrap()
@@ -529,6 +532,7 @@ fn a_note_written_for_the_hook_carries_its_answers() {
         root: ws.root.clone(),
         started: Instant::now(),
         activity,
+        held: Vec::new(),
     };
     let id = run.add_note("make it blue".into(), "make it blue".into(), Vec::new());
     let note = run.waiting().pop().unwrap();
