@@ -38,7 +38,7 @@ pub const ACP_AGENTS: &[(&str, &[&str])] = &[
 
 /// Agents whose ACP mode takes the backend's model (`cli_model`), and the flag after the ACP
 /// arguments that picks it. Others keep the model they're set to.
-pub const ACP_MODEL_FLAGS: &[(&str, &str)] = &[("maki", "-m"), ("grok", "--model"), ("devin", "--model")];
+pub const ACP_MODEL_FLAGS: &[(&str, &str)] = &[("maki", "-m"), ("grok", "--model"), ("devin", "--model"), ("qwen-code", "-m")];
 
 /// Agents that ask the host to `authenticate` before a session opens, and the `authMethods` id
 /// the backend's stored key is sent under (`meta.api_key`). Other agents go straight to
@@ -700,6 +700,12 @@ pub struct AcpConversation {
 }
 
 impl AcpConversation {
+    /// The arguments the agent is started with, for tests that check an adapter's flags.
+    #[cfg(test)]
+    pub(crate) fn args(&self) -> &[String] {
+        &self.args
+    }
+
     /// Open a session and read its model catalogue without sending a prompt. Waits for metadata
     /// until `timeout`, carrying startup errors back to the caller; dropping this temporary
     /// conversation stops its process. Blocking: call off the UI thread.
