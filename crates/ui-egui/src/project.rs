@@ -127,16 +127,8 @@ impl CraftApp {
         self.projects.insert(0, ws.clone());
         let root = ws.root.clone();
         let message = rebuild::project::attached_request(attached, &request);
-        // A folder that already held a project builds with the AI picked for it now (in Make, else
-        // at the top), and only then the one it saved; a new one uses the one Make was started with.
-        let backend = if attached {
-            let Some(now) = self.builder_now(&mut ws, ai.as_deref()) else { return self.need_builder(false) };
-            now
-        } else {
-            backend
-        };
-        // A project already building keeps its live conversation; the request stays in Make for
-        // the person to send later, because a second start can't run beside it.
+        // A project already building keeps its live conversation and its builder; the request stays
+        // in Make for the person to send later, because a second start can't run beside it.
         if self.runs.is_running(&root) || self.runs.position(&root).is_some() {
             self.state.feed = match self.runs.get_mut(&root).filter(|r| r.is_running()) {
                 Some(run) => run.feed_now(),
@@ -145,6 +137,14 @@ impl CraftApp {
             self.start_run(ws, Some(backend), message, None, Vec::new());
             return;
         }
+        // A folder that already held a project builds with the AI picked for it now (in Make, else
+        // at the top), and only then the one it saved; a new one uses the one Make was started with.
+        let backend = if attached {
+            let Some(now) = self.builder_now(&mut ws, ai.as_deref()) else { return self.need_builder(false) };
+            now
+        } else {
+            backend
+        };
         if attached {
             // The project already has a conversation: keep it, and append the request. The run
             // records the request in the feed when it starts; the app only reads the feed.
@@ -2806,6 +2806,32 @@ mod tests {
         assert_eq!(start(Some("Top"), None).as_deref(), Some("Top"), "the AI picked at the top builds, and the project keeps it");
         assert_eq!(start(Some("Top"), Some("Make")).as_deref(), Some("Make"), "an AI picked in Make comes first");
         assert_eq!(start(Some("Gone"), None).as_deref(), Some("Saved"), "a pick that can't build leaves the saved one");
+    }
+
+    /// A request made in Make for a project that is already building starts nothing, so it leaves
+    /// the builder that project is building with alone.
+    #[test]
+    fn a_request_for_a_project_already_building_keeps_its_builder() {
+        let d = tempfile::tempdir().unwrap();
+        let mut ws = Workspace::create(d.path(), "Notes", "A notes app", TargetRef::None).unwrap();
+        ws.set_person(|m| m.builder = Some("Claude Code".into())).unwrap();
+        let stand_ins = craft_anything_ai::rebuild::StandIns::new();
+        let mut app = crate::demo::app(crate::demo::engine(craft_anything_engine::Mode::Beginner, true));
+        app.runs = craft_anything_ai::rebuild::RunSet::new(1).with_starter(stand_ins.starter());
+        let agent = |name: &str, model: &str| craft_anything_ai::BackendConfig {
+            name: name.into(),
+            kind: craft_anything_ai::BackendKind::AgentCli,
+            model: model.into(),
+            base_url: None,
+            ssh_host: None,
+            enabled: true,
+        };
+        app.backends = vec![agent("Claude Code", "claude-code"), agent("Codex", "codex")];
+        app.created(ws.clone(), "add a jump".into(), "Claude Code".into(), None, None, true);
+        assert!(app.runs.is_running(&ws.root));
+        app.created(ws.clone(), "add a score".into(), "Codex".into(), Some("Codex".into()), None, true);
+        assert_eq!(stand_ins.backends(), [Some("Claude Code".into())], "no second run starts");
+        assert_eq!(Workspace::open(&ws.root).unwrap().manifest.builder.as_deref(), Some("Claude Code"), "the running build's AI stays saved");
     }
 }
 
