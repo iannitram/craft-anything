@@ -348,6 +348,12 @@ pub enum Access {
 }
 
 /// argv (after the program) for one prompt.
+/// A retried turn says "carry on" only when it really continues the saved session; a fresh
+/// session needs the original message.
+fn turn_text<'a>(retry: bool, resumes: bool, resume: Option<&str>, text: &'a str) -> &'a str {
+    if retry && resumes && resume.is_some() { crate::failure::CONTINUE_TURN } else { text }
+}
+
 pub fn build_args(
     adapter: &dyn AgentAdapter,
     opts: &BackendOptions,
@@ -998,7 +1004,8 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
         mcp.command = path;
     }
     let resume = session.lock().unwrap_or_else(PoisonError::into_inner).clone();
-    let text = if retry && adapter.resumes() && resume.is_some() { crate::failure::CONTINUE_TURN } else { text };
+    let resumes = adapter.resumes_with(&spec.options, spec.question);
+    let text = turn_text(retry, resumes, resume.as_deref(), text);
     let builder = spec.builder.is_some();
     // A question goes only to an agent that can be held to reading (a fallback adapter can't).
     if spec.question && !adapter.answers_questions() {
@@ -1010,7 +1017,7 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
         return nothing_done(&name);
     }
     let access = access_for(spec.builder.is_some(), spec.deep, spec.question);
-    let args = build_args(adapter.as_ref(), &spec.options, text, &preamble, &mcp, if adapter.resumes() { resume.as_deref() } else { None }, access);
+    let args = build_args(adapter.as_ref(), &spec.options, text, &preamble, &mcp, if resumes { resume.as_deref() } else { None }, access);
     let shown = FailureContext::new(&program, &args, text, remote.as_deref(), spec);
     // A builder turn may take hours and sit silent for long stretches: Ghidra's first look at a big
     // game, an engine build, or the person answering a question. Claude Code's own limits are
@@ -1060,6 +1067,7 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
     let (held2, agent2, program2, host2) = (held.clone(), agent.clone(), program.clone(), remote.clone());
     let parser = Arc::new(Mutex::new(StreamParser::new(adapter.clone())));
     let (p2, tx2, tx_err, lost2, failure2) = (parser.clone(), tx.clone(), tx.clone(), lost.clone(), failure.clone());
+    let (p_err, lost_err, adapter_err) = (parser.clone(), lost.clone(), adapter.clone());
     let failed_tools = Arc::new(AtomicBool::new(false));
     let (failed_tools2, failed_tools3) = (failed_tools.clone(), failed_tools.clone());
     let stop2 = stop.clone();
@@ -1115,6 +1123,14 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
         .on_stderr_line(move |l| {
             if !l.trim().is_empty() {
                 let _ = tx_err.send(AgentEvent::Output { text: l.to_string() });
+                let mut p = p_err.lock().unwrap_or_else(PoisonError::into_inner);
+                let events = adapter_err.parse_stderr(&mut p, l);
+                if p.session_missing {
+                    lost_err.store(true, Ordering::SeqCst);
+                }
+                for e in events {
+                    let _ = tx_err.send(e);
+                }
             }
         })
         .remediation(format!("Install {}, or choose its program in Settings → AI.", display_for(&agent)));
@@ -1981,6 +1997,73 @@ mod tests {
             r#"{"type":"item.completed","item":{"id":"i2","type":"mcp_tool_call","tool":"x","status":"failed","result":null,"error":{"message":"boom"}}}"#;
         let text = format!("{:?}", adapter_for("codex").parse(&mut p, &serde_json::from_str::<Value>(other).unwrap()));
         assert!(text.contains("boom") && !text.contains("null"), "{text}");
+    }
+
+    /// A Codex builder turn continues its thread with `exec resume`, which has no `--sandbox`.
+    #[test]
+    fn a_codex_builder_turn_resumes_its_thread() {
+        let codex = adapter_for("codex");
+        let a = build_args(codex.as_ref(), &BackendOptions::default(), "q", "P:", &mcp(), Some("abc"), Access::Build);
+        let pos = |x: &str| a.iter().position(|y| y == x).unwrap_or_else(|| panic!("{x} missing in {a:?}"));
+        assert_eq!(&a[..3], &["exec".to_string(), "resume".to_string(), "--json".to_string()]);
+        assert!(!a.contains(&"--sandbox".to_string()), "{a:?}");
+        assert_eq!(a[pos("sandbox_mode=\"workspace-write\"") - 1], "-c");
+        assert!(a.contains(&"mcp_servers.craft-anything.command=\"/opt/ca/craft-anything-cli\"".to_string()));
+        assert_eq!(&a[a.len() - 2..], &["abc".to_string(), "-".to_string()]);
+        // Without a session the arguments stay as they were.
+        let fresh = build_args(codex.as_ref(), &BackendOptions::default(), "q", "P:", &mcp(), None, Access::Build);
+        assert_eq!(&fresh[..2], &["exec".to_string(), "--json".to_string()]);
+        assert!(fresh.contains(&"--sandbox".to_string()) && !fresh.contains(&"resume".to_string()), "{fresh:?}");
+    }
+
+    /// A question must leave the builder's session alone, and Codex can't fork: it starts fresh.
+    #[test]
+    fn a_codex_question_never_resumes() {
+        let a = build_args(adapter_for("codex").as_ref(), &BackendOptions::default(), "q", "P:", &mcp(), Some("abc"), Access::Question);
+        assert_eq!(&a[..2], &["exec".to_string(), "--json".to_string()]);
+        assert!(!a.contains(&"resume".to_string()) && !a.contains(&"abc".to_string()), "{a:?}");
+    }
+
+    /// `exec resume` refuses `--sandbox` and `-C`, so a backend that sets them starts fresh.
+    #[test]
+    fn codex_extra_args_resume_does_not_accept_start_a_fresh_session() {
+        let codex = adapter_for("codex");
+        let with = |args: &[&str]| BackendOptions { args: args.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        let a = build_args(codex.as_ref(), &with(&["--sandbox", "danger-full-access"]), "q", "P:", &mcp(), Some("abc"), Access::Analyse);
+        assert_eq!(&a[..2], &["exec".to_string(), "--json".to_string()]);
+        assert!(!a.contains(&"resume".to_string()) && !a.contains(&"abc".to_string()), "{a:?}");
+        let a = build_args(codex.as_ref(), &with(&["-C", "/tmp/x"]), "q", "P:", &mcp(), Some("abc"), Access::Analyse);
+        assert!(!a.contains(&"resume".to_string()), "{a:?}");
+        // Accepted extras keep the resume.
+        let a = build_args(codex.as_ref(), &with(&["-c", "model_reasoning_effort=\"low\""]), "q", "P:", &mcp(), Some("abc"), Access::Analyse);
+        assert_eq!(&a[..2], &["exec".to_string(), "resume".to_string()]);
+    }
+
+    /// A retry that can't resume (extra args `exec resume` refuses) resends the original message.
+    #[test]
+    fn a_codex_retry_that_starts_fresh_resends_the_original_message() {
+        let codex = adapter_for("codex");
+        let with = |args: &[&str]| BackendOptions { args: args.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        let fresh = codex.resumes_with(&with(&["--sandbox", "danger-full-access"]), false);
+        assert_eq!(turn_text(true, fresh, Some("abc"), "Build it"), "Build it");
+        assert!(!codex.resumes_with(&with(&["--ephemeral"]), false));
+        assert!(!codex.resumes_with(&BackendOptions::default(), true));
+        let resumed = codex.resumes_with(&BackendOptions::default(), false);
+        assert_eq!(turn_text(true, resumed, Some("abc"), "Build it"), crate::failure::CONTINUE_TURN);
+        assert_eq!(turn_text(false, resumed, Some("abc"), "Build it"), "Build it");
+    }
+
+    /// Codex names a thread it doesn't have only on stderr; the next message starts fresh.
+    #[test]
+    fn a_codex_thread_that_is_not_on_this_computer_is_told_apart() {
+        let codex = adapter_for("codex");
+        let mut p = StreamParser::new(codex.clone());
+        let line = "Error: thread/resume: thread/resume failed: no rollout found for thread id 0199-abc (code -32600)";
+        let events = codex.parse_stderr(&mut p, line);
+        assert!(p.session_missing);
+        assert!(matches!(events.as_slice(), [AgentEvent::Error { .. }]), "{events:?}");
+        let mut p = StreamParser::new(codex.clone());
+        assert!(codex.parse_stderr(&mut p, "warning: something else").is_empty() && !p.session_missing);
     }
 
     #[test]
@@ -3149,7 +3232,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
         assert!(matches!(p.line(r#"{"say":"hello"}"#).as_slice(), [AgentEvent::TextDelta { text }] if text == "hello"));
         // Unknown agents stream their output as text; the built-ins keep their own adapters.
         assert!(!reg.for_agent("no-such-agent").streams_json());
-        assert!(reg.for_agent("claude").resumes() && !reg.for_agent("codex").resumes() && reg.for_agent("antigravity").resumes());
+        assert!(reg.for_agent("claude").resumes() && reg.for_agent("codex").resumes() && reg.for_agent("antigravity").resumes());
         // Registering an adapter for an existing id replaces that one.
         reg.register(Arc::new(EchoAgent));
         assert_eq!(
