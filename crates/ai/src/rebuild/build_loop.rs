@@ -161,6 +161,15 @@ impl LoopState {
 
 /// The next time `at` comes round on this computer's clock after `now_ms` (ms since the epoch).
 /// A time that's now or already past today means tomorrow's.
+/// What makes a run one of the loop's: a fresh builder, which resumes none of the last run's
+/// conversation (that only grows), with the loop's rounds per run. The app and the CLI both start a
+/// loop's runs through this, so the test below covers both.
+pub fn run_options(mut opts: super::RunOptions, settings: &LoopSettings) -> super::RunOptions {
+    opts.fresh_session = true;
+    opts.max_rounds = settings.rounds();
+    opts
+}
+
 pub fn deadline_ms(now_ms: u64, at: ClockTime) -> Option<u64> {
     let tz = jiff::tz::TimeZone::system();
     deadline_in(&tz, now_ms, at)
@@ -259,6 +268,16 @@ mod tests {
 
     fn settings() -> LoopSettings {
         LoopSettings { on: true, ..LoopSettings::default() }
+    }
+
+    /// Each loop run starts a fresh builder: removing `opts.fresh_session = true` fails this.
+    #[test]
+    fn a_loop_run_starts_a_fresh_builder_with_the_loops_rounds() {
+        let base = super::super::RunOptions::default();
+        assert!(!base.fresh_session, "a run that isn't a loop's resumes its builder");
+        let opts = run_options(base, &LoopSettings { rounds_per_run: 3, ..settings() });
+        assert!(opts.fresh_session, "a loop's run must not resume the last run's session");
+        assert_eq!(opts.max_rounds, 3);
     }
 
     #[test]
