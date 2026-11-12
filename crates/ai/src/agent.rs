@@ -879,6 +879,11 @@ impl ApiConversation {
                             remediation: Some("Start a new chat.".into()),
                             log: None,
                         });
+                        // A turn ends with `TurnDone`, a panic included (`handle_turn` sends it as
+                        // its last step, so a panic means it never did): whoever pumps this
+                        // conversation (the build's run) waits for it, and Pause can't end that wait.
+                        let backend = agent.chain.get(agent.current).map(|s| s.name.clone()).unwrap_or_default();
+                        let _ = etx.send(AgentEvent::TurnDone { backend, input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false });
                     }
                     busy2.store(false, Ordering::SeqCst);
                 }
@@ -902,6 +907,8 @@ impl ApiConversation {
                 remediation: Some("Start a new chat.".into()),
                 log: None,
             });
+            // The turn that was asked for ends here, or whoever waits for it waits for good.
+            self.queued.push(AgentEvent::TurnDone { backend: String::new(), input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false });
         }
     }
 }
@@ -1157,6 +1164,47 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("timed out: {all:?}");
+    }
+
+    /// Upstream #1620: a turn whose worker panicked reported an error but never `TurnDone`, so the
+    /// build's run waited for it for good ("Pausing…" on a finished build; Pause can't end that
+    /// wait). Every turn ends with `TurnDone`, a panic included, and so does a send to a worker
+    /// that is gone.
+    #[test]
+    fn a_turn_whose_worker_panicked_or_is_gone_still_ends_with_turn_done() {
+        struct Panics;
+        impl ChatModel for Panics {
+            fn turn(&mut self, _: &TurnRequest<'_>, _: &mut dyn FnMut(Delta), _: &Stop) -> Result<TurnResult, ToolError> {
+                panic!("a bug in the model client")
+            }
+            fn model(&self) -> String {
+                "panics".into()
+            }
+        }
+        let host = Arc::new(FakeHost { calls: Mutex::default(), journal: Mutex::default() });
+        let slot = ModelSlot { name: "Fake".into(), model: Box::new(Panics), local: false, effort: None, max_turns: 10, context_tokens: 0 };
+        let mut c = ApiConversation::start(host, vec![slot], LoopConfig::default()).unwrap();
+        c.send("Build it");
+        let events = drain_until_done(&mut c, |_, _| {});
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { message, .. } if message.contains("hit a bug"))), "{events:?}");
+        assert!(matches!(events.last(), Some(AgentEvent::TurnDone { .. })), "{events:?}");
+        // The worker survives a panic: the next message is taken, and ends the same way.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while c.is_busy() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        c.send("Again");
+        let again = drain_until_done(&mut c, |_, _| {});
+        assert!(matches!(again.last(), Some(AgentEvent::TurnDone { .. })), "{again:?}");
+        // A conversation whose worker thread has gone: the error and the turn's end, together.
+        let (gone, _rx) = std::sync::mpsc::channel::<Option<String>>();
+        drop(_rx);
+        c.to_worker = gone;
+        c.send("Anyone there?");
+        let last = c.poll();
+        assert!(matches!(last.first(), Some(AgentEvent::Error { .. })), "{last:?}");
+        assert!(matches!(last.last(), Some(AgentEvent::TurnDone { .. })), "{last:?}");
+        assert!(!c.is_busy());
     }
 
     #[test]
