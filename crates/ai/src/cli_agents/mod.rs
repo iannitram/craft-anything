@@ -3092,6 +3092,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
     }
 
     /// Sends `text` and collects the turn's events up to its end.
+    #[cfg(unix)]
     fn one_turn(c: &mut CliConversation, text: &str) -> Vec<AgentEvent> {
         c.send(text);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
