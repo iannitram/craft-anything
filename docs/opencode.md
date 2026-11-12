@@ -20,6 +20,11 @@ with the OpenCode desktop app, whose CLI is `opencode-cli` in the app's resource
 releases. When the `opencode` on your PATH is 1.x, install `@opencode/cli`, or point the backend
 at a 2.x CLI: step 2 below, or `craft-anything-cli ai program OpenCode <path>`.
 
+If you installed `opencode-ai` globally, it already owns the `opencode` command, so installing
+`@opencode/cli` fails with EEXIST. Remove it first with `npm uninstall -g opencode-ai`, then run
+`npm install -g @opencode/cli`. OpenCode's migration guide is the reference:
+https://opencode.ai/docs/migrate-v1/
+
 **Don't start OpenCode during a build.** OpenCode's shared service resumes every session it finds
 running, including the one a build's private server is driving: started mid-build (opening the
 desktop app does it), it ran the builder's commands alongside the build, and the turn ended with
