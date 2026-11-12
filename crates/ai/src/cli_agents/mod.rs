@@ -1119,7 +1119,9 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
         })
         .remediation(format!("Install {}, or choose its program in Settings → AI.", display_for(&agent)));
     if let Some(p) = spec.project.as_ref().filter(|_| remote.is_none()) {
-        proc = proc.cwd(p);
+        // A program that reads $PWD (a shell, a coding agent) must see the project, not the folder
+        // the app was started from.
+        proc = proc.cwd(p).env("PWD", p);
     }
     if adapter.prompt_on_stdin() {
         proc = proc.stdin_bytes(adapter.stdin_text(&preamble, text));
