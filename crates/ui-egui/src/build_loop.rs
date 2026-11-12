@@ -338,9 +338,7 @@ pub(crate) fn popover(app: &mut CraftApp, button: &egui::Response) {
     // Saved once nothing is being typed or dragged, or as the popover closes.
     if settings != draft.base && draft.sent.as_ref() != Some(&settings) && (!editing || !open) {
         draft.sent = Some(settings.clone());
-        let mut params = serde_json::to_value(&settings).unwrap_or_default();
-        params["project"] = serde_json::json!(root);
-        app.act("project_loop_set", params, tr("Save the build loop's settings"));
+        app.act("project_loop_set", save_params(&root, &settings), tr("Save the build loop's settings"));
     }
     let now_on = settings.on;
     app.loop_draft = Some(draft);
@@ -353,6 +351,13 @@ pub(crate) fn popover(app: &mut CraftApp, button: &egui::Response) {
     if start_now {
         app.start_loop_now(settings);
     }
+}
+
+/// What the popover sends to save a project's loop: its settings, and the project they're for.
+fn save_params(root: &Path, settings: &LoopSettings) -> serde_json::Value {
+    let mut params = serde_json::to_value(settings).unwrap_or_default();
+    params["project"] = serde_json::json!(root);
+    params
 }
 
 /// "7am", "4pm", "16" or "7" for the hour field.
@@ -419,5 +424,30 @@ mod tests {
             [Some(7.0), Some(7.0), Some(0.0), Some(12.0), Some(16.0), Some(16.0), Some(21.0)]
         );
         assert_eq!([p("13pm"), p("24"), p("x")], [None, None, None]);
+    }
+
+    /// The popover saves the fields it edits through `project_loop_set`, and the engine reads each
+    /// one back. A field the save drops or renames would come back as its default here.
+    #[test]
+    fn the_settings_the_popover_edits_reach_the_engine() {
+        use craft_anything_engine::workspace::TargetRef;
+        use craft_anything_engine::workspace::build_loop::Limit;
+        use craft_anything_engine::{CallOptions, Caller, Engine};
+        let d = tempfile::tempdir().unwrap();
+        let ws = Workspace::create(d.path(), "Notes", "A notes app", TargetRef::None).unwrap();
+        let settings = LoopSettings {
+            on: true,
+            prompt: "Keep the app working.".into(),
+            rounds_per_run: 3,
+            runs: Limit { on: true, value: 4 },
+            tokens: Limit { on: true, value: 200_000 },
+            stop_at: Limit { on: true, value: ClockTime { hour: 7, minute: 30 } },
+            stalled_runs: Limit { on: false, value: 2 },
+        };
+        let engine = Engine::new(craft_anything_engine::testing::session());
+        engine.call("project_loop_set", save_params(&ws.root, &settings), CallOptions::new(Caller::Ui)).unwrap();
+        let saved = Workspace::open(&ws.root).unwrap();
+        assert_eq!(saved.manifest.build_loop, Some(settings.clone().sanitized()), "every field the popover edits is saved");
+        assert_eq!(LoopState::start(settings.clone(), 0, 0).settings, settings.clone().sanitized(), "and a loop started from them uses them");
     }
 }

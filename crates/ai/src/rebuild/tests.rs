@@ -4214,6 +4214,72 @@ fn a_missing_session_with_nothing_to_start_from_is_said_plainly() {
     assert!(ws.manifest.agent_session.is_none());
 }
 
+/// A build loop's runs each start a fresh builder (`RunOptions::fresh_session`). Round 1 keeps its
+/// session; round 2, started fresh as the loop starts every run, must resume none of it. The control
+/// shows the same project would resume that session when the run isn't fresh, so the check can fail.
+/// The stand-in Claude Code logs each call's arguments and answers with a session named for its call.
+#[cfg(unix)]
+#[test]
+fn a_fresh_loop_run_resumes_no_session_the_last_run_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::create(d.path(), "Notes", "A notes app", TargetRef::None).unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let program = bin.path().join("claude");
+    let log = bin.path().join("calls.log");
+    let script = r#"#!/bin/sh
+echo "$*" >> '__LOG__'
+n=$(wc -l < '__LOG__' | tr -d ' ')
+cat >/dev/null
+printf '%s\n' "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"loop-$n\"}"
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Built it."}]}}'
+printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":1,\"session_id\":\"loop-$n\"}"
+"#
+    .replace("__LOG__", &log.display().to_string());
+    std::fs::write(&program, script).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let config =
+        crate::BackendConfig { name: "Claude".into(), kind: BackendKind::AgentCli, model: "claude-code".into(), base_url: None, ssh_host: None, enabled: true };
+    let options = crate::config::BackendOptions { command: Some(program.display().to_string()), ..Default::default() };
+    let entry = crate::BackendEntry { config, options };
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut w = Worker {
+        wake: Default::default(),
+        engine: Arc::new(Engine::new(craft_anything_engine::testing::session())),
+        tx,
+        stop: CancelToken::default(),
+        preview: Arc::default(),
+        seen: HashSet::new(),
+        inbox: Inbox::new(ws.inbox_dir()),
+        editor: None,
+        notes: Arc::default(),
+        feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
+        keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
+        kept_checks: Mutex::default(),
+        assets: false,
+        usage: None,
+        self_check: None,
+        reset_progress_after_notes: false,
+    };
+    // One run's builder turn, as the run starts it: returns the session the run's agent would resume.
+    let run = |w: &mut Worker, ws: &mut Workspace, fresh: bool| -> Option<String> {
+        let opts = RunOptions { fresh_session: fresh, ..RunOptions::default() };
+        let spec = w.agent_spec(ws, &entry, &opts).unwrap();
+        let resumes = spec.resume.clone();
+        let mut agent = crate::cli_agents::CliConversation::new(spec);
+        w.turn(ws, &mut agent, "THE BRIEF", true, None).unwrap();
+        resumes
+    };
+    assert_eq!(run(&mut w, &mut ws, true), None, "the first run has no session to resume");
+    assert_eq!(ws.manifest.agent_session.as_deref(), Some("loop-1"), "the first run keeps its session");
+    let control = w.agent_spec(&ws, &entry, &RunOptions::default()).unwrap();
+    assert_eq!(control.resume.as_deref(), Some("loop-1"), "a run that isn't fresh would resume it");
+    assert_eq!(run(&mut w, &mut ws, true), None, "a loop's next run starts a fresh builder, not the last one's session");
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(calls.lines().count(), 2, "both runs called the builder: {calls}");
+    assert!(calls.lines().all(|l| !l.contains("--resume")), "no call resumed a session: {calls}");
+}
+
 /// #451: after each turn the project keeps a copy of the builder's session, and a new session on
 /// another computer is handed the conversation it kept.
 #[test]
