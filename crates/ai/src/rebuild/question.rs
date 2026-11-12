@@ -107,7 +107,9 @@ pub fn ask(
             }
             // Only a native adapter that resumes can answer from a copy of the builder's chat.
             // Copilot's ACP question starts fresh, even when the project has a saved session id.
-            let native_session = crate::cli_agents::adapter_for(&entry.config.model).resumes();
+            // An adapter that resumes (Codex) but can't hold a question to reading has no copy to fork.
+            let adapter = crate::cli_agents::adapter_for(&entry.config.model);
+            let native_session = adapter.resumes() && adapter.answers_questions();
             let from = answered_from(session.as_deref(), native_session);
             let builder_session = session.clone();
             let spec = CliSpec {

@@ -165,6 +165,10 @@ pub trait AgentAdapter: Send + Sync {
     fn parse(&self, _p: &mut StreamParser, _v: &Value) -> Vec<AgentEvent> {
         Vec::new()
     }
+    /// Events for one line of stderr (e.g. a missing session, which only stderr names).
+    fn parse_stderr(&self, _p: &mut StreamParser, _line: &str) -> Vec<AgentEvent> {
+        Vec::new()
+    }
     /// It can continue a saved session.
     fn resumes(&self) -> bool {
         false
@@ -825,7 +829,14 @@ impl AgentAdapter for Codex {
     }
 
     fn args(&self, cx: &ArgsCx) -> Vec<String> {
-        let mut v = vec!["exec".to_string(), "--json".into()];
+        // A question never resumes: Codex can't fork, so it would change the builder's session.
+        // Backend args `exec resume` doesn't accept (`--sandbox`, `-C`…) start a fresh session.
+        let resume = cx.resume.filter(|_| !cx.question && codex_resume_accepts(&cx.options.args));
+        let mut v = vec!["exec".to_string()];
+        if resume.is_some() {
+            v.push("resume".into());
+        }
+        v.push("--json".into());
         // Project folders aren't git repositories, and `codex exec` refuses to run outside one
         // without this (#69). Not twice: it may already be in the backend's own args.
         const SKIP_GIT: &str = "--skip-git-repo-check";
@@ -833,7 +844,12 @@ impl AgentAdapter for Codex {
             v.push(SKIP_GIT.into());
         }
         if cx.builder {
-            v.extend(["--sandbox".into(), "workspace-write".into()]);
+            // `exec resume` has no `--sandbox`; the same setting goes in as a config override.
+            if resume.is_some() {
+                v.extend(["-c".into(), "sandbox_mode=\"workspace-write\"".into()]);
+            } else {
+                v.extend(["--sandbox".into(), "workspace-write".into()]);
+            }
         }
         v.extend(["-c".into(), format!("mcp_servers.{MCP_NAME}.command={}", toml_string(&cx.mcp.command))]);
         // Codex doesn't refresh its callable tools after enable_toolset (#538), so list every
@@ -854,9 +870,31 @@ impl AgentAdapter for Codex {
             v.extend(["-m".into(), m.clone()]);
         }
         v.extend(cx.options.args.iter().cloned());
+        // Options come before the session id.
+        if let Some(id) = resume {
+            v.push(id.to_string());
+        }
         // The message itself goes in on stdin (see `stdin_text`).
         v.push("-".into());
         v
+    }
+
+    /// `codex exec resume` continues the thread whose id `parse` records.
+    fn resumes(&self) -> bool {
+        true
+    }
+
+    /// A thread Codex doesn't have (the project came from another computer) is only on stderr.
+    fn parse_stderr(&self, p: &mut StreamParser, line: &str) -> Vec<AgentEvent> {
+        if !line.contains(CODEX_NO_ROLLOUT) {
+            return Vec::new();
+        }
+        p.session_missing = true;
+        vec![AgentEvent::Error {
+            message: "Codex's earlier conversation about this project isn't on this computer.".into(),
+            remediation: Some("It was started on another computer or in another folder. Ask again: a new conversation starts from what the project already has.".into()),
+            log: None,
+        }]
     }
 
     fn required_flags(&self) -> (&'static [&'static str], &'static [&'static str]) {
@@ -928,6 +966,30 @@ impl AgentAdapter for Codex {
         }
         out
     }
+}
+
+/// What `codex exec resume` prints when it has no such thread.
+const CODEX_NO_ROLLOUT: &str = "no rollout found for thread id";
+
+/// Whether `codex exec resume` takes every one of the backend's extra args (checked against
+/// codex-cli 0.167). Anything else, such as `--sandbox` or `-C`, would break the resume.
+fn codex_resume_accepts(args: &[String]) -> bool {
+    const FLAGS: &[&str] = &["--json", "--skip-git-repo-check", "--ephemeral", "--dangerously-bypass-approvals-and-sandbox"];
+    const WITH_VALUE: &[&str] = &["-c", "--config", "-m", "--model", "-i", "--image", "--output-last-message"];
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if FLAGS.contains(&a.as_str()) {
+            continue;
+        }
+        if WITH_VALUE.contains(&a.as_str()) {
+            if it.next().is_none() {
+                return false;
+            }
+            continue;
+        }
+        return false;
+    }
+    true
 }
 
 /// Unknown output (including future CLI formats) is not a claim that the account is connected.
