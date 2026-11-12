@@ -291,6 +291,11 @@ impl CraftApp {
         let wanted = self.builder_wanted(ws, first);
         let name = self.builder_backend(wanted.as_deref())?;
         if wanted.as_deref() == Some(name.as_str()) && ws.manifest.builder.as_deref() != Some(name.as_str()) {
+            // Save onto the project as it is on disk now: `ws` can be older than a run that has
+            // finished since, and its session, checks and status must not overwrite that run's.
+            if let Ok(now) = Workspace::open(&ws.root) {
+                ws.manifest = now.manifest;
+            }
             match ws.set_person(|m| m.builder = Some(name.clone())) {
                 Ok(()) => {
                     if let Some(open) = self.workspace.as_mut().filter(|o| o.root == ws.root) {
@@ -2684,6 +2689,40 @@ mod tests {
         assert_eq!(start(Some("Top"), None).as_deref(), Some("Top"), "the AI picked at the top builds, and the project keeps it");
         assert_eq!(start(Some("Top"), Some("Make")).as_deref(), Some("Make"), "an AI picked in Make comes first");
         assert_eq!(start(Some("Gone"), None).as_deref(), Some("Saved"), "a pick that can't build leaves the saved one");
+    }
+
+    /// Saving the AI picked now keeps what a run that finished after `ws` was read saved.
+    #[test]
+    fn saving_the_ai_picked_now_keeps_a_finished_runs_status() {
+        use craft_anything_ai::{AiConfig, BackendConfig, BackendEntry, BackendKind};
+        let d = tempfile::tempdir().unwrap();
+        let mut ws = Workspace::create(d.path(), "Notes", "A notes app", TargetRef::None).unwrap();
+        ws.set_person(|m| m.builder = Some("Saved".into())).unwrap();
+        let mut stale = ws.clone();
+        ws.set_status(Status::Ready, "The run finished.").unwrap();
+        let mut app = crate::demo::app(crate::demo::engine(craft_anything_engine::Mode::Beginner, true));
+        app.backends = ["Saved", "Top"]
+            .iter()
+            .map(|name| BackendConfig {
+                name: (*name).into(),
+                kind: BackendKind::OpenaiCompatible,
+                model: "qwen3:8b".into(),
+                base_url: Some("http://127.0.0.1:0/v1".into()),
+                ssh_host: None,
+                enabled: true,
+            })
+            .collect();
+        let mut cfg = AiConfig::default();
+        for b in &app.backends {
+            cfg.upsert(BackendEntry { config: b.clone(), options: Default::default() });
+        }
+        app.hub.save_config(&cfg).unwrap();
+        app.state.backend = Some("Top".into());
+        assert_eq!(app.builder_now(&mut stale, None).as_deref(), Some("Top"));
+        let disk = Workspace::open(&ws.root).unwrap().manifest;
+        assert_eq!(disk.builder.as_deref(), Some("Top"), "the pick is saved");
+        assert_eq!(disk.status, Status::Ready, "the finished run's status stays");
+        assert_eq!(disk.note, "The run finished.");
     }
 
     /// A request made in Make for a project that is already building starts nothing, so it leaves
