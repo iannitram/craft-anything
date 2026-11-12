@@ -14,6 +14,7 @@ mod grok;
 mod hermes;
 mod maki;
 mod opencode;
+mod qwen;
 pub use aider::Aider;
 pub use antigravity::Antigravity;
 pub use copilot::Copilot;
@@ -23,6 +24,7 @@ pub use grok::Grok;
 pub use hermes::Hermes;
 pub use maki::Maki;
 pub use opencode::OpenCode;
+pub use qwen::Qwen;
 
 /// What a run's arguments are built from.
 pub struct ArgsCx<'a> {
@@ -299,6 +301,7 @@ impl AgentAdapters {
                 Arc::new(Grok),
                 Arc::new(DeepSeekHarness),
                 Arc::new(Devin),
+                Arc::new(Qwen),
             ],
         }
     }
