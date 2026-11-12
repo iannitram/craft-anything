@@ -8,6 +8,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod approvals;
+pub mod build_loop;
 pub mod builders;
 pub mod chat;
 pub mod demo;
@@ -227,6 +228,14 @@ pub enum Done {
     },
     /// Ghidra and its Java were downloaded and set up for Deep mode.
     GhidraGot,
+    /// A build loop's project was read: its progress fingerprint and saved loop settings, at the
+    /// loop's start or after one of its runs.
+    LoopProgress {
+        root: PathBuf,
+        fingerprint: u64,
+        settings: Option<craft_anything_engine::workspace::build_loop::LoopSettings>,
+        after_run: bool,
+    },
     /// A tool started by a button finished (see `CraftApp::act`).
     Acted {
         tool: &'static str,
@@ -578,6 +587,10 @@ pub struct CraftApp {
     /// Projects stopped by "Send now": their waiting notes go as soon as the build stops. A build
     /// stopped by Pause keeps its notes waiting instead.
     pub sending_now: std::collections::HashSet<PathBuf>,
+    /// Build loops going, by project: runs that follow each other until a limit ends them.
+    pub loops: std::collections::HashMap<PathBuf, build_loop::ActiveLoop>,
+    /// The open project's loop settings while the popover beside Send edits them.
+    pub loop_draft: Option<build_loop::LoopDraft>,
     /// A build asked something since the last frame: the taskbar flashes if the window is behind.
     attention: bool,
     /// Jobs whose result goes into the conversation (a first look, an answer without an AI):
@@ -668,6 +681,8 @@ impl CraftApp {
             asking: Default::default(),
             pausing: Default::default(),
             sending_now: Default::default(),
+            loops: Default::default(),
+            loop_draft: None,
             pending_consent: Default::default(),
             next_consent: 1,
             attention: false,
@@ -1035,6 +1050,13 @@ impl CraftApp {
                 self.toast(tr("Called done. A new message carries on from here."), false);
             }
             ("project_approvals_set", r) => self.approval_set(r),
+            ("project_loop_set", Ok(v)) => {
+                // What was saved; the popover's draft follows it.
+                if let Some(ws) = self.workspace.as_mut().filter(|w| v["project"].as_str().is_some_and(|p| w.root == std::path::Path::new(p))) {
+                    let _ = ws.reload();
+                }
+            }
+            ("project_loop_set", Err(e)) => self.toast(format!("{} {}", tr("The build loop's settings weren't saved."), e.for_people()), true),
             ("project_questions_set", Ok(v)) => {
                 // What was saved (the person's other changes on disk come along).
                 if let Some(ws) = self.workspace.as_mut().filter(|w| v["project"].as_str().is_some_and(|p| w.root == std::path::Path::new(p))) {
@@ -1549,6 +1571,7 @@ impl CraftApp {
             Done::Preview { path, image } => self.preview_ready(path, image),
             Done::Tool { tool, params, route, result } => self.tool_done(tool, params, route, result),
             Done::Acted { tool, result } => self.acted(tool, result),
+            Done::LoopProgress { root, fingerprint, settings, after_run } => self.loop_progress(root, fingerprint, settings, after_run),
             Done::Opened { path, result } => match result {
                 Ok(v) => {
                     // Another target: a new conversation, so answers about two things don't mix.

@@ -66,6 +66,17 @@
       "description": "The builder finished its turn and the run's checks haven't reported on it yet, so a run\nthat picks this up only needs to check: nothing is left to build.",
       "type": "boolean"
     },
+    "build_loop": {
+      "description": "The person's build loop for this project (runs that follow each other until a limit ends\nthem); none: never set. The person's, like the budget. An older build drops it when it\nsaves, which only turns the loop off, so the format version stays.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LoopSettings"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "builder": {
       "description": "The AI the person chose to build this project (a backend's name); none: the default\nbuilder. The person's, like the budget.",
       "type": [
@@ -295,6 +306,138 @@
         "title",
         "passed"
       ]
+    },
+    "ClockTime": {
+      "description": "A time of day on the person's clock, 24-hour.",
+      "type": "object",
+      "properties": {
+        "hour": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "minute": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "hour",
+        "minute"
+      ]
+    },
+    "Limit": {
+      "description": "A limit the person can switch on or off; its value is kept while it's off.",
+      "type": "object",
+      "properties": {
+        "on": {
+          "type": "boolean"
+        },
+        "value": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "on",
+        "value"
+      ]
+    },
+    "Limit2": {
+      "description": "A limit the person can switch on or off; its value is kept while it's off.",
+      "type": "object",
+      "properties": {
+        "on": {
+          "type": "boolean"
+        },
+        "value": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "on",
+        "value"
+      ]
+    },
+    "Limit3": {
+      "description": "A limit the person can switch on or off; its value is kept while it's off.",
+      "type": "object",
+      "properties": {
+        "on": {
+          "type": "boolean"
+        },
+        "value": {
+          "$ref": "#/$defs/ClockTime"
+        }
+      },
+      "required": [
+        "on",
+        "value"
+      ]
+    },
+    "LoopSettings": {
+      "description": "The person's build loop for one project.",
+      "type": "object",
+      "properties": {
+        "on": {
+          "description": "The loop is switched on: a run that ends well starts the next one.",
+          "type": "boolean",
+          "default": false
+        },
+        "prompt": {
+          "description": "What each run is told; empty means [`DEFAULT_LOOP_PROMPT`].",
+          "type": "string",
+          "default": ""
+        },
+        "rounds_per_run": {
+          "description": "Refinement rounds in each run before the next run boots a fresh builder.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 2,
+          "minimum": 0
+        },
+        "runs": {
+          "description": "End after this many runs.",
+          "$ref": "#/$defs/Limit",
+          "default": {
+            "on": true,
+            "value": 10
+          }
+        },
+        "stalled_runs": {
+          "description": "End after this many runs in a row that changed nothing: no new findings, questions,\nhypotheses or plan steps, and no change to the build's files.",
+          "$ref": "#/$defs/Limit",
+          "default": {
+            "on": true,
+            "value": 2
+          }
+        },
+        "stop_at": {
+          "description": "End at this time on the person's clock (the next time it comes round after the loop starts).",
+          "$ref": "#/$defs/Limit3",
+          "default": {
+            "on": false,
+            "value": {
+              "hour": 7,
+              "minute": 0
+            }
+          }
+        },
+        "tokens": {
+          "description": "End once the loop's runs have used this many tokens (input and output) together.",
+          "$ref": "#/$defs/Limit2",
+          "default": {
+            "on": false,
+            "value": 20000000
+          }
+        }
+      }
     },
     "PageLikeness": {
       "description": "How alike one page of a website and its rebuild are.",

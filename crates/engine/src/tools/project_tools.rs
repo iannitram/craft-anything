@@ -5,6 +5,7 @@
 use crate::feed;
 use crate::inbox::{Answer, Inbox};
 use crate::tool::{Ctx, Effects, Requires, ToolOutput, ToolSpec, Toolset, parse_params, schema_of};
+use crate::workspace::build_loop::{ClockTime, Limit, LoopSettings};
 use crate::workspace::{ACTION_KINDS, ActionKind, Approval, Workspace};
 use craft_anything_evidence::{ErrorCode, ToolError};
 use craft_anything_platform::sync::Mutex;
@@ -140,6 +141,17 @@ pub fn specs() -> Vec<ToolSpec> {
             requires: Requires::Nothing,
             input_schema: schema_of::<QuestionsParams>,
             run: project_questions_set,
+        },
+        ToolSpec {
+            id: "project_loop_set",
+            title: "Set a project's build loop",
+            summary: "Read or change a project's build loop: when it's on, a build that ends well starts the next run with a fresh builder (a clean context, carrying on from the investigation's handoff), each told `prompt` (empty: the built-in one) and given `rounds_per_run` refinement rounds, until a limit ends it: `runs` (how many runs), `tokens` (input and output tokens the loop's runs use together), `stop_at` (a time on this computer's clock, {hour 0-23, minute}) or `stalled_runs` (runs in a row that changed nothing). Each limit is {on, value}. Fields left out keep what's saved; with none, says what's saved. Start the loop from the app's build loop settings or with `rebuild --loop` in the CLI. Only the person changes these: an agent's call may only switch the loop off.",
+            beginner: "Lets the builder keep going, run after run, until a limit you pick.",
+            toolset: Toolset::Projects,
+            effects: Effects::WRITES_FILESYSTEM,
+            requires: Requires::Nothing,
+            input_schema: schema_of::<LoopParams>,
+            run: project_loop_set,
         },
         ToolSpec {
             id: "project_approvals_set",
@@ -392,6 +404,75 @@ fn project_questions_set(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput,
         "questions": settings.questions_in(Some(&ws.manifest)),
         "chosen": ws.manifest.questions,
         "app_default": settings.questions(),
+    })))
+}
+
+/// What to change in a project's build loop; what's left out stays as saved.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoopParams {
+    /// The project's folder.
+    pub project: PathBuf,
+    #[serde(default)]
+    pub on: Option<bool>,
+    /// What each run is told; empty: the built-in prompt.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub rounds_per_run: Option<u32>,
+    #[serde(default)]
+    pub runs: Option<Limit<u32>>,
+    #[serde(default)]
+    pub tokens: Option<Limit<u64>>,
+    #[serde(default)]
+    pub stop_at: Option<Limit<ClockTime>>,
+    #[serde(default)]
+    pub stalled_runs: Option<Limit<u32>>,
+}
+
+fn project_loop_set(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
+    let p: LoopParams = parse_params(params)?;
+    let mut ws = open(&p.project)?;
+    let before = ws.manifest.build_loop.clone().unwrap_or_default();
+    let mut next = before.clone();
+    if let Some(on) = p.on {
+        next.on = on;
+    }
+    if let Some(prompt) = p.prompt {
+        next.prompt = prompt;
+    }
+    if let Some(r) = p.rounds_per_run {
+        next.rounds_per_run = r;
+    }
+    if let Some(l) = p.runs {
+        next.runs = l;
+    }
+    if let Some(l) = p.tokens {
+        next.tokens = l;
+    }
+    if let Some(l) = p.stop_at {
+        next.stop_at = l;
+    }
+    if let Some(l) = p.stalled_runs {
+        next.stalled_runs = l;
+    }
+    let next = next.sanitized();
+    if next != before {
+        // A builder can't keep itself running: what the loop does is the person's to choose.
+        let agent = matches!(ctx.caller, crate::Caller::Mcp | crate::Caller::Agent);
+        let only_off = LoopSettings { on: false, ..before.clone() } == next;
+        if agent && !only_off {
+            return Err(ToolError::new(ErrorCode::NoPermission, "An agent can only switch a project's build loop off.")
+                .with_remediation("Ask the person to change the loop in the app (the settings beside Send) or with the CLI."));
+        }
+        ws.set_person(|m| m.build_loop = Some(next.clone()))?;
+    }
+    let saved = ws.manifest.build_loop.clone().unwrap_or_default();
+    Ok(ToolOutput::Value(json!({
+        "project": ws.root,
+        "loop": saved,
+        "prompt_used": saved.prompt(),
+        "has_limit": saved.has_limit(),
     })))
 }
 
@@ -727,6 +808,28 @@ mod tests {
         let again = call("project_inbox_answer", json!({"project": ws.root, "id": q, "choice": "Red"}));
         assert!(again.is_err(), "a question is answered once");
         assert!(call("project_show", json!({"project": d.path().join("nope")})).is_err());
+    }
+
+    #[test]
+    fn a_projects_build_loop_is_the_persons_to_set() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = Workspace::create(d.path(), "Game", "A game", TargetRef::None).unwrap();
+        let e = Engine::new(crate::testing::session());
+        let call = |by: Caller, p: Value| e.call("project_loop_set", p, CallOptions::new(by)).map(|o| o.to_json()["result"].clone());
+        let read = call(Caller::Cli, json!({"project": ws.root})).unwrap();
+        assert_eq!((read["loop"]["on"].as_bool(), read["loop"]["rounds_per_run"].as_u64()), (Some(false), Some(2)));
+        assert!(Workspace::open(&ws.root).unwrap().manifest.build_loop.is_none(), "reading saves nothing");
+
+        let set = json!({"project": ws.root, "on": true, "rounds_per_run": 3, "stop_at": {"on": true, "value": {"hour": 7, "minute": 0}}});
+        assert!(call(Caller::Mcp, set.clone()).is_err(), "a builder can't start its own loop");
+        let r = call(Caller::Ui, set).unwrap();
+        assert_eq!((r["loop"]["on"].as_bool(), r["loop"]["rounds_per_run"].as_u64()), (Some(true), Some(3)));
+        let saved = Workspace::open(&ws.root).unwrap().manifest.build_loop.unwrap();
+        assert_eq!((saved.stop_at.get(), saved.runs.get()), (Some(ClockTime { hour: 7, minute: 0 }), Some(10)), "left out keeps the default");
+
+        assert!(call(Caller::Agent, json!({"project": ws.root, "runs": {"on": false, "value": 10}})).is_err(), "nor loosen a limit");
+        assert_eq!(call(Caller::Agent, json!({"project": ws.root, "on": false})).unwrap()["loop"]["on"], false, "but may switch it off");
+        assert_eq!(call(Caller::Cli, json!({"project": ws.root, "rounds_per_run": 0})).unwrap()["loop"]["rounds_per_run"], 1, "kept in range");
     }
 
     #[test]

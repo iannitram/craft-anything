@@ -245,6 +245,7 @@ fn workspace(slug: &str, name: &str, request: &str, target: TargetRef, status: S
             awaiting_check: false,
             not_working_checks: 0,
             decompiled: false,
+            build_loop: None,
         },
     }
 }

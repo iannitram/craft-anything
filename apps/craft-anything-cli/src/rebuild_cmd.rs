@@ -4,9 +4,10 @@
 
 use crate::{Cli, INTERRUPTED, make_engine};
 use clap::Args;
+use craft_anything_ai::rebuild::build_loop::{self as loop_rules, LoopEnd, LoopState, Next};
 use craft_anything_ai::rebuild::{self, RebuildRun, RunEvent, RunOptions};
 use craft_anything_ai::{AgentEvent, AiHub, BackendKind};
-use craft_anything_engine::inbox::{Answer, Request, RequestKind};
+use craft_anything_engine::inbox::{Answer, Request, RequestKind, now_ms};
 use craft_anything_engine::workspace::Workspace;
 use craft_anything_evidence::ToolError;
 use std::io::{BufRead as _, Write as _};
@@ -59,6 +60,12 @@ pub struct RebuildArgs {
     /// within the project's asset budget). Change it later with `project-assets-allow`.
     #[arg(long)]
     pub generate_assets: bool,
+    /// Keep building with the project's build loop: when a run ends well, the next starts with
+    /// a fresh builder that carries on from the last one's handoff, until a limit saved with
+    /// `project-loop-set` ends it (each run's rounds replace --rounds). With none saved: 2 rounds
+    /// a run, at most 10 runs, ending after 2 runs in a row that change nothing.
+    #[arg(long = "loop")]
+    pub build_loop: bool,
 }
 
 pub fn rebuild(cli: &Cli, a: &RebuildArgs) -> u8 {
@@ -159,12 +166,19 @@ fn run(cli: &Cli, a: &RebuildArgs) -> Result<bool, ToolError> {
     // A follow-up shows in the project's feed as the person typed it.
     let shown = message.clone();
     let good_enough = engine.session().settings.build.good_enough;
+    let root = ws.root.clone();
+    let mut build_loop = a.build_loop.then(|| {
+        let settings = ws.manifest.build_loop.clone().unwrap_or_default();
+        let state = LoopState::start(settings, now_ms(), loop_rules::fingerprint(&ws));
+        println!("Build loop: {}.", state.status());
+        state
+    });
     let opts = RunOptions {
         backend: a.backend.clone(),
         message,
         shown,
         continuing: a.resume,
-        max_rounds: a.rounds,
+        max_rounds: build_loop.as_ref().map_or(a.rounds, |l| l.settings.rounds()),
         good_enough,
         beginner: !cli.json,
         clean_room: Some(engine.session().clean_room()),
@@ -174,10 +188,52 @@ fn run(cli: &Cli, a: &RebuildArgs) -> Result<bool, ToolError> {
     if let Some(replacement) = replacement {
         eprintln!("{}", rebuild::replaced_builder_notice(&replacement.saved, &replacement.used));
     }
-    let mut ok = false;
+    loop {
+        let (ok, paused, ending) = watch(&mut run, a, build_loop.as_mut())?;
+        let Some(state) = build_loop.as_mut() else { return Ok(ok) };
+        let end = match (ending, ok, paused) {
+            (Some(why), _, _) => Some(why),
+            (None, _, true) => Some(LoopEnd::Stopped),
+            (None, false, _) => Some(LoopEnd::Failed),
+            (None, true, false) => match state.after_run(now_ms(), loop_rules::fingerprint(&Workspace::open(&root)?)) {
+                Next::Run => None,
+                Next::End(why) => Some(why),
+            },
+        };
+        if let Some(why) = end {
+            println!("{}", why.words());
+            return Ok(ok);
+        }
+        println!("Build loop: {}. A fresh builder carries on.", state.status());
+        let opts = RunOptions {
+            backend: a.backend.clone(),
+            message: Some(state.settings.prompt().to_string()),
+            shown: Some(format!("Build loop, run {}: a fresh builder carries on from the last one's handoff.", state.runs.saturating_add(1))),
+            fresh_session: true,
+            max_rounds: state.settings.rounds(),
+            good_enough,
+            beginner: !cli.json,
+            clean_room: Some(engine.session().clean_room()),
+            ..RunOptions::default()
+        };
+        run = RebuildRun::start(&hub, Workspace::open(&root)?, opts)?;
+    }
+}
+
+/// Print a run's events and answer its questions until it ends: (ended well, paused, the loop
+/// limit that stopped it mid-run).
+fn watch(run: &mut RebuildRun, a: &RebuildArgs, mut build_loop: Option<&mut LoopState>) -> Result<(bool, bool, Option<LoopEnd>), ToolError> {
+    let (mut ok, mut was_paused, mut ending) = (false, false, None);
     let mut line_open = false;
     loop {
         if INTERRUPTED.load(Ordering::SeqCst) {
+            run.stop();
+        }
+        // A loop's stop time or token budget stops the run it's in.
+        if ending.is_none()
+            && let Some(why) = build_loop.as_deref().and_then(|l| l.over_limit_now(now_ms()))
+        {
+            ending = Some(why);
             run.stop();
         }
         for e in run.poll() {
@@ -202,6 +258,11 @@ fn run(cli: &Cli, a: &RebuildArgs) -> Result<bool, ToolError> {
                     }
                     if let Some(l) = log {
                         println!("  log: {}", l.display());
+                    }
+                }
+                RunEvent::Agent(AgentEvent::TurnDone { input_tokens, output_tokens, .. }) => {
+                    if let Some(l) = build_loop.as_deref_mut() {
+                        l.add_tokens(input_tokens.saturating_add(output_tokens));
                     }
                 }
                 RunEvent::Agent(_) => {}
@@ -235,6 +296,7 @@ fn run(cli: &Cli, a: &RebuildArgs) -> Result<bool, ToolError> {
                         }
                     );
                     ok = o;
+                    was_paused = paused;
                 }
             }
         }
@@ -244,7 +306,11 @@ fn run(cli: &Cli, a: &RebuildArgs) -> Result<bool, ToolError> {
         std::thread::sleep(Duration::from_millis(100));
     }
     let _ = std::io::stdout().flush();
-    Ok(ok)
+    // Ctrl+C ends a loop as it ends a run.
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        was_paused = true;
+    }
+    Ok((ok, was_paused, ending))
 }
 
 fn end_line(open: &mut bool) {

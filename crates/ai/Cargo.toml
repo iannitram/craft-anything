@@ -23,6 +23,8 @@ regex = { workspace = true }
 toml = { workspace = true }
 ureq = "3"
 dirs = "6"
+# The build loop's stop time, on this computer's clock (pure Rust; reads the system time zone).
+jiff = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", default-features = false, features = ["async-secret-service", "async-io", "crypto-rust"] }

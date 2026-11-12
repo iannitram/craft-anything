@@ -346,6 +346,7 @@ fn composer(app: &mut CraftApp, ui: &mut Ui, width: f32, dense: bool) {
                 recall: false,
                 history: Some(&history),
                 font_size: if dense { 14.0 } else { 16.0 },
+                settings: None,
             },
         );
         if out.stop {
