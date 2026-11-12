@@ -2464,6 +2464,42 @@ mod picking_up_a_build {
         assert!(deep.agent_spec(&ws, &entry, &RunOptions::default()).is_ok(), "a Deep run may resume its session");
     }
 
+    /// #13: one session serves every open project; a builder is handed only its own project's
+    /// program, even when another project's program is the session's active one. Removing the
+    /// `shared_targets_within` filter in `agent_spec` fails this test.
+    #[test]
+    fn a_builder_is_handed_only_its_own_projects_target() {
+        let d = tempfile::tempdir().unwrap();
+        let program_a = d.path().join("alpha.bin");
+        let program_b = d.path().join("beta.bin");
+        std::fs::write(&program_a, b"program a").unwrap();
+        std::fs::write(&program_b, b"program b").unwrap();
+        let ws_a = Workspace::create(d.path(), "A", "Copy a", TargetRef::Local { path: program_a.clone() }).unwrap();
+        let ws_none = Workspace::create(d.path(), "None", "Make a thing", TargetRef::None).unwrap();
+        let entry = crate::BackendEntry {
+            config: crate::BackendConfig {
+                name: "Claude".into(),
+                kind: BackendKind::AgentCli,
+                model: "claude-code".into(),
+                base_url: None,
+                ssh_host: None,
+                enabled: true,
+            },
+            options: crate::BackendOptions::default(),
+        };
+        let w = check_worker(&ws_a, true);
+        // Open A, then B: B (another project's program) is now the session's active target.
+        for program in [&program_a, &program_b] {
+            w.call("core_target_open", serde_json::json!({"path": program.display().to_string()})).unwrap();
+        }
+        assert_eq!(w.engine.session().shared_targets().len(), 2, "both programs are open in the session");
+        let spec = w.agent_spec(&ws_a, &entry, &RunOptions::default()).unwrap();
+        let handed: Vec<PathBuf> = spec.targets.iter().map(|t| t.path.clone()).collect();
+        assert_eq!(handed, vec![program_a.clone()], "only project A's program, selected (last)");
+        let none = w.agent_spec(&ws_none, &entry, &RunOptions::default()).unwrap();
+        assert!(none.targets.is_empty(), "a project with no target is handed none");
+    }
+
     /// Add the local API backend the transcript tests start.
     fn local_api(b: &Bench) {
         b.hub

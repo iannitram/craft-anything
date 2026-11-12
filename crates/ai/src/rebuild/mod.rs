@@ -780,7 +780,11 @@ impl Worker {
     fn agent_spec(&self, ws: &Workspace, entry: &crate::BackendEntry, opts: &RunOptions) -> Result<CliSpec, ToolError> {
         let (deep, config_dir, targets) = {
             let session = self.engine.session();
-            (!session.clean_room(), session.config_dir(), session.shared_targets())
+            let own = match &ws.manifest.target {
+                TargetRef::Local { path } => session.shared_targets_within(path),
+                _ => Vec::new(),
+            };
+            (!session.clean_room(), session.config_dir(), own)
         };
         // A fresh builder resumes nothing, so it can't carry a Deep session into Clean room.
         if !opts.fresh_session {

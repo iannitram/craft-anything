@@ -38,8 +38,13 @@ impl Worker {
         if remote {
             return Ok(());
         }
-        // Nothing to look for when something is open already.
-        if !self.engine.session().shared_targets().is_empty() {
+        // Nothing to look for when this project's program is open already (another project's
+        // doesn't count: the builder is handed only its own).
+        let already_open = match &ws.manifest.target {
+            TargetRef::Local { path } => !self.engine.session().shared_targets_within(path).is_empty(),
+            _ => false,
+        };
+        if already_open {
             return Ok(());
         }
         let Some(program) = program_to_reopen(&ws.manifest.target, kind, deep) else { return Ok(()) };
