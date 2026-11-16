@@ -96,6 +96,24 @@ pub fn tokens_words(n: u64) -> String {
     trf("{n} tokens", &[("n", &tokens_short(n))])
 }
 
+/// Use a lower bound for a partial count, and say when the count is entirely unknown.
+fn reported_tokens(n: u64, incomplete: bool, units: bool) -> String {
+    if n == 0 && incomplete {
+        return tr("Unknown");
+    }
+    // A partial count is a lower bound: truncate before the millions formatter rounds.
+    let count = match (incomplete, n) {
+        (true, 1_000_000..) => format!("{}.{}M+", n / 1_000_000, n / 100_000 % 10),
+        (true, _) => format!("{}+", tokens_short(n)),
+        (false, _) => tokens_short(n),
+    };
+    if units { trf("{n} tokens", &[("n", &count)]) } else { count }
+}
+
+pub fn token_total(u: &ProjectUsage, units: bool) -> String {
+    reported_tokens(u.tokens(), u.tokens_incomplete, units)
+}
+
 /// "45s", "12m 05s", "1h 04m".
 pub fn duration_words(d: Duration) -> String {
     let s = d.as_secs();
@@ -109,7 +127,9 @@ pub fn duration_words(d: Duration) -> String {
 /// The tooltip for usage: what each number is, and what it counts (`counts`, e.g. "Every build
 /// of this project." or "Since Craft Anything opened.").
 pub fn explain(u: &ProjectUsage, counts: &str) -> String {
-    let mut lines = vec![trf("{in} in, {out} out.", &[("in", &tokens_words(u.input_tokens)), ("out", &tokens_words(u.output_tokens))])];
+    let input = reported_tokens(u.input_tokens, u.tokens_incomplete, true);
+    let output = reported_tokens(u.output_tokens, u.tokens_incomplete, true);
+    let mut lines = vec![trf("{in} in, {out} out.", &[("in", &input), ("out", &output)])];
     if u.priced && u.estimated_usd() >= NOT_MONEY {
         lines.push(tr(ESTIMATE_NOTE));
         if u.api_billed_usd >= NOT_MONEY {
@@ -168,6 +188,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cost_stat(&ProjectUsage::load(dir.path())).label, "AI cost (estimate)");
+    }
+
+    #[test]
+    fn an_unreported_turn_is_visible_and_reported_counts_are_lower_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        ProjectUsage::update(dir.path(), |u| u.tokens_incomplete = true).unwrap();
+        let mut usage = ProjectUsage::load(dir.path());
+        assert!(usage.used_anything());
+        assert_eq!(token_total(&usage, true), "Unknown");
+        assert!(explain(&usage, "x").starts_with("Unknown in, Unknown out."));
+        usage.add_turn(17, 0, None, false);
+        assert_eq!(token_total(&usage, true), "17+ tokens");
+        assert_eq!(token_total(&usage, false), "17+");
+        assert_eq!(reported_tokens(999, true, false), "999+");
+        assert_eq!(reported_tokens(12_999, true, false), "12k+");
+        assert_eq!(reported_tokens(1_000_000, true, false), "1.0M+");
+        assert_eq!(reported_tokens(1_980_000, true, false), "1.9M+");
+        assert!(explain(&usage, "x").starts_with("17+ tokens in, Unknown out."));
     }
 
     #[test]

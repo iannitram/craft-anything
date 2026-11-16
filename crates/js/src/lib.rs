@@ -77,12 +77,18 @@ pub(crate) fn guarded<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static)
     Ok(f())
 }
 
-/// Pick a source type from the file name.
+/// Pick a source type from the file name. As in Node and TypeScript, `.cts` and `.cjs` are
+/// CommonJS and `.mts` and `.mjs` are ES modules whatever their syntax; `.ts` and `.js` are
+/// decided by the syntax.
 pub fn source_type_for(path: &str) -> SourceType {
     let lower = path.to_ascii_lowercase();
     if lower.ends_with(".tsx") {
         SourceType::tsx()
-    } else if lower.ends_with(".ts") || lower.ends_with(".mts") || lower.ends_with(".cts") {
+    } else if lower.ends_with(".cts") {
+        SourceType::cjs().with_typescript(true)
+    } else if lower.ends_with(".mts") {
+        SourceType::mjs().with_typescript(true)
+    } else if lower.ends_with(".ts") {
         SourceType::ts()
     } else if lower.ends_with(".mjs") {
         SourceType::mjs().with_jsx(false)
@@ -110,8 +116,18 @@ pub fn admit(src: &str, limits: &Limits) -> Result<(), String> {
         return Err(format!("{} bytes is over the {}-byte parse limit", src.len(), limits.max_parse_bytes));
     }
     let mut nesting = lex::Nesting::default();
-    let truncated = lex::scan(src, limits.max_tokens, |t| nesting.feed(&t));
-    if truncated {
+    let scanned = lex::scan_checked(src, limits.max_tokens, |t| nesting.feed(&t));
+    if scanned.lookahead_exhausted {
+        // Whether those slashes are regexes or division is unknown, so fail closed rather than
+        // admit a source whose nesting the guard could not judge.
+        return Err("the ambiguous `yield /…/` lookahead ran out before the end of a line".into());
+    }
+    if scanned.ambiguous_boundaries {
+        // The regex and division readings disagree on where a token or string ends (a quote inside
+        // it, or a slash/update operator after it), so fail closed rather than accept a shallow one.
+        return Err("a `yield /…/` read as a regex hides division token boundaries (a quote or unbalanced bracket inside it, or a comment, slash or update operator after it)".into());
+    }
+    if scanned.truncated {
         return Err(format!("more than {} tokens", limits.max_tokens));
     }
     let depth = nesting.max;
@@ -141,7 +157,9 @@ pub fn analyze(path: &str, src: &str, limits: &Limits) -> Analysis {
     f.bytes = src.len();
     f.lines = lines.count();
     if f.source_map_url.is_none() {
-        f.source_map_url = find_map_url(src);
+        // One reader for every path: the formats one accepts the standard spacing after the
+        // marker and rejects a URL containing whitespace.
+        f.source_map_url = craft_anything_formats::sourcemap::find_source_mapping_url(src);
     }
     for v in vendor::marker_vendors(&f.strings) {
         if !f.vendors.iter().any(|x| x.name == v.name) {
@@ -150,22 +168,6 @@ pub fn analyze(path: &str, src: &str, limits: &Limits) -> Analysis {
     }
     analysis.bundle.bundlers = bundle::classify(&f.bundler_markers, &analysis.bundle, &f.strings);
     analysis
-}
-
-fn find_map_url(src: &str) -> Option<String> {
-    // Only terminal comments count, but inline maps can be larger than a short scan window.
-    for line in src.lines().rev().take(8) {
-        let t = line.trim();
-        for p in ["//# sourceMappingURL=", "//@ sourceMappingURL=", "/*# sourceMappingURL="] {
-            if let Some(u) = t.strip_prefix(p) {
-                let u = u.trim_end_matches("*/").trim();
-                if !u.is_empty() {
-                    return Some(u.to_string());
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Most tokens the fallback keeps in memory at once.

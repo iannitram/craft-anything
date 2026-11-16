@@ -85,6 +85,14 @@ pub fn captured(ws: &Workspace) -> Vec<Value> {
     CASES.iter().filter_map(|(name, _)| std::fs::read(dir.join(format!("{}.json", slug(name)))).ok()).filter_map(|b| serde_json::from_slice(&b).ok()).collect()
 }
 
+/// The original program's name, which its printed text may contain. Clean room takes it from the
+/// picked path; only Deep mode looks inside (a launcher's script, an app bundle's Info.plist).
+pub(crate) fn original_name(target: &TargetRef, deep: bool) -> String {
+    let TargetRef::Local { path } = target else { return String::new() };
+    let program = if deep { locate(path, false).0 } else { path.clone() };
+    program.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
 fn slug(name: &str) -> String {
     let s: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
     s.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-")
@@ -318,18 +326,14 @@ impl Check for RunsCheck {
     fn run(&self, cx: &mut CheckCx) -> Result<CheckResult, ToolError> {
         let (ws, round) = (cx.ws, cx.round);
         let godot = cx.godot();
-        let Some((program, base)) = craft_anything_engine::outputs::launch(&ws.app_dir(), godot.as_deref()) else {
+        let Some((program, base)) = craft_anything_engine::outputs::launch_now(&ws.app_dir(), godot.as_deref()) else {
             return Ok(CheckResult::new(self.id(), round, false, screenshot::NO_PROGRAM));
         };
         let program = craft_anything_engine::outputs::absolute_program(&program);
         let working_directory = craft_anything_engine::workspace::absolute(&ws.app_dir());
         let out = ws.checks_dir().join(format!("round-{round}")).join(RUNS_DIR);
         std::fs::create_dir_all(&out).map_err(|e| ToolError::io(out.display(), e))?;
-        let original_name = match &ws.manifest.target {
-            TargetRef::Local { path } => locate(path, false).0.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-            _ => String::new(),
-        };
-        let names = vec![original_name, program.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()];
+        let names = vec![original_name(&ws.manifest.target, cx.deep()), program.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()];
         let (mut claims, mut notes, mut artifacts) = (Vec::new(), Vec::new(), Vec::new());
         for original in captured(ws) {
             let name = original.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -373,6 +377,25 @@ impl Check for RunsCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Clean room names the original by the path that was picked; only Deep mode reads the app
+    /// bundle's Info.plist for the program inside it.
+    #[test]
+    fn clean_room_names_the_original_without_looking_inside() {
+        let d = tempfile::tempdir().unwrap();
+        let app = d.path().join("Tip Calculator.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>TipCalc</string></dict></plist>"#,
+        )
+        .unwrap();
+        std::fs::write(app.join("Contents/MacOS/TipCalc"), b"\xcf\xfa\xed\xfe").unwrap();
+        let target = TargetRef::Local { path: app };
+        assert_eq!(original_name(&target, false), "Tip Calculator");
+        assert_eq!(original_name(&target, true), "TipCalc");
+        assert_eq!(original_name(&TargetRef::None, true), "");
+    }
 
     /// A run check from a relative project must give its child an absolute executable and working
     /// folder; a relative working folder is refused before the program starts.

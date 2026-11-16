@@ -147,6 +147,16 @@ fn recover_zip64_record(data: &[u8], loc: usize, disk_entries: u64, total: u64, 
 
 /// Parse the central directory, keeping at most `max_entries`.
 pub fn parse(data: &[u8], max_entries: usize) -> Result<ZipArchive, ZipError> {
+    parse_directory(data, max_entries, None)
+}
+
+/// Search the validated directory while retaining only the requested entry.
+pub(crate) fn has_entry(data: &[u8], name: &str) -> bool {
+    parse_directory(data, 1, Some(name)).is_ok_and(|archive| !archive.entries.is_empty())
+}
+
+/// List directory entries, optionally retaining only a matching decoded name.
+fn parse_directory(data: &[u8], max_entries: usize, name_filter: Option<&str>) -> Result<ZipArchive, ZipError> {
     let r = Reader::new(data);
     let eocd = find_eocd(data).ok_or(ZipError::NotZip)?;
     let mut disk = u32::from(r.u16_le(eocd + 4).ok_or(ZipError::Truncated("end record"))?);
@@ -317,18 +327,20 @@ pub fn parse(data: &[u8], max_entries: usize) -> Result<ZipArchive, ZipError> {
             return Err(ZipError::Unsupported("multi-volume ZIP archives".into()));
         }
         let name = unicode_name.map(str::to_owned).unwrap_or_else(|| decode_name(name_bytes, flags)).replace('\\', "/");
-        entries.push(ZipEntry {
-            is_dir: name.ends_with('/') || unix_mode.is_some_and(|m| m & 0o170000 == 0o040000) || (matches!(host, 0 | 10 | 14) && attrs & 0x10 != 0),
-            name,
-            method,
-            flags,
-            crc32,
-            compressed_size: csize,
-            uncompressed_size: usize_,
-            local_header_offset: local.saturating_add(prefix),
-            encrypted: flags & 1 != 0,
-            unix_mode,
-        });
+        if name_filter.is_none_or(|wanted| wanted == name) {
+            entries.push(ZipEntry {
+                is_dir: name.ends_with('/') || unix_mode.is_some_and(|m| m & 0o170000 == 0o040000) || (matches!(host, 0 | 10 | 14) && attrs & 0x10 != 0),
+                name,
+                method,
+                flags,
+                crc32,
+                compressed_size: csize,
+                uncompressed_size: usize_,
+                local_header_offset: local.saturating_add(prefix),
+                encrypted: flags & 1 != 0,
+                unix_mode,
+            });
+        }
         seen += 1;
         pos = entry_end;
     }

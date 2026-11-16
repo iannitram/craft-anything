@@ -11,7 +11,8 @@ not used for modified versions.
 
 | File | Font | Copyright | Source | Licence |
 |---|---|---|---|---|
-| `DMSans-Regular.ttf`, `DMSans-Medium.ttf`, `DMSans-Bold.ttf` | DM Sans 1.200 (body text, labels, headlines) | © 2014-2017 Indian Type Foundry, © 2019 Google LLC | https://github.com/googlefonts/dm-fonts (`Sans/Exports/`, commit 23aafb3) | `OFL-DMSans.txt` |
+| `Figtree-Variable.ttf` | Figtree, variable (text, labels and headings in the app) | © 2022 The Figtree Project Authors | https://github.com/google/fonts/tree/main/ofl/figtree (`Figtree[wght].ttf`, renamed) | `OFL-Figtree.txt` |
+| `DMSans-Regular.ttf`, `DMSans-Medium.ttf`, `DMSans-Bold.ttf` | DM Sans 1.200 (the macOS disk image's background) | © 2014-2017 Indian Type Foundry, © 2019 Google LLC | https://github.com/googlefonts/dm-fonts (`Sans/Exports/`, commit 23aafb3) | `OFL-DMSans.txt` |
 | `JetBrainsMono-Regular.ttf` | JetBrains Mono (code views) | © 2020 The JetBrains Mono Project Authors | https://github.com/JetBrains/JetBrainsMono | `OFL-JetBrainsMono.txt` |
 | `GeistMono-Regular.ttf`, `GeistMono-Medium.ttf` | Geist Mono (labels and buttons) | © 2024 The Geist Project Authors | https://github.com/vercel/geist-font (`fonts/GeistMono/ttf/`) | `OFL-GeistMono.txt` |
 

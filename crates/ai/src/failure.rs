@@ -14,6 +14,9 @@ pub enum FailureKind {
     Configuration,
     Transient,
     RateLimited,
+    /// A plan's allowance (Claude's 5-hour or weekly limit) is used up: it comes back in hours,
+    /// so trying again before then only fails again (#1919).
+    UsageLimit,
     Unknown,
 }
 
@@ -23,6 +26,23 @@ pub struct TurnFailure {
     pub kind: FailureKind,
     pub retry_after_secs: Option<u64>,
 }
+
+/// The error codes and types from a service that this crate reads: the ones [`TurnFailure::from_api`]
+/// and the stream readers match on, and `invalid_request_error`, which a rejected request carries.
+/// A failure log writes a service's code only when it is one of these, from this list: any other
+/// code could be words from the request (R5.5).
+pub(crate) const KNOWN_PROVIDER_ERRORS: &[&str] = &[
+    "api_error",
+    "authentication_error",
+    "billing_error",
+    "insufficient_quota",
+    "invalid_api_key",
+    "invalid_request_error",
+    "overloaded_error",
+    "permission_error",
+    "rate_limit_error",
+    "rate_limit_exceeded",
+];
 
 /// No failed turn waits more than fifteen minutes before its next attempt.
 pub(crate) const MAX_RETRY_WAIT: u64 = 15 * 60;

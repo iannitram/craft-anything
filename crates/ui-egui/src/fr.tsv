@@ -1462,3 +1462,4 @@ Couldn't change the approvals:	Impossible de modifier les autorisations :
 What the builder may do without asking you, in this project.	Ce que le constructeur peut faire sans vous demander, dans ce projet.
 Default follows Auto mode: with it on, what can be undone goes ahead and the rest is refused; with it off, the builder asks.	Par défaut suit le mode automatique : activé, ce qui peut être annulé se fait et le reste est refusé ; désactivé, le constructeur demande.
 Connecting to {name}… {seconds} s	Connexion à {name}… {seconds} s
+Some shared files could not be hard-linked and were copied instead ({size}).	Certains fichiers partagés n'ont pas pu être liés en dur et ont été copiés ({size}).

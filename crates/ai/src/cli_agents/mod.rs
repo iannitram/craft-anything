@@ -347,13 +347,13 @@ pub enum Access {
     CleanRoomQuestion,
 }
 
-/// argv (after the program) for one prompt.
 /// A retried turn says "carry on" only when it really continues the saved session; a fresh
 /// session needs the original message.
 fn turn_text<'a>(retry: bool, resumes: bool, resume: Option<&str>, text: &'a str) -> &'a str {
     if retry && resumes && resume.is_some() { crate::failure::CONTINUE_TURN } else { text }
 }
 
+/// argv (after the program) for one prompt.
 pub fn build_args(
     adapter: &dyn AgentAdapter,
     opts: &BackendOptions,
@@ -363,12 +363,54 @@ pub fn build_args(
     resume: Option<&str>,
     access: Access,
 ) -> Vec<String> {
+    args_for(adapter, opts, prompt, preamble, mcp, resume, access, None)
+}
+
+/// [`build_args`], with the message already written to `message_file` for an adapter that
+/// [reads it there](AgentAdapter::reads_message_file).
+#[expect(clippy::too_many_arguments, reason = "build_args' inputs and the file")]
+fn args_for(
+    adapter: &dyn AgentAdapter,
+    opts: &BackendOptions,
+    prompt: &str,
+    preamble: &str,
+    mcp: &McpCommand,
+    resume: Option<&str>,
+    access: Access,
+    message_file: Option<&Path>,
+) -> Vec<String> {
     // A leading dash would be read as a flag.
     let prompt = if prompt.starts_with('-') { format!(" {prompt}") } else { prompt.to_string() };
     let builder = matches!(access, Access::Build | Access::CleanRoomBuild);
     let question = matches!(access, Access::Question | Access::CleanRoomQuestion);
     let reads_checked = matches!(access, Access::CleanRoomBuild | Access::CleanRoomQuestion | Access::CleanRoomAnalyse);
-    adapter.args(&ArgsCx { options: opts, prompt: &prompt, preamble, mcp, resume, builder, reads_checked, question })
+    adapter.args(&ArgsCx { options: opts, prompt: &prompt, preamble, mcp, resume, builder, reads_checked, question, message_file })
+}
+
+/// The message written to a private file for one run, removed when the run is over.
+struct MessageFile(PathBuf);
+
+impl MessageFile {
+    /// None when it couldn't be written: the message then goes in argv as before.
+    fn write(dir: &Path, text: &str) -> Option<Self> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let path = dir.join(format!("craft-anything-message-{}-{nanos}-{n}.txt", std::process::id()));
+        match craft_anything_platform::fs::write_atomic_private(&path, text.as_bytes()) {
+            Ok(()) => Some(Self(path)),
+            Err(e) => {
+                log::warn!("couldn't write the message to a file, so it goes on the command line: {}", e.message);
+                None
+            }
+        }
+    }
+}
+
+impl Drop for MessageFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// What a run may do with files: a question reads only, a builder builds, anything else analyses;
@@ -459,6 +501,29 @@ pub fn claude_code_failure(why: &str) -> (String, Option<String>) {
 
 /// [`claude_code_failure`] for Claude Code in a folder chosen for it (`folder`), whose sign-in is
 /// its own.
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// What to do about a used-up plan limit (`kind` as Claude Code names it), `resets_at` being
+/// Unix seconds and `now` the time it's said.
+pub(crate) fn plan_limit_fix(kind: &str, resets_at: Option<u64>, now: u64) -> String {
+    let which = match kind {
+        "five_hour" => "5-hour",
+        k if k.starts_with("seven_day") => "weekly",
+        _ => "usage",
+    };
+    let when = match resets_at.map(|at| at.saturating_sub(now)) {
+        Some(s) if s >= 2 * 3600 => format!(" It resets in about {} hours.", s.div_ceil(3600)),
+        Some(s) if s > 60 => format!(" It resets in about {} minutes.", s.div_ceil(60)),
+        Some(_) => " It resets in a minute or so.".to_string(),
+        None => String::new(),
+    };
+    format!(
+        "Your Claude plan's {which} limit is used up, so the build stopped instead of trying again.{when} Press Try again once it has reset, or choose another AI to build in Settings → AI."
+    )
+}
+
 pub(crate) fn claude_code_failure_in(why: &str, folder: Option<&Path>) -> (String, Option<String>) {
     if why.to_ascii_lowercase().contains(TOO_OLD_FOR_MODEL) {
         return (
@@ -516,6 +581,9 @@ pub struct StreamParser {
     pub session_missing: bool,
     /// A protocol fact about the failed turn, independent of the text shown to the person.
     pub failure: Option<TurnFailure>,
+    /// Claude Code said the plan's limit refused this turn: which limit (`five_hour`,
+    /// `seven_day`…) and when it resets, in Unix seconds.
+    pub plan_limit: Option<(String, Option<u64>)>,
 }
 
 fn short_tool(name: &str) -> String {
@@ -562,6 +630,7 @@ impl StreamParser {
             saw_result: false,
             session_missing: false,
             failure: None,
+            plan_limit: None,
         }
     }
 
@@ -910,7 +979,7 @@ fn end_turn(busy: &AtomicBool, done: AgentEvent, send: impl FnOnce(AgentEvent)) 
 
 /// The `TurnDone` that ends a turn of `backend` with no usage to report.
 fn nothing_done(backend: &str) -> AgentEvent {
-    AgentEvent::TurnDone { backend: backend.to_string(), input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false }
+    AgentEvent::TurnDone { backend: backend.to_string(), input_tokens: 0, output_tokens: 0, tokens_unknown: false, cost_usd: None, cost_is_estimate: false }
 }
 
 /// How long a turn's process may keep running after its stream already said the turn was done
@@ -951,10 +1020,25 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
         });
         return nothing_done(&name);
     }
+    // An access mode this agent can't hold (Clean room, for one whose reads we can't check) is
+    // refused before anything else starts.
+    if let Err(e) = adapter.validate_access(access_for(spec.builder.is_some(), spec.deep, spec.question)) {
+        let _ = tx.send(AgentEvent::Error { message: e.message, remediation: e.remediation, log: None });
+        return nothing_done(&name);
+    }
     // The folder the agent's process starts in below.
     let cwd = remote.is_none().then(|| spec.project.clone().or_else(|| std::env::current_dir().ok())).flatten();
-    if let Err(e) = adapter.check_native_options(&spec.options, cwd.as_deref()) {
-        let _ = tx.send(AgentEvent::Error { message: e.message, remediation: e.remediation, log: None });
+    let checked = match remote.as_deref() {
+        Some(host) => adapter.check_remote_options(&spec.options, host, stop),
+        None => adapter.check_native_options(&spec.options, cwd.as_deref()),
+    };
+    if let Err(e) = checked {
+        let event = if e.code == ErrorCode::Cancelled {
+            AgentEvent::Status { text: "Stopped.".into() }
+        } else {
+            AgentEvent::Error { message: e.message, remediation: e.remediation, log: None }
+        };
+        let _ = tx.send(event);
         return nothing_done(&name);
     }
     if let Err(e) = adapter.validate_model(&spec.config, &spec.options, spec.project.as_deref(), stop) {
@@ -1017,7 +1101,11 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
         return nothing_done(&name);
     }
     let access = access_for(spec.builder.is_some(), spec.deep, spec.question);
-    let args = build_args(adapter.as_ref(), &spec.options, text, &preamble, &mcp, if resumes { resume.as_deref() } else { None }, access);
+    // Kept until the run is over; over SSH the file would be on the wrong computer.
+    let message_file =
+        (remote.is_none() && adapter.reads_message_file()).then(|| MessageFile::write(&std::env::temp_dir(), &format!("{preamble}{text}"))).flatten();
+    let resume_arg = if resumes { resume.as_deref() } else { None };
+    let args = args_for(adapter.as_ref(), &spec.options, text, &preamble, &mcp, resume_arg, access, message_file.as_ref().map(|f| f.0.as_path()));
     let shown = FailureContext::new(&program, &args, text, remote.as_deref(), spec);
     // A builder turn may take hours and sit silent for long stretches: Ghidra's first look at a big
     // game, an engine build, or the person answering a question. Claude Code's own limits are
@@ -1026,8 +1114,8 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
     let (turn, quiet) = if builder { (24 * 3600, 8 * 3600) } else { (30 * 60, 15 * 60) };
     let mut env = agent_env(builder, spec.options.effort);
     let tool_env = match &remote {
-        None => adapter.mcp_env(&mcp),
-        Some(host) => adapter.remote_tool_server(host, &mcp),
+        None => adapter.mcp_env(&mcp, access),
+        Some(host) => adapter.remote_tool_server(host, &mcp, access),
     };
     match tool_env {
         Ok(var) => env.extend(var),
@@ -1042,6 +1130,9 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
         && let (Some(var), Some(dir)) = (adapter.folder_var(), spec.options.config_dir_text())
     {
         env.push((var, dir.to_string()));
+    }
+    if remote.is_some() {
+        env.extend(adapter.remote_run_env());
     }
     let (prog, argv) = match &remote {
         Some(host) => ("ssh".to_string(), crate::ssh::ssh_line_args(host, remote_command(&program, args, &env))),
@@ -1067,7 +1158,7 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
     let (held2, agent2, program2, host2) = (held.clone(), agent.clone(), program.clone(), remote.clone());
     let parser = Arc::new(Mutex::new(StreamParser::new(adapter.clone())));
     let (p2, tx2, tx_err, lost2, failure2) = (parser.clone(), tx.clone(), tx.clone(), lost.clone(), failure.clone());
-    let (p_err, lost_err, adapter_err) = (parser.clone(), lost.clone(), adapter.clone());
+    let (stderr_parser, stderr_lost) = (parser.clone(), lost.clone());
     let failed_tools = Arc::new(AtomicBool::new(false));
     let (failed_tools2, failed_tools3) = (failed_tools.clone(), failed_tools.clone());
     let stop2 = stop.clone();
@@ -1121,16 +1212,18 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
             }
         })
         .on_stderr_line(move |l| {
+            let mut p = stderr_parser.lock().unwrap_or_else(PoisonError::into_inner);
+            let adapter = p.adapter.clone();
+            let events = adapter.parse_stderr(&mut p, l);
+            if p.session_missing {
+                stderr_lost.store(true, Ordering::SeqCst);
+            }
+            drop(p);
+            for event in events {
+                let _ = tx_err.send(event);
+            }
             if !l.trim().is_empty() {
                 let _ = tx_err.send(AgentEvent::Output { text: l.to_string() });
-                let mut p = p_err.lock().unwrap_or_else(PoisonError::into_inner);
-                let events = adapter_err.parse_stderr(&mut p, l);
-                if p.session_missing {
-                    lost_err.store(true, Ordering::SeqCst);
-                }
-                for e in events {
-                    let _ = tx_err.send(e);
-                }
             }
         })
         .remediation(format!("Install {}, or choose its program in Settings → AI.", display_for(&agent)));
@@ -1228,7 +1321,14 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
     } else {
         p.cost_usd
     };
-    AgentEvent::TurnDone { backend: name, input_tokens: p.input_tokens, output_tokens: p.output_tokens, cost_usd, cost_is_estimate: true }
+    AgentEvent::TurnDone {
+        backend: name,
+        input_tokens: p.input_tokens,
+        output_tokens: p.output_tokens,
+        tokens_unknown: false,
+        cost_usd,
+        cost_is_estimate: true,
+    }
 }
 
 /// What's needed to explain a failed CLI run: the command with the person's message left out, and
@@ -1564,6 +1664,42 @@ mod tests {
         assert_eq!(p.failure, Some(TurnFailure::new(FailureKind::ToolsUnavailable)));
     }
 
+    /// #1919: a used-up weekly limit was retried as a per-minute rate limit, failing each time.
+    #[test]
+    fn a_used_up_claude_plan_limit_is_not_retried_and_says_when_it_resets() {
+        let error = json!({"type":"assistant","error":"rate_limit","message":{"content":[{"type":"text","text":"You've hit your weekly limit · resets 6pm"}]}});
+        let event =
+            |status: &str| json!({"type":"rate_limit_event","rate_limit_info":{"status":status,"resetsAt":4_102_444_800u64,"rateLimitType":"seven_day"}});
+        let mut p = StreamParser::new(adapter_for("claude-code"));
+        assert!(p.line(&event("rejected").to_string()).is_empty(), "nothing to show by itself");
+        let events = p.line(&error.to_string());
+        assert_eq!(p.failure, Some(TurnFailure::new(FailureKind::UsageLimit)));
+        assert!(!p.failure.unwrap().retryable());
+        let [AgentEvent::Error { message, remediation: Some(fix), .. }] = events.as_slice() else { panic!("{events:?}") };
+        assert!(message.contains("weekly limit") && fix.contains("weekly limit is used up") && fix.contains("resets in about"), "{fix}");
+        // The turn's closing result is the error the run keeps (#1931 review).
+        let events = p.line(r#"{"type":"result","is_error":true,"result":"You've hit your weekly limit · resets 6pm"}"#);
+        let [AgentEvent::Error { remediation: Some(fix), .. }] = events.as_slice() else { panic!("{events:?}") };
+        assert!(fix.contains("weekly limit is used up"), "{fix}");
+        assert_eq!(p.failure, Some(TurnFailure::new(FailureKind::UsageLimit)));
+
+        // A turn its limits allowed, then a rate limit: a per-minute one, waited for and tried again.
+        let mut p = StreamParser::new(adapter_for("claude-code"));
+        p.line(&event("allowed").to_string());
+        p.line(&error.to_string());
+        assert_eq!(p.failure, Some(TurnFailure::new(FailureKind::RateLimited)));
+    }
+
+    #[test]
+    fn plan_limit_fix_names_the_limit_and_how_long() {
+        assert!(plan_limit_fix("five_hour", Some(10_000 + 3 * 3600), 10_000).contains("5-hour limit is used up"));
+        assert!(plan_limit_fix("five_hour", Some(10_000 + 3 * 3600), 10_000).contains("about 3 hours"));
+        assert!(plan_limit_fix("seven_day_opus", Some(10_000 + 90 * 60), 10_000).contains("weekly limit"));
+        assert!(plan_limit_fix("seven_day_opus", Some(10_000 + 90 * 60), 10_000).contains("about 90 minutes"));
+        assert!(plan_limit_fix("x", Some(5), 10_000).contains("a minute or so"), "a reset already past");
+        assert!(!plan_limit_fix("x", None, 10_000).contains("resets in"));
+    }
+
     #[test]
     fn claude_assistant_error_codes_survive_localized_display_messages() {
         for (code, kind) in [
@@ -1698,7 +1834,7 @@ mod tests {
             }
         }
         let mcp = McpCommand { command: "craft-anything-cli".into(), args: vec![], notes: None };
-        assert!(adapter.mcp_env(&mcp).unwrap().is_some());
+        assert!(adapter.mcp_env(&mcp, Access::Build).unwrap().is_some());
     }
 
     /// Reject non-executable candidates and prefer the user's application installation.
@@ -1821,7 +1957,7 @@ mod tests {
                 true
             }
             /// Tell the child how to behave (the runner hands the agent this variable).
-            fn mcp_env(&self, _mcp: &McpCommand) -> Result<Option<(&'static str, String)>, ToolError> {
+            fn mcp_env(&self, _mcp: &McpCommand, _access: Access) -> Result<Option<(&'static str, String)>, ToolError> {
                 Ok(Some((UNFINISHED_CHILD_ENV, self.how.to_string())))
             }
             /// Read the stream as OpenCode's adapter does.
@@ -1920,7 +2056,7 @@ mod tests {
             }
             assert!(
                 matches!(events.last(), Some(AgentEvent::TurnDone {
-                backend, input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false,
+                backend, input_tokens: 0, output_tokens: 0, tokens_unknown: false, cost_usd: None, cost_is_estimate: false,
             }) if backend == "Test"),
                 "{events:?}"
             );
@@ -1952,10 +2088,19 @@ mod tests {
         }
         assert_eq!(a[pos("--resume") + 1], "sess-1");
         assert_eq!(a[pos("--allowedTools") + 1], "mcp__craft-anything__*");
-        assert_eq!(a[pos("--model") + 1], "claude-opus-5-5", "Opus 5.5 unless configured otherwise");
+        assert!(!a.iter().any(|x| x == "--model"), "no --model by default: respect the user's Claude Code config");
         let o = BackendOptions { cli_model: Some("opus".into()), ..Default::default() };
         let b = build_args(adapter_for("claude-code").as_ref(), &o, "q", "PRE", &mcp(), None, Access::Analyse);
         assert_eq!(b[b.iter().position(|x| x == "--model").unwrap() + 1], "opus");
+        // Any model string the user configured (including custom aliases) is passed through.
+        let custom = BackendOptions { cli_model: Some("my-custom-model".into()), ..Default::default() };
+        let c = build_args(adapter_for("claude-code").as_ref(), &custom, "q", "PRE", &mcp(), None, Access::Analyse);
+        assert_eq!(c[c.iter().position(|x| x == "--model").unwrap() + 1], "my-custom-model");
+        // A question (forked read-only session) also respects the configured/default model.
+        let q = build_args(adapter_for("claude-code").as_ref(), &BackendOptions::default(), "q", "PRE", &mcp(), Some("s1"), Access::Question);
+        assert!(!q.iter().any(|x| x == "--model"), "question: no --model by default");
+        let q2 = build_args(adapter_for("claude-code").as_ref(), &custom, "q", "PRE", &mcp(), Some("s1"), Access::Question);
+        assert_eq!(q2[q2.iter().position(|x| x == "--model").unwrap() + 1], "my-custom-model");
         let cfg: Value = serde_json::from_str(&a[pos("--mcp-config") + 1]).unwrap();
         assert_eq!(cfg["mcpServers"]["craft-anything"]["args"][0], "mcp");
         // variadic flags come last: nothing after them is read as one of their values
@@ -1981,6 +2126,16 @@ mod tests {
         let events = adapter_for("codex").parse(&mut p, &v);
         let text = format!("{events:?}");
         assert!(text.contains("setup --client codex --yes"), "{text}");
+        // #1867: setup doesn't approve build_command_run, so the way out is Codex's own setting.
+        let mut p = StreamParser::new(adapter_for("codex"));
+        let other = line.replace("rebuild_start", "build_command_run");
+        let events = adapter_for("codex").parse(&mut p, &serde_json::from_str::<Value>(&other).unwrap());
+        let text = format!("{events:?}");
+        assert!(text.contains("inside `tools`") && !text.contains("setup --client codex"), "{text}");
+        let hint = adapters::codex_tool_text(&serde_json::from_str::<Value>(&other).unwrap()["item"], "build_command_run", true);
+        assert!(hint.contains("build_command_run = { approval_mode = \"approve\" }"), "{hint}");
+        assert!(!hint.contains("[mcp_servers.craft-anything.tools.build_command_run]"), "{hint}");
+        assert!(hint.len() <= 200, "the feed keeps 200 characters: {} in {hint}", hint.len());
         // Another server's refusal keeps Codex's words: our setup can't fix it.
         let mut p = StreamParser::new(adapter_for("codex"));
         let theirs = line.replace("craft-anything", "other-server");
@@ -1999,23 +2154,6 @@ mod tests {
         assert!(text.contains("boom") && !text.contains("null"), "{text}");
     }
 
-    /// A Codex builder turn continues its thread with `exec resume`, which has no `--sandbox`.
-    #[test]
-    fn a_codex_builder_turn_resumes_its_thread() {
-        let codex = adapter_for("codex");
-        let a = build_args(codex.as_ref(), &BackendOptions::default(), "q", "P:", &mcp(), Some("abc"), Access::Build);
-        let pos = |x: &str| a.iter().position(|y| y == x).unwrap_or_else(|| panic!("{x} missing in {a:?}"));
-        assert_eq!(&a[..3], &["exec".to_string(), "resume".to_string(), "--json".to_string()]);
-        assert!(!a.contains(&"--sandbox".to_string()), "{a:?}");
-        assert_eq!(a[pos("sandbox_mode=\"workspace-write\"") - 1], "-c");
-        assert!(a.contains(&"mcp_servers.craft-anything.command=\"/opt/ca/craft-anything-cli\"".to_string()));
-        assert_eq!(&a[a.len() - 2..], &["abc".to_string(), "-".to_string()]);
-        // Without a session the arguments stay as they were.
-        let fresh = build_args(codex.as_ref(), &BackendOptions::default(), "q", "P:", &mcp(), None, Access::Build);
-        assert_eq!(&fresh[..2], &["exec".to_string(), "--json".to_string()]);
-        assert!(fresh.contains(&"--sandbox".to_string()) && !fresh.contains(&"resume".to_string()), "{fresh:?}");
-    }
-
     /// A question must leave the builder's session alone, and Codex can't fork: it starts fresh.
     #[test]
     fn a_codex_question_never_resumes() {
@@ -2024,46 +2162,48 @@ mod tests {
         assert!(!a.contains(&"resume".to_string()) && !a.contains(&"abc".to_string()), "{a:?}");
     }
 
-    /// `exec resume` refuses `--sandbox` and `-C`, so a backend that sets them starts fresh.
-    #[test]
-    fn codex_extra_args_resume_does_not_accept_start_a_fresh_session() {
-        let codex = adapter_for("codex");
-        let with = |args: &[&str]| BackendOptions { args: args.iter().map(|s| s.to_string()).collect(), ..Default::default() };
-        let a = build_args(codex.as_ref(), &with(&["--sandbox", "danger-full-access"]), "q", "P:", &mcp(), Some("abc"), Access::Analyse);
-        assert_eq!(&a[..2], &["exec".to_string(), "--json".to_string()]);
-        assert!(!a.contains(&"resume".to_string()) && !a.contains(&"abc".to_string()), "{a:?}");
-        let a = build_args(codex.as_ref(), &with(&["-C", "/tmp/x"]), "q", "P:", &mcp(), Some("abc"), Access::Analyse);
-        assert!(!a.contains(&"resume".to_string()), "{a:?}");
-        // Accepted extras keep the resume.
-        let a = build_args(codex.as_ref(), &with(&["-c", "model_reasoning_effort=\"low\""]), "q", "P:", &mcp(), Some("abc"), Access::Analyse);
-        assert_eq!(&a[..2], &["exec".to_string(), "resume".to_string()]);
-    }
-
-    /// A retry that can't resume (extra args `exec resume` refuses) resends the original message.
+    /// A retry that can't resume (a question, or no saved thread) resends the original message.
     #[test]
     fn a_codex_retry_that_starts_fresh_resends_the_original_message() {
         let codex = adapter_for("codex");
-        let with = |args: &[&str]| BackendOptions { args: args.iter().map(|s| s.to_string()).collect(), ..Default::default() };
-        let fresh = codex.resumes_with(&with(&["--sandbox", "danger-full-access"]), false);
-        assert_eq!(turn_text(true, fresh, Some("abc"), "Build it"), "Build it");
-        assert!(!codex.resumes_with(&with(&["--ephemeral"]), false));
         assert!(!codex.resumes_with(&BackendOptions::default(), true));
         let resumed = codex.resumes_with(&BackendOptions::default(), false);
         assert_eq!(turn_text(true, resumed, Some("abc"), "Build it"), crate::failure::CONTINUE_TURN);
+        assert_eq!(turn_text(true, resumed, None, "Build it"), "Build it");
         assert_eq!(turn_text(false, resumed, Some("abc"), "Build it"), "Build it");
     }
 
-    /// Codex names a thread it doesn't have only on stderr; the next message starts fresh.
+    /// #1867: setup writes `tools` as one inline table, so the old dotted-table guidance failed
+    /// with "cannot extend value of type inline table with a dotted key". The hinted inline key
+    /// extends it, and a standard tools table takes the same key.
     #[test]
-    fn a_codex_thread_that_is_not_on_this_computer_is_told_apart() {
-        let codex = adapter_for("codex");
-        let mut p = StreamParser::new(codex.clone());
-        let line = "Error: thread/resume: thread/resume failed: no rollout found for thread id 0199-abc (code -32600)";
-        let events = codex.parse_stderr(&mut p, line);
-        assert!(p.session_missing);
-        assert!(matches!(events.as_slice(), [AgentEvent::Error { .. }]), "{events:?}");
-        let mut p = StreamParser::new(codex.clone());
-        assert!(codex.parse_stderr(&mut p, "warning: something else").is_empty() && !p.session_missing);
+    fn the_codex_approval_hint_extends_the_inline_tools_table() {
+        let generated =
+            "[mcp_servers.craft-anything]\ncommand = \"craft-anything-cli\"\nargs = [\"mcp\"]\ntools = { rebuild_start = { approval_mode = \"approve\" } }\n";
+        let dotted = format!("{generated}\n[mcp_servers.craft-anything.tools.build_command_run]\napproval_mode = \"approve\"\n");
+        assert!(toml::from_str::<toml::Value>(&dotted).is_err(), "the old guidance cannot extend an inline table");
+
+        let item: Value = serde_json::from_str(r#"{"error":{"message":"tool build_command_run requires approval, but approval policy is never"}}"#).unwrap();
+        let hint = adapters::codex_tool_text(&item, "build_command_run", true);
+        assert!(hint.contains("build_command_run = { approval_mode = \"approve\" }"), "{hint}");
+
+        let inline = "[mcp_servers.craft-anything]\ncommand = \"craft-anything-cli\"\nargs = [\"mcp\"]\ntools = { rebuild_start = { approval_mode = \"approve\" }, build_command_run = { approval_mode = \"approve\" } }\n";
+        let doc: toml::Value = toml::from_str(inline).unwrap();
+        let approved = |doc: &toml::Value| {
+            doc.get("mcp_servers")
+                .and_then(|v| v.get("craft-anything"))
+                .and_then(|v| v.get("tools"))
+                .and_then(|v| v.get("build_command_run"))
+                .and_then(|v| v.get("approval_mode"))
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+        };
+        assert_eq!(approved(&doc).as_deref(), Some("approve"), "the inline tools table takes the key");
+
+        let table =
+            "[mcp_servers.craft-anything.tools]\nrebuild_start = { approval_mode = \"approve\" }\nbuild_command_run = { approval_mode = \"approve\" }\n";
+        let doc: toml::Value = toml::from_str(table).unwrap();
+        assert_eq!(approved(&doc).as_deref(), Some("approve"), "a standard tools table takes the same key");
     }
 
     #[test]
@@ -2112,6 +2252,25 @@ mod tests {
         assert!(a.windows(2).any(|w| w[0] == "--sandbox" && w[1] == "workspace-write"));
         assert!(a.contains(&"mcp_servers.craft-anything.command=\"/opt/ca/craft-anything-cli\"".to_string()));
         assert!(a.contains(&"mcp_servers.craft-anything.args=[\"mcp\", \"--project\", \"/p/x.cany\", \"--all-tools\"]".to_string()));
+    }
+
+    #[test]
+    fn codex_resume_keeps_run_configuration_and_reads_prompt_from_stdin() {
+        let codex = adapter_for("codex");
+        assert!(codex.resumes());
+        let options =
+            BackendOptions { cli_model: Some("test-model".into()), args: vec!["-c".into(), "model_reasoning_effort=\"low\"".into()], ..Default::default() };
+        for access in [Access::Analyse, Access::Build] {
+            let fresh = build_args(codex.as_ref(), &options, "first", "P:", &mcp(), None, access);
+            let resumed = build_args(codex.as_ref(), &options, "follow-up", "P:", &mcp(), Some("saved-thread"), access);
+            let mut expected = fresh;
+            expected.pop();
+            expected.extend(["resume".into(), "--".into(), "saved-thread".into(), "-".into()]);
+            assert_eq!(resumed, expected, "resume keeps model, sandbox and MCP configuration");
+            assert_eq!(codex.stdin_text("P:", "follow-up"), "P:follow-up");
+        }
+        let args = build_args(codex.as_ref(), &options, "q", "", &mcp(), Some("--last"), Access::Build);
+        assert!(args.windows(4).any(|w| w == ["resume", "--", "--last", "-"]), "a saved id cannot select another thread");
     }
 
     #[test]
@@ -2733,6 +2892,223 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
         }
     }
 
+    /// #402 for Aider: a stand-in `aider` finds the whole message (preamble first) in the file
+    /// `--message-file` names, for a short message and one longer than Windows' command line, and
+    /// the file is gone once the run is over.
+    #[cfg(unix)]
+    #[test]
+    fn aider_reads_its_message_from_a_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("aider");
+        let script = r#"#!/bin/sh
+d=$(dirname "$0")
+if [ "$1" = "--help" ]; then echo "--message-file --message --no-fancy-input --no-git"; exit 0; fi
+printf '%s\n' "$@" > "$d/argv"
+while [ $# -gt 1 ]; do if [ "$1" = "--message-file" ]; then cp "$2" "$d/message"; echo "$2" > "$d/file"; fi; shift; done
+"#;
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for prompt in ["q".to_string(), "x".repeat(40_831)] {
+            let config =
+                BackendConfig { name: "Aider".into(), kind: BackendKind::AgentCli, model: "aider".into(), base_url: None, ssh_host: None, enabled: true };
+            let options =
+                BackendOptions { command: Some(program.display().to_string()), cli_model: Some("anthropic/claude-sonnet-4".into()), ..Default::default() };
+            let mut spec = CliSpec::new(config, options, false, None);
+            // Aider's reads can't be checked, so only a Deep run starts it.
+            spec.deep = true;
+            spec.preamble = Some("P:".into());
+            let mut c = CliConversation::new(spec);
+            c.send(&prompt);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut all = Vec::new();
+            while std::time::Instant::now() < deadline && !all.iter().any(|e| matches!(e, AgentEvent::TurnDone { .. })) {
+                all.extend(c.poll());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let message = std::fs::read_to_string(dir.path().join("message")).unwrap_or_default();
+            let argv = std::fs::read_to_string(dir.path().join("argv")).unwrap_or_default();
+            assert!(message == format!("P:{prompt}"), "the whole message, preamble first: {all:?}");
+            assert!(!argv.contains("P:") && !argv.lines().any(|l| l == "--message"), "{argv}");
+            let file = std::fs::read_to_string(dir.path().join("file")).unwrap_or_default();
+            assert!(!file.trim().is_empty() && !Path::new(file.trim()).exists(), "the message file is removed after the run: {file}");
+        }
+    }
+
+    #[test]
+    fn a_message_file_holds_the_message_until_it_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = MessageFile::write(dir.path(), "P:make a game").unwrap();
+        let other = MessageFile::write(dir.path(), "another run").unwrap();
+        assert_ne!(file.0, other.0, "two runs at once get two files");
+        assert_eq!(std::fs::read_to_string(&file.0).unwrap(), "P:make a game");
+        let path = file.0.clone();
+        drop(file);
+        assert!(!path.exists(), "removed when the run is over");
+        std::fs::write(dir.path().join("a-file"), "").unwrap();
+        assert!(MessageFile::write(&dir.path().join("a-file"), "x").is_none(), "a folder that can't be written: the message goes in argv");
+    }
+
+    #[test]
+    fn codex_missing_thread_diagnostics_are_specific() {
+        let adapter = adapter_for("codex");
+        for diagnostic in ["Error: network timeout", "Error: thread/resume: authentication failed", "warning: no rollout found for thread id example"] {
+            let mut p = StreamParser::new(adapter.clone());
+            assert!(adapter.parse_stderr(&mut p, diagnostic).is_empty());
+            assert!(!p.session_missing);
+        }
+        for diagnostic in [
+            "Error: no rollout found for thread id missing",
+            "Error: thread/resume: thread/resume failed: no rollout found for thread id missing (code -32600)",
+        ] {
+            let mut p = StreamParser::new(adapter.clone());
+            assert!(
+                matches!(adapter.parse_stderr(&mut p, diagnostic).as_slice(), [AgentEvent::Error { remediation: Some(fix), .. }] if fix.contains("Ask again"))
+            );
+            assert!(p.session_missing);
+            assert!(adapter.parse_stderr(&mut p, diagnostic).is_empty());
+        }
+    }
+
+    #[test]
+    fn codex_refuses_worktree_before_starting_a_conversation() {
+        let adapter = adapter_for("codex");
+        let options = BackendOptions { args: vec!["--worktree".into()], ..Default::default() };
+        let error = adapter.check_native_options(&options, None).unwrap_err();
+        assert!(error.message.contains("--worktree"));
+        assert!(error.remediation.as_deref().unwrap_or_default().contains("existing folder"));
+        assert!(adapter.check_native_options(&BackendOptions::default(), None).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_ephemeral_is_refused_on_two_turns_without_starting_a_process() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("codex");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nd=$(dirname \"$0\")\ntouch \"$d/started\"\necho '{\"type\":\"thread.started\",\"thread_id\":\"not-persisted\"}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = BackendConfig { name: "Codex".into(), kind: BackendKind::AgentCli, model: "codex".into(), base_url: None, ssh_host: None, enabled: true };
+        let options = BackendOptions { command: Some(program.display().to_string()), args: vec!["--ephemeral".into()], ..Default::default() };
+        let mut c = CliConversation::new(CliSpec::new(config, options, false, None));
+        for prompt in ["first turn", "follow-up turn"] {
+            c.send(prompt);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut events = Vec::new();
+            while std::time::Instant::now() < deadline && !events.iter().any(|e| matches!(e, AgentEvent::TurnDone { .. })) {
+                events.extend(c.poll());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            c.stop();
+            assert!(events.iter().any(|e| matches!(e, AgentEvent::TurnDone { .. })), "{events:?}");
+            assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { message, remediation: Some(fix), .. } if message.contains("--ephemeral") && fix.contains("Remove --ephemeral"))), "{events:?}");
+            assert_eq!(c.session_id(), None, "no unpersisted thread can be saved for resume");
+            assert!(!dir.path().join("started").exists(), "even preflight must not start Codex");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_unknown_thread_is_cleared_and_the_next_turn_starts_fresh() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("codex");
+        std::fs::write(
+            &program,
+            r#"#!/bin/sh
+d=$(dirname "$0")
+if [ "$2" = "--help" ]; then echo "--json"; exit 0; fi
+printf '%s\n' "$@" > "$d/argv"
+cat > "$d/stdin"
+for arg in "$@"; do
+  if [ "$arg" = missing-thread ]; then
+    echo 'Error: thread/resume: thread/resume failed: no rollout found for thread id missing-thread (code -32600)' >&2
+    exit 1
+  fi
+done
+echo '{"type":"thread.started","thread_id":"new-thread"}'
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = BackendConfig { name: "Codex".into(), kind: BackendKind::AgentCli, model: "codex".into(), base_url: None, ssh_host: None, enabled: true };
+        let options = BackendOptions { command: Some(program.display().to_string()), ..Default::default() };
+        let mut spec = CliSpec::new(config, options, false, None);
+        spec.resume = Some("missing-thread".into());
+        let mut c = CliConversation::new(spec);
+        for missing in [true, false] {
+            c.send("the original request");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut events = Vec::new();
+            while std::time::Instant::now() < deadline && !events.iter().any(|e| matches!(e, AgentEvent::TurnDone { .. })) {
+                events.extend(c.poll());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            c.stop();
+            assert!(events.iter().any(|e| matches!(e, AgentEvent::TurnDone { .. })), "{events:?}");
+            assert_eq!(c.session_lost(), missing);
+            assert_eq!(c.session_id().as_deref(), if missing { None } else { Some("new-thread") });
+            assert_eq!(events.iter().filter(|e| matches!(e, AgentEvent::Error { .. })).count(), usize::from(missing));
+            let argv = std::fs::read_to_string(dir.path().join("argv")).unwrap();
+            assert_eq!(argv.lines().any(|arg| arg == "resume"), missing);
+        }
+    }
+
+    /// A reported Codex thread is used on the next turn and after reopening the conversation.
+    #[cfg(unix)]
+    #[test]
+    fn codex_resumes_reported_and_saved_threads_through_the_runner() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("codex");
+        std::fs::write(
+            &program,
+            r#"#!/bin/sh
+d=$(dirname "$0")
+if [ "$2" = "--help" ]; then echo "--json"; exit 0; fi
+printf '%s\n' "$@" > "$d/argv"
+cat > "$d/stdin"
+echo '{"type":"thread.started","thread_id":"saved-thread"}'
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = BackendConfig { name: "Codex".into(), kind: BackendKind::AgentCli, model: "codex".into(), base_url: None, ssh_host: None, enabled: true };
+        let options = BackendOptions { command: Some(program.display().to_string()), ..Default::default() };
+        let mut spec = CliSpec::new(config, options, false, None);
+        spec.preamble = Some("P:".into());
+        let mut c = CliConversation::new(spec.clone());
+        let finish = |c: &mut CliConversation, prompt: &str| {
+            c.send(prompt);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut all = Vec::new();
+            while std::time::Instant::now() < deadline && !all.iter().any(|e| matches!(e, AgentEvent::TurnDone { .. })) {
+                all.extend(c.poll());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            c.stop();
+            assert!(all.iter().any(|e| matches!(e, AgentEvent::TurnDone { .. })), "{all:?}");
+            assert!(!all.iter().any(|e| matches!(e, AgentEvent::Error { .. })), "{all:?}");
+            assert_eq!(c.session_id().as_deref(), Some("saved-thread"));
+            assert_eq!(std::fs::read_to_string(dir.path().join("stdin")).unwrap(), format!("P:{prompt}"));
+            std::fs::read_to_string(dir.path().join("argv")).unwrap()
+        };
+        let first = finish(&mut c, "first");
+        assert!(!first.lines().any(|a| a == "resume"));
+        let next = finish(&mut c, "second");
+        assert!(next.ends_with("resume\n--\nsaved-thread\n-\n"), "{next}");
+        spec.resume = c.session_id();
+        drop(c);
+        let reopened = finish(&mut CliConversation::new(spec), "third");
+        assert!(reopened.ends_with("resume\n--\nsaved-thread\n-\n"), "{reopened}");
+    }
+
     /// #528, on every platform: the Codex command line stays short, and a child process started
     /// with a message longer than Windows' 32,767-character limit gets all of it on stdin. The
     /// child is this test binary, running `stdin_echo_child`.
@@ -3176,7 +3552,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
         assert!(all.iter().any(|e| matches!(e, AgentEvent::Status { text } if text.contains("trying it anyway"))), "{all:?}");
     }
 
-    /// Sends `text` and collects the turn's events up to its end.
+    /// Sends `text` and collects the turn's events up to its end. Only the Unix tests use it.
     #[cfg(unix)]
     fn one_turn(c: &mut CliConversation, text: &str) -> Vec<AgentEvent> {
         c.send(text);
@@ -3414,5 +3790,31 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
             assert!(!fix.to_lowercase().contains("copilot"), "{fix}");
             assert_eq!(fix.contains("Use test-agent sign-in."), guidance.is_some());
         }
+    }
+
+    /// A Clean room run of an agent whose reads can't be checked is refused on the path every
+    /// native run takes, before its program starts.
+    #[cfg(unix)]
+    #[test]
+    fn a_clean_room_run_of_aider_is_refused_before_it_starts() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("aider");
+        std::fs::write(&program, "#!/bin/sh\necho run >> \"$(dirname \"$0\")/runs\"\nexit 0\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = BackendConfig { name: "Aider".into(), kind: BackendKind::AgentCli, model: "aider".into(), base_url: None, ssh_host: None, enabled: true };
+        let options = BackendOptions { command: Some(program.display().to_string()), ..Default::default() };
+        let mut spec = CliSpec::new(config, options, false, None);
+        spec.deep = false;
+        let mut c = CliConversation::new(spec);
+        c.send("x");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut all = Vec::new();
+        while std::time::Instant::now() < deadline && !all.iter().any(|e| matches!(e, AgentEvent::TurnDone { .. })) {
+            all.extend(c.poll());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(all.iter().any(|e| matches!(e, AgentEvent::Error { message, .. } if message.contains("Clean room"))), "{all:?}");
+        assert!(!dir.path().join("runs").exists(), "Aider must not start in a Clean room run");
     }
 }

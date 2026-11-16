@@ -3,8 +3,10 @@
 //!
 //! It is a folder, so it works across processes (the app, our MCP server started by a coding
 //! agent, the in-process agent loop): `<id>.request.json` is written by the asker and
-//! `<id>.answer.json` by the app. Both are written atomically; the asker removes both once it has
-//! read the answer. Ids are generated here and validated on every path join.
+//! `<id>.answer.json` by the app. Both are written atomically, owner-only, because a request can
+//! carry the person's own words and an answer can carry a typed reply or an approval; the asker
+//! removes both once it has read the answer. Ids are generated here and validated on every path
+//! join.
 
 use crate::project::write_atomic;
 use craft_anything_evidence::ToolError;
@@ -129,7 +131,7 @@ impl Inbox {
         let id = format!("{}-{}-{n}", now_ms(), std::process::id());
         let req = Request { id: id.clone(), kind, title: title.to_string(), detail: detail.to_string(), choices, allow_text, action, created_ms: now_ms() };
         let bytes = serde_json::to_vec_pretty(&req).map_err(|e| ToolError::internal(e.to_string()))?;
-        write_atomic(&self.path(&id, "request")?, &bytes)?;
+        craft_anything_platform::fs::write_atomic_private(&self.path(&id, "request")?, &bytes)?;
         Ok(id)
     }
 
@@ -150,7 +152,7 @@ impl Inbox {
     /// Write the person's answer.
     pub fn answer(&self, id: &str, answer: &Answer) -> Result<(), ToolError> {
         let bytes = serde_json::to_vec(answer).map_err(|e| ToolError::internal(e.to_string()))?;
-        write_atomic(&self.path(id, "answer")?, &bytes)
+        craft_anything_platform::fs::write_atomic_private(&self.path(id, "answer")?, &bytes)
     }
 
     /// Wait for the answer to `id` (polling), until `timeout` or `cancelled()`. The request and
@@ -175,9 +177,100 @@ impl Inbox {
     }
 }
 
+/// The folder in the inbox where tools say what they are waiting on.
+const ACTIVITY: &str = "activity";
+
+/// A line a tool working on a project says while it waits (a Ghidra decompile, #1714), for the
+/// run that shows the project's feed. Our MCP server runs inside the coding agent, so a tool's own
+/// progress reaches only the agent; this file reaches the app. Removed when the wait ends.
+pub struct Activity {
+    file: PathBuf,
+}
+
+impl Activity {
+    pub fn start(inbox: &Path) -> Activity {
+        Activity { file: inbox.join(ACTIVITY).join(format!("{}-{}.txt", std::process::id(), next_counter())) }
+    }
+
+    /// Keep one notice per approval kind until the next build clears the activity folder.
+    pub(crate) fn approval_refused(inbox: &Path, kind: crate::workspace::ActionKind) {
+        let path = inbox.join(ACTIVITY).join(format!("approval-{}.txt", kind.name()));
+        Self::write(
+            &path,
+            &format!(
+                "The builder was refused permission for {}. To ask before trying again, use Approvals or type /approvals {} ask.",
+                kind.what(),
+                kind.name()
+            ),
+        );
+    }
+
+    /// Say `line`, in place of what this wait said before.
+    pub fn say(&self, line: &str) {
+        Self::write(&self.file, line);
+    }
+
+    fn write(file: &Path, line: &str) {
+        let written = match file.parent() {
+            Some(dir) => std::fs::create_dir_all(dir).map_err(|e| e.to_string()).and_then(|()| write_atomic(file, line.as_bytes()).map_err(|e| e.message)),
+            None => Ok(()),
+        };
+        if let Err(e) = written {
+            log::warn!("Couldn't tell the app {line:?}: {e}");
+        }
+    }
+}
+
+impl Drop for Activity {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.file);
+    }
+}
+
+/// What the tools working on the project are saying now: (which wait, its line), oldest first.
+pub fn activity(inbox: &Path) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(inbox.join(ACTIVITY)) else { return Vec::new() };
+    let mut lines: Vec<(String, String)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.strip_suffix(".txt")?.to_string();
+            let line = std::fs::read_to_string(e.path()).ok()?;
+            Some((name, line.trim().to_string())).filter(|(_, l)| !l.is_empty())
+        })
+        .collect();
+    lines.sort();
+    lines
+}
+
+/// Forget what tools said in an earlier run: a tool that was stopped mid-wait left its line.
+pub fn clear_activity(inbox: &Path) {
+    let _ = std::fs::remove_dir_all(inbox.join(ACTIVITY));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_says_what_it_waits_on_until_it_stops() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(activity(d.path()).is_empty(), "no folder, nothing said");
+        let first = Activity::start(d.path());
+        first.say("Ghidra is decompiling this function (1 min so far; it gives up at 15 min)");
+        first.say("Ghidra is decompiling this function (2 min so far; it gives up at 15 min)");
+        let second = Activity::start(d.path());
+        second.say("Waiting for Ghidra to finish decompiling another function (1 min so far)");
+        let now = activity(d.path());
+        assert_eq!(now.len(), 2, "{now:?}");
+        assert!(now.iter().any(|(_, l)| l.starts_with("Ghidra is decompiling this function (2 min")), "the latest line replaces the last");
+        drop(first);
+        let now = activity(d.path());
+        assert_eq!(now.len(), 1);
+        assert!(now[0].1.starts_with("Waiting for Ghidra"));
+        std::mem::forget(second);
+        clear_activity(d.path());
+        assert!(activity(d.path()).is_empty(), "a wait cut off mid-line is forgotten by the next run");
+    }
 
     #[test]
     fn question_round_trip_across_handles() {
@@ -204,5 +297,21 @@ mod tests {
         assert!(inbox.pending().is_empty());
         assert!(inbox.answer("../escape", &Answer::default()).is_err());
         assert!(inbox.answer("A", &Answer::default()).is_err());
+    }
+
+    /// A request can carry the person's own words and an answer can carry a typed reply or an
+    /// approval; another local account must not be able to read either from the project folder.
+    #[cfg(unix)]
+    #[test]
+    fn requests_and_answers_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = Inbox::new(dir.path());
+        let id = inbox.post(RequestKind::Question, "Which folder?", "the one on the desktop", vec![], true, None).unwrap();
+        let request = dir.path().join(format!("{id}.request.json"));
+        assert_eq!(std::fs::metadata(&request).unwrap().permissions().mode() & 0o777, 0o600, "the request is readable only by its owner");
+        inbox.answer(&id, &Answer { text: Some("the blue one".into()), ..Default::default() }).unwrap();
+        let answer = dir.path().join(format!("{id}.answer.json"));
+        assert_eq!(std::fs::metadata(&answer).unwrap().permissions().mode() & 0o777, 0o600, "the answer is readable only by its owner");
     }
 }

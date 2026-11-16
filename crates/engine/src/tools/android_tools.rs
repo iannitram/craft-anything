@@ -876,7 +876,10 @@ fn jadx_source(ctx: &Ctx<'_>, input: &Path, class_java: &str) -> (Value, Option<
             return (json!({"status": "failed", "error": e.message}), Some(Limitation::new("jadx_failed", "Could not create a temporary folder for JADX.")));
         }
     };
-    let run = craft_anything_engines::jadx::run_single_class(&jadx, input, class_java, &out, ctx.cancel.clone());
+    // The Java runtime engine the settings or the engine store hold (the Java Ghidra's setup
+    // brings, say), which JADX's launcher wouldn't find on its own.
+    let java = craft_anything_engines::locate_configured("java", &settings.engines.tools, &settings.engine_store_dir());
+    let run = craft_anything_engines::jadx::run_single_class(&jadx, java.as_deref(), input, class_java, &out, ctx.cancel.clone());
     let result = match run {
         Ok(o) if o.success => {
             let simple = class_java.rsplit('.').next().unwrap_or(class_java);
@@ -1546,6 +1549,34 @@ mod tests {
         if status == "unavailable" {
             assert!(m["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "jadx_not_installed"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jadx_runs_on_the_java_runtime_engine() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        // The Java Ghidra's setup brings, in the engine store.
+        let home = d.path().join("engines").join("jdk").join("jdk-21.0.5+11");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::write(home.join("bin").join("java"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(home.join("bin").join("java"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A stand-in for JADX's launcher: it writes the class only when given that Java.
+        let jadx = d.path().join("jadx");
+        let script = format!(
+            "#!/bin/sh\n[ \"$JAVA_HOME\" = '{}' ] || {{ echo 'JAVA_HOME is not set' >&2; exit 1; }}\nmkdir -p \"$6/com/example/notes\" && echo 'class Util {{}}' > \"$6/com/example/notes/Util.java\"\n",
+            home.display()
+        );
+        std::fs::write(&jadx, script).unwrap();
+        std::fs::set_permissions(&jadx, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut s = crate::testing::session();
+        s.settings.engines.store_dir = Some(d.path().join("engines"));
+        s.settings.engines.tools.jadx = Some(jadx);
+        let e = Engine::new(s);
+        let m = call(&e, "android_method_show", json!({"path": apk(), "class_name": "com.example.notes.Util", "method_name": "log", "java_source": true}));
+        let source = &m["result"]["java_source"];
+        assert_eq!(source["status"], "ok", "{source}");
+        assert_eq!(source["text"].as_str().map(str::trim), Some("class Util {}"));
     }
 
     #[test]

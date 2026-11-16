@@ -244,12 +244,13 @@ fn tar_with_name_copy_limit(data: &[u8], max_members: usize, mut name_bytes_left
                             }
                             b"size" => {
                                 let size = std::str::from_utf8(value).ok().and_then(|s| s.parse().ok());
+                                if !value.is_empty() && (size.is_none() || !value.iter().all(u8::is_ascii_digit)) {
+                                    let scope = if global { "global" } else { "local" };
+                                    out.warnings.push(format!("invalid {scope} pax size at {pos:#x}"));
+                                    out.length = pos as u64;
+                                    break 'headers;
+                                }
                                 if global {
-                                    if !value.is_empty() && (size.is_none() || !value.iter().all(u8::is_ascii_digit)) {
-                                        out.warnings.push(format!("invalid global pax size at {pos:#x}"));
-                                        out.length = pos as u64;
-                                        break 'headers;
-                                    }
                                     global_size = size;
                                 } else {
                                     pax_size = size;

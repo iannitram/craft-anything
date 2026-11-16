@@ -207,6 +207,116 @@ fn deep_and_broken_sources_fall_back() {
     assert_ne!(run("ok.js", &ok).facts.mode, ParseMode::Lexer);
     let broken = run("b.js", "const x = require('electron'); ipcMain.handle('ch', () => { ) } }}}");
     assert!(broken.facts.ipc.iter().any(|i| i.channel.as_deref() == Some("ch")) || broken.facts.imports.iter().any(|i| i.specifier == "electron"));
+    // Shapes the estimator used to admit, which then overflowed the parser's stack.
+    let n = 6_000;
+    for (what, src) in [
+        ("else-if chain", format!("if(a);{}", "else if(a);".repeat(n))),
+        ("class extends chain", format!("x = class{};", " extends class".repeat(n) + " {}")),
+        ("prefix ++ run", format!("x = {}a;", "++".repeat(n))),
+        ("brackets after an update operator", format!("x = a++ /{} / 1;", "[".repeat(n) + &"]".repeat(n))),
+        ("else-if chain with comma expressions", "if(a)b,c;else ".repeat(n) + "if(a)b,c;"),
+        ("block and unbraced else-if consequents", "if(a){b;}else if(a)c;else ".repeat(n) + "if(a){d;}"),
+        ("brackets in a regex after yield", format!("x = yield /{} /;", "[".repeat(n) + &"]".repeat(n))),
+        ("prefix operators in a regex after yield", format!("x = yield /{}a / 1;", "!".repeat(n))),
+        ("addition chain in a regex after yield", format!("x = yield /{}a / 1;", "a+".repeat(n))),
+        ("separated prefix operators in a regex after yield", format!("x = yield /{}a / 1;", "!a".repeat(n))),
+        ("conditional chain in a regex after yield", format!("x = yield /{}a / 1;", "a?b:".repeat(n))),
+    ] {
+        let f = run("deep.js", &src).facts;
+        assert_eq!(f.mode, ParseMode::Lexer, "{what}");
+        assert!(f.mode_reason.as_deref().unwrap_or("").contains("nests"), "{what}: {:?}", f.mode_reason);
+    }
+}
+
+/// Exhausted ambiguous-regex lookahead fails closed instead of guessing division, and the
+/// configured (wasm-size) nesting limit still applies to sources the lookahead can judge.
+#[test]
+fn exhausted_yield_lookahead_fails_closed() {
+    let hostile = "yield /[".repeat(50);
+    let limits = Limits { max_nesting: 160, ..Limits::default() };
+    assert!(admit(&hostile, &limits).is_err(), "admit fails closed when the lookahead budget runs out");
+    let f = analyze("h.js", &hostile, &limits).facts;
+    assert_eq!(f.mode, ParseMode::Lexer, "{:?}", f.mode_reason);
+    let deep = format!("x = {}1{};", "(".repeat(200), ")".repeat(200));
+    assert!(admit(&deep, &limits).is_err(), "the 160-level limit still refuses a deep source");
+    assert!(admit("yield /a[0]/g;", &limits).is_ok(), "a compact regex after yield is still admitted");
+}
+
+/// A `yield /…/` regex whose following token differs between the regex and division readings
+/// fails admission closed; a compact regex with a plain follow is still admitted.
+#[test]
+fn ambiguous_regex_with_a_diverging_follow_fails_closed() {
+    let limits = Limits { max_nesting: 160, ..Limits::default() };
+    for src in ["yield /a[0]/ /b[1]/;", "yield /a[0]/ ++b;"] {
+        assert!(admit(src, &limits).is_err(), "{src}");
+        assert_eq!(analyze("d.js", src, &limits).facts.mode, ParseMode::Lexer, "{src}");
+    }
+    assert!(admit("yield /a[0]/g;", &limits).is_ok(), "the compact regex control");
+}
+
+/// A quote inside the ambiguous token starts a string in the division reading, where deeply
+/// nested code follows; the regex reading hides it, so admission fails closed.
+#[test]
+fn ambiguous_regex_with_a_quote_hides_division_boundaries() {
+    let quoted = format!("yield /\"a/b\"/ {};", "(".repeat(6_000));
+    assert!(admit(&quoted, &Limits::default()).is_err(), "a quote inside the ambiguous token");
+    assert_eq!(analyze("q.js", &quoted, &Limits::default()).facts.mode, ParseMode::Lexer);
+}
+
+/// A conditional chain in the division reading counts one level per `?`, so the wasm-size limit
+/// refuses it; the compact generator regex stays admitted.
+#[test]
+fn ambiguous_regex_conditional_chain_is_counted() {
+    let limits = Limits { max_nesting: 160, ..Limits::default() };
+    let cond = format!("x = yield /{}a / 1;", "a?b:".repeat(200));
+    assert!(admit(&cond, &limits).is_err(), "a conditional chain in an ambiguous regex");
+    assert!(admit("yield /a[0]/g;", &limits).is_ok(), "the compact regex control");
+}
+
+/// Bitwise chains in the division reading count one level per operator at the configured limit.
+#[test]
+fn ambiguous_regex_bitwise_chains_are_counted() {
+    let limits = Limits { max_nesting: 160, ..Limits::default() };
+    for op in ['&', '|', '^'] {
+        let src = format!("x = yield /{}a / 1;", format!("a{op}").repeat(200));
+        assert!(admit(&src, &limits).is_err(), "bitwise {op}");
+    }
+    assert!(admit("yield /a[0]/g;", &limits).is_ok(), "the compact regex control");
+}
+
+/// A closing slash immediately followed by `*` opens a block comment in sloppy code while the
+/// regex reading passes it, so admission fails closed; the balanced case is the regression.
+#[test]
+fn ambiguous_regex_before_a_block_comment_fails_closed() {
+    let src = "yield /a/*b*/;";
+    assert!(admit(src, &Limits::default()).is_err());
+    assert_eq!(analyze("c.js", src, &Limits::default()).facts.mode, ParseMode::Lexer);
+}
+
+/// The division reading's depth stays in the expression, so following brackets add to it.
+#[test]
+fn ambiguous_regex_depth_carries_into_following_expression() {
+    let limits = Limits { max_nesting: 160, ..Limits::default() };
+    let src = format!("x = yield /{}a / {}1{};", "a+".repeat(100), "(".repeat(100), ")".repeat(100));
+    assert!(admit(&src, &limits).is_err(), "100 operators plus 100 brackets should exceed 160");
+}
+
+/// An unbalanced bracket inside the ambiguous token leaves the two readings with different
+/// bracket scopes, so admission fails closed.
+#[test]
+fn ambiguous_regex_with_unbalanced_brackets_fails_closed() {
+    let src = "x = yield /a(/ 1;";
+    assert!(admit(src, &Limits::default()).is_err());
+    assert_eq!(analyze("u.js", src, &Limits::default()).facts.mode, ParseMode::Lexer);
+}
+
+/// Balanced brackets inside the ambiguous token keep their depth, so 100 of them plus 100
+/// following brackets exceed the 160-level limit.
+#[test]
+fn ambiguous_regex_balanced_brackets_count_toward_the_limit() {
+    let limits = Limits { max_nesting: 160, ..Limits::default() };
+    let src = format!("x = yield /{}/ {}1{};", "(".repeat(100) + &")".repeat(100), "(".repeat(100), ")".repeat(100));
+    assert!(admit(&src, &limits).is_err(), "balanced brackets plus following nesting should exceed 160");
 }
 
 #[test]
@@ -565,4 +675,21 @@ fn sources_without_api_rows_serialise_as_before() {
     let a = analyze("a.js", "const x = 1;", &Limits::default());
     assert!(a.facts.api_operations.is_empty());
     assert!(serde_json::to_value(&a.facts).unwrap().get("api_operations").is_none(), "no new key where there's nothing to say");
+}
+
+/// The lexer fallback caps endpoints and exposed objects like the syntax-tree pass, so a huge or
+/// unparsable bundle can't grow them without limit.
+#[test]
+fn lexer_fallback_caps_endpoints_and_exposed() {
+    let limits = Limits { max_parse_bytes: 1, ..Limits::default() };
+    let mut src = "fetch('x');\n".repeat(crate::facts::MAX_LIST + 10);
+    // Endpoints are already at the cap, so a URL literal no longer adds one.
+    src.push_str(&"('https://x.test/a');\n".repeat(8));
+    src.push_str(&"window.exposeInMainWorld('k');\n".repeat(crate::facts::MAX_LIST * 2));
+    let a = analyze("big.js", &src, &limits);
+    assert_eq!(a.facts.mode, ParseMode::Lexer, "{:?}", a.facts.mode_reason);
+    assert_eq!(a.facts.endpoints.len(), crate::facts::MAX_LIST, "endpoints are capped, literals included");
+    assert!(a.facts.endpoints.iter().all(|e| e.api == "fetch"), "{:?}", a.facts.endpoints.first());
+    assert!(a.facts.truncated.iter().any(|t| t == "endpoints"), "{:?}", a.facts.truncated);
+    assert_eq!(a.facts.exposed.len(), crate::facts::MAX_LIST);
 }

@@ -167,11 +167,13 @@ cargo run -p craft-anything-ui-egui --example snapshot -- --lang zh-hant --only 
 
 Chinese, Korean and Georgian glyphs use the existing craft-fonts fallback, which release and CI builds
 Spanish and Estonian are Latin script and need no extra glyphs. Chinese and Korean glyphs use the existing craft-fonts fallback, which release and CI builds
-Vietnamese needs craft-fonts too: the bundled DM Sans and egui's default fonts lack the letters with
+Vietnamese needs craft-fonts too: the bundled Figtree and egui's default fonts lack the letters with
 stacked marks (ạ, ả, ấ, ế, ơ, ư, ữ…), so a build without craft-fonts shows them as boxes. With
-craft-fonts, Noto Sans CJK SC supplies those letters (a different face from the DM Sans around them);
+craft-fonts, Noto Sans CJK SC supplies those letters (a different face from the Figtree around them);
 the script test in `theme.rs` checks every one of them. Chinese and Korean glyphs use the existing craft-fonts fallback, which release and CI builds
 already include. Local builds must set `CRAFT_FONTS_DIR` to a craft-fonts checkout
-before compiling to get the same glyph coverage. The catalogs add no font assets.
+before compiling to get the same glyph coverage; with `CRAFT_FONTS_REQUIRED=1` set as well, a
+build that would leave the fonts out (no `CRAFT_FONTS_DIR`, or a bad one) fails instead of
+quietly showing boxes. The catalogs add no font assets.
 Check each script, clipping, narrow windows and native file dialogs visually
 on each platform; catalog coverage alone does not verify layout or fonts.

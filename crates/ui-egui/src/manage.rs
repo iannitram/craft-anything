@@ -66,30 +66,39 @@ impl CraftApp {
 
 /// The right-click menu on a project in the sidebar.
 pub fn menu(app: &mut CraftApp, ui: &mut Ui, ws: &Workspace) {
-    if ui.button(tr("Rename…")).clicked() {
+    if widgets::menu_item(ui, false, tr("Rename…")).clicked() {
         ask_rename(app, ws);
         ui.close();
     }
-    if ui.button(tr("Duplicate")).clicked() {
+    if widgets::menu_item(ui, false, tr("Duplicate")).clicked() {
         app.duplicate_project(&ws.root);
         ui.close();
     }
     ui.separator();
-    if ui.add_enabled(!app.runs.is_busy(&ws.root), egui::Button::new(tr("Delete…"))).on_disabled_hover_text(tr("Pause the build first.")).clicked() {
+    if ui
+        .add_enabled_ui(!app.runs.is_busy(&ws.root), |ui| widgets::menu_item(ui, false, tr("Delete…")))
+        .inner
+        .on_disabled_hover_text(tr("Pause the build first."))
+        .clicked()
+    {
         app.state.modal = Some(Modal::Delete(ws.root.clone()));
         ui.close();
     }
 }
 
 /// The same, as quiet links on the project's page.
-pub fn buttons(app: &mut CraftApp, ui: &mut Ui, ws: &Workspace) {
-    if widgets::secondary(ui, None, "Rename").clicked() {
+pub fn rows(app: &mut CraftApp, ui: &mut Ui, ws: &Workspace) {
+    if widgets::action_row(ui, "file", "Rename", false).clicked() {
         ask_rename(app, ws);
     }
-    if widgets::secondary(ui, Some("copy"), "Duplicate").on_hover_text(tr("A copy to try something else from here.")).clicked() {
+    if widgets::action_row(ui, "copy", "Duplicate", false).on_hover_text(tr("A copy to try something else from here.")).clicked() {
         app.duplicate_project(&ws.root);
     }
-    if !app.runs.is_busy(&ws.root) && icons::button(ui, "trash-2", 30.0, false, "Delete the project").clicked() {
+}
+
+/// The row that deletes the project: last in its list, and not there while it builds.
+pub fn delete_row(app: &mut CraftApp, ui: &mut Ui, ws: &Workspace) {
+    if !app.runs.is_busy(&ws.root) && widgets::action_row(ui, "trash-2", "Delete the project", true).clicked() {
         app.state.modal = Some(Modal::Delete(ws.root.clone()));
     }
 }
@@ -106,7 +115,7 @@ fn project<'a>(app: &'a CraftApp, root: &Path) -> Option<&'a Workspace> {
 pub fn rename_modal(app: &mut CraftApp, ui: &mut Ui, root: &Path, close: &mut bool) {
     let t = Tokens::get(ui.ctx());
     ui.label(theme::heading(tr("Rename the project"), theme::SECTION));
-    ui.add_space(8.0);
+    ui.add_space(theme::space::SM);
     let r = ui.add(egui::TextEdit::singleline(&mut app.state.rename_input).desired_width(f32::INFINITY).frame(widgets::text_field_frame(&t)));
     widgets::named(r.clone(), "Project name");
     if !r.has_focus() && !r.lost_focus() {
@@ -114,8 +123,16 @@ pub fn rename_modal(app: &mut CraftApp, ui: &mut Ui, root: &Path, close: &mut bo
     }
     let ok = !app.state.rename_input.trim().is_empty();
     let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-    ui.add(egui::Label::new(RichText::new(tr("Only its name changes; its folder stays where it is.")).color(t.text_faint).size(theme::SMALL)).wrap());
-    ui.add_space(12.0);
+    ui.add(
+        egui::Label::new(
+            RichText::new(tr("Only its name changes; its folder stays where it is."))
+                .color(t.text_faint)
+                .size(theme::SMALL)
+                .line_height(Some(theme::leading(theme::SMALL))),
+        )
+        .wrap(),
+    );
+    ui.add_space(theme::space::MD);
     ui.horizontal(|ui| {
         if (widgets::primary_icon(ui, None, "Rename", ok).clicked() || enter) && ok {
             let name = app.state.rename_input.trim().to_string();
@@ -137,10 +154,10 @@ pub fn delete_modal(app: &mut CraftApp, ui: &mut Ui, root: &Path, close: &mut bo
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(40.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, t.radius, t.raised);
-        icons::paint(ui, rect, "trash-2", 20.0, t.danger);
+        icons::paint(ui, rect, "trash-2", theme::icon::LG, t.danger);
         ui.label(theme::heading(trf("Delete {name}?", &[("name", &ws.manifest.name)]), theme::SECTION));
     });
-    ui.add_space(8.0);
+    ui.add_space(theme::space::SM);
     // What goes and what stays, in so many words: it can't be undone.
     let m = &ws.manifest;
     let what = if m.app_in_root || !m.start_files.is_empty() {
@@ -149,12 +166,12 @@ pub fn delete_modal(app: &mut CraftApp, ui: &mut Ui, root: &Path, close: &mut bo
         tr("Its folder is deleted with everything in it: what was built, the checks and the conversation.")
     };
     ui.add(egui::Label::new(RichText::new(what).color(t.text_dim)).wrap());
-    ui.add(egui::Label::new(RichText::new(crate::short_path(&ws.root)).font(theme::mono(12.0)).color(t.text_faint)).truncate());
-    ui.add_space(4.0);
+    ui.add(egui::Label::new(RichText::new(crate::short_path(&ws.root)).font(theme::mono(theme::CODE)).color(t.text_faint)).truncate());
+    ui.add_space(theme::space::XS);
     ui.label(RichText::new(tr("This can't be undone.")).color(t.danger).size(theme::SMALL));
-    ui.add_space(12.0);
+    ui.add_space(theme::space::MD);
     ui.horizontal(|ui| {
-        if widgets::secondary(ui, Some("trash-2"), "Delete it").clicked() {
+        if widgets::danger(ui, Some("trash-2"), "Delete it").clicked() {
             app.delete_project(root);
             *close = true;
         }

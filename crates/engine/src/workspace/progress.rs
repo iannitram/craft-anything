@@ -82,22 +82,20 @@ impl BuildProgress {
         if bytes.len() as u64 > MAX_RECORD_BYTES {
             return Err(ToolError::new(ErrorCode::OverLimit, format!("{BUILD_PROGRESS_FILE} is too large to read.")));
         }
-        let mut doc: Value = serde_json::from_slice(&bytes).map_err(|e| ToolError::invalid(format!("Couldn't read {BUILD_PROGRESS_FILE}: {e}")))?;
+        let mut doc: Value = serde_json::from_slice(&bytes).map_err(|e| not_ours(format!("Couldn't read {BUILD_PROGRESS_FILE}: {e}")))?;
         let found = match doc.get("version") {
             None => 0,
-            Some(v) => {
-                v.as_u64().and_then(|v| u32::try_from(v).ok()).ok_or_else(|| ToolError::invalid(format!("{BUILD_PROGRESS_FILE} has an invalid version.")))?
-            }
+            Some(v) => v.as_u64().and_then(|v| u32::try_from(v).ok()).ok_or_else(|| not_ours(format!("{BUILD_PROGRESS_FILE} has an invalid version.")))?,
         };
         if found > BUILD_PROGRESS_VERSION {
             return Err(ToolError::unsupported(format!("{BUILD_PROGRESS_FILE} was written by a newer Craft Anything, so this build is left alone."))
                 .with_remediation("Update Craft Anything to continue this build."));
         }
-        let version = crate::versioned::upgrade(&mut doc, found, 0, STEPS)
-            .map_err(|e| ToolError::invalid(format!("Couldn't bring {BUILD_PROGRESS_FILE} up to date: {e}")))?;
-        let obj = doc.as_object_mut().ok_or_else(|| ToolError::invalid(format!("{BUILD_PROGRESS_FILE} isn't a JSON object.")))?;
+        let version =
+            crate::versioned::upgrade(&mut doc, found, 0, STEPS).map_err(|e| not_ours(format!("Couldn't bring {BUILD_PROGRESS_FILE} up to date: {e}")))?;
+        let obj = doc.as_object_mut().ok_or_else(|| not_ours(format!("{BUILD_PROGRESS_FILE} isn't a JSON object.")))?;
         obj.insert("version".into(), Value::from(version));
-        serde_json::from_value(doc).map_err(|e| ToolError::invalid(format!("Couldn't read {BUILD_PROGRESS_FILE}: {e}")))
+        serde_json::from_value(doc).map_err(|e| not_ours(format!("Couldn't read {BUILD_PROGRESS_FILE}: {e}")))
     }
 
     pub fn save(&self, root: &Path) -> Result<(), ToolError> {
@@ -141,6 +139,19 @@ impl BuildProgress {
     pub fn stalled(&self) -> bool {
         self.unchanged_turns >= UNCHANGED_TURN_LIMIT
     }
+}
+
+/// A progress record this version can't read and didn't write: something else changed it (a
+/// builder once kept its own notes there). The run still stops, so a builder can't hand itself a
+/// fresh count, but the person is told what happened and how to go on.
+fn not_ours(message: String) -> ToolError {
+    let message = message.trim_end_matches('.');
+    ToolError::invalid(format!(
+        "{message}. This file is Craft Anything's record of the build, and something else changed it (a builder may have kept its own notes there)."
+    ))
+    .with_remediation(format!(
+        "Rename or delete {BUILD_PROGRESS_FILE} in the project's folder, then try again: the count of builder turns that changed nothing starts over."
+    ))
 }
 
 /// The published schema of the progress record (`cargo xtask schemas`).
@@ -651,12 +662,22 @@ mod tests {
         let kept = BuildProgress { checked: Some(CheckedBuild { key: "k".into(), round: 3 }), ..old.clone() };
         kept.save(d.path()).unwrap();
         assert_eq!(BuildProgress::load(d.path()).unwrap(), kept);
-        for bad in [r#"{"version":99,"future":true}"#, "not json", r#"{"version":-1}"#, r#"{"app_data":"not a Craft progress record"}"#] {
+        // An OpenCode builder kept its own notes here; the run stops, and says what to do.
+        let builders_notes = r#"{"step":"done","text":"Done: the game builds."}"#;
+        for bad in [r#"{"version":99,"future":true}"#, "not json", r#"{"version":-1}"#, r#"{"app_data":"not a Craft progress record"}"#, builders_notes] {
             std::fs::write(&path, bad).unwrap();
-            assert!(BuildProgress::load(d.path()).is_err());
+            let e = BuildProgress::load(d.path()).unwrap_err();
+            let fix = e.remediation.clone().unwrap_or_default();
+            if bad.contains("99") {
+                assert!(fix.contains("Update Craft Anything"), "{bad}: {fix}");
+            } else {
+                assert!(fix.starts_with("Rename or delete inbox/build-progress.json") && e.message.contains("something else changed it"), "{bad}: {e:?}");
+            }
             assert!(old.save(d.path()).is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), bad);
         }
+        let e = BuildProgress::load(d.path()).unwrap_err();
+        assert!(e.message.contains("unknown field `step`") && !e.message.contains(".."), "{}", e.message);
         std::fs::write(&path, vec![b' '; MAX_RECORD_BYTES as usize + 1]).unwrap();
         assert_eq!(BuildProgress::load(d.path()).unwrap_err().code, ErrorCode::OverLimit);
     }

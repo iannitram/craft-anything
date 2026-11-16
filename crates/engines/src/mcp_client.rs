@@ -65,6 +65,11 @@ pub trait Transport: Send {
     fn notify(&mut self, msg: &Value) -> Result<(), ToolError>;
     /// Send request `id` and wait (until `deadline`, or `cancelled`) for the message answering it.
     fn request(&mut self, msg: &Value, id: u64, deadline: Instant, cancelled: &dyn Fn() -> bool) -> Result<Value, ToolError>;
+    /// Stop a local server and return the end of what it printed, for an error that has nothing
+    /// else to show (a server that stopped answering). `None` for a transport with no output.
+    fn stop_for_output(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// A server, initialized and ready for requests.
@@ -92,14 +97,30 @@ impl McpClient {
     /// Complete the handshake over any transport.
     pub fn with_transport(name: &str, transport: Box<dyn Transport>, timeout: Duration) -> Result<McpClient, ToolError> {
         let mut client = McpClient { name: name.to_string(), transport, next_id: 1 };
-        client.request(
-            "initialize",
-            json!({"protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": {"name": "craft-anything", "version": env!("CARGO_PKG_VERSION")}}),
-            timeout,
-            &|| false,
-        )?;
-        client.notify("notifications/initialized", json!({}))?;
-        Ok(client)
+        let started = client
+            .request(
+                "initialize",
+                json!({"protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": {"name": "craft-anything", "version": env!("CARGO_PKG_VERSION")}}),
+                timeout,
+                &|| false,
+            )
+            .and_then(|_| client.notify("notifications/initialized", json!({})));
+        match started {
+            Ok(()) => Ok(client),
+            Err(e) => Err(client.with_output(e)),
+        }
+    }
+
+    /// For a server that stopped answering (`TimedOut` without details): stop it and add the end of
+    /// what it printed to the error, as `details.output_tail` and in its remediation. The client
+    /// can't be used after this; any other error is returned as it is.
+    pub fn with_output(&mut self, e: ToolError) -> ToolError {
+        if e.code != ErrorCode::TimedOut || e.details.is_some() {
+            return e;
+        }
+        let Some(printed) = self.transport.stop_for_output().filter(|p| !p.trim().is_empty()) else { return e };
+        let said = e.remediation.clone().map(|r| format!("{r}\n\n")).unwrap_or_default();
+        e.with_remediation(format!("{said}What it printed last:\n{printed}")).with_details(json!({"output_tail": printed}))
     }
 
     /// Every tool the server offers (following pagination, at most 50 pages).
@@ -203,20 +224,46 @@ impl Stdio {
         Ok(Stdio { name: name.to_string(), process, stdin, lines })
     }
 
-    fn exited(&self) -> ToolError {
-        ToolError::new(ErrorCode::EngineMissing, format!("The {} plugin exited.", self.name))
-            .with_remediation("Check its command in config.toml ([[plugins.mcp]]).")
+    /// The server is gone: its exit code and the end of what it printed, when the run has them.
+    fn exited(&mut self) -> ToolError {
+        let fix = "Check its command in config.toml ([[plugins.mcp]]).";
+        let Some(Ok(out)) = self.process.wait_timeout(Duration::from_millis(500)) else {
+            return ToolError::new(ErrorCode::EngineMissing, format!("The {} plugin exited.", self.name)).with_remediation(fix);
+        };
+        let code = out.code.map(|c| format!(" with exit code {c}")).unwrap_or_default();
+        let printed = craft_anything_platform::process::output_excerpt(&out.end_text());
+        let said = if printed.is_empty() { format!("It printed nothing. {fix}") } else { format!("What it printed last:\n{printed}\n\n{fix}") };
+        ToolError::new(ErrorCode::EngineMissing, format!("The {} plugin exited{code}.", self.name))
+            .with_remediation(said)
+            .with_details(json!({"exit_code": out.code, "output_tail": printed}))
     }
 }
 
 impl Transport for Stdio {
+    fn stop_for_output(&mut self) -> Option<String> {
+        self.process.kill_and_wait(Duration::from_secs(2));
+        let printed = match self.process.try_result()? {
+            Ok(out) => out.end_text(),
+            // A stopped run keeps what it had printed in `details.partial`.
+            Err(e) => e.details.as_ref()?.pointer("/partial/stderr_tail")?.as_str()?.to_string(),
+        };
+        Some(craft_anything_platform::process::output_excerpt(&printed))
+    }
+
     fn notify(&mut self, msg: &Value) -> Result<(), ToolError> {
         let mut line = msg.to_string();
         line.push('\n');
-        self.stdin
+        let sent = self
+            .stdin
             .write_all(line.as_bytes())
             .and_then(|()| self.stdin.flush())
-            .map_err(|e| ToolError::new(ErrorCode::EngineMissing, format!("The {} plugin stopped: {e}", self.name)))
+            .map_err(|e| ToolError::new(ErrorCode::EngineMissing, format!("The {} plugin stopped: {e}", self.name)));
+        // A write fails when the server has already exited: say what it printed instead.
+        // The supervisor may not have published the exit yet, so wait for it a moment.
+        if sent.is_err() && self.process.wait_timeout(Duration::from_millis(500)).is_some() {
+            return Err(self.exited());
+        }
+        sent
     }
 
     fn request(&mut self, msg: &Value, id: u64, deadline: Instant, cancelled: &dyn Fn() -> bool) -> Result<Value, ToolError> {
@@ -406,6 +453,24 @@ mod tests {
         let t: RemoteTool = serde_json::from_value(json!({"name": "echo", "inputSchema": {"type": "object"}, "extra": 1})).unwrap();
         assert_eq!(t.name, "echo");
         assert!(t.annotations.is_null());
+    }
+
+    #[test]
+    fn a_server_that_stops_answering_keeps_what_it_printed() {
+        #[cfg(windows)]
+        let (command, args) = (
+            "powershell",
+            vec!["-NoProfile".to_string(), "-Command".to_string(), "[Console]::Error.WriteLine('still loading 3 plugins'); Start-Sleep 60".to_string()],
+        );
+        #[cfg(not(windows))]
+        let (command, args) = ("sh", vec!["-c".to_string(), "echo still loading 3 plugins >&2; sleep 60".to_string()]);
+        let cmd = ServerCommand { command: command.into(), args, env: BTreeMap::new(), cwd: None };
+        let started = Instant::now();
+        let err = McpClient::start("demo", &cmd, Duration::from_secs(5)).err().unwrap();
+        assert_eq!(err.code, ErrorCode::TimedOut, "{err:?}");
+        assert!(err.details.as_ref().and_then(|d| d["output_tail"].as_str()).is_some_and(|t| t.contains("still loading 3 plugins")), "{err:?}");
+        assert!(err.remediation.unwrap_or_default().contains("What it printed last:\nstill loading 3 plugins"));
+        assert!(started.elapsed() < Duration::from_secs(20), "the server is stopped, not waited for");
     }
 
     #[test]

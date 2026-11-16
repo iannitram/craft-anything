@@ -814,8 +814,9 @@ mod tests {
         assert_eq!(err.code, ErrorCode::EngineMissing);
         assert!(err.message.contains("not configured"));
         assert!(err.remediation.unwrap().contains("jeb_url"));
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let e = engine(Some(format!("http://127.0.0.1:{port}/mcp")));
+        // Nothing listens on port 1, and binding port 0 never hands it out, so no stand-in server
+        // beside this test can answer there (a port freed by a dropped listener could be reused).
+        let e = engine(Some("http://127.0.0.1:1/mcp".into()));
         assert_eq!(call(&e, "engines_jeb_check", json!({})).unwrap_err().code, ErrorCode::EngineMissing);
         for bad in [
             "http://10.0.0.1:8425/mcp",

@@ -1,5 +1,6 @@
 # es: traducciones al español (México), registro informal "tú". Licencia MIT OR Apache-2.0.
 # UTF-8: English source<TAB>translation. Keep placeholders and escapes intact.
+Default (its own settings)	Predeterminado (tus propios ajustes)
 OpenCode default	OpenCode predeterminado
 Model default	Modelo predeterminado
 Thinking depth	Profundidad de razonamiento
@@ -1366,6 +1367,7 @@ your files there are the app, edited in place	tus archivos de ahí son la app, e
 {name} builds what you make; answers come from {brain}.	{name} construye lo que haces; las respuestas vienen de {brain}.
 {name} can't be attached: a message takes pictures up to 20 MB.	No se puede adjuntar {name}: un mensaje admite imágenes de hasta 20 MB.
 {name} can't be attached: it isn't a PNG, JPEG, GIF or WebP picture.	No se puede adjuntar {name}: no es una imagen PNG, JPEG, GIF o WebP.
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name} no se puede limitar a solo leer, así que no se le hacen preguntas. Pregunta con Claude Code o con una IA que tenga clave de API.
 {name} is ready	{name} está listo
 {name} is ready.	{name} está listo.
 {name} isn't available yet in this build.	{name} aún no está disponible en esta construcción.
@@ -1467,3 +1469,27 @@ Connecting to {name}… {seconds} s	Conectando con {name}… {seconds} s
 Stopped adding {name}.	Se dejó de añadir {name}.
 It isn't there any more, so {program} runs in its place.	Ya no está ahí, así que se usa {program} en su lugar.
 Use it	Usarlo
+
+# Native update checks and verified installation.
+ArtCraft Launcher manages this app's version. Change its version there.	ArtCraft Launcher administra la versión de esta aplicación. Cámbiala allí.
+Check again	Volver a comprobar
+Check for Updates	Buscar actualizaciones
+Check for Updates…	Buscar actualizaciones…
+Checking for updates…	Buscando actualizaciones…
+Couldn't check for updates: {error}	No se pudieron buscar actualizaciones: {error}
+Downloading and verifying the update…	Descargando y verificando la actualización…
+No installer is available for this platform.	No hay ningún instalador disponible para esta plataforma.
+Releases	Versiones
+Save your work and stop running tasks before installing an update.	Guarda tu trabajo y detén las tareas en ejecución antes de instalar una actualización.
+The update failed: {error}	La actualización falló: {error}
+The update worker stopped unexpectedly. Try checking again.	El proceso de actualización se detuvo inesperadamente. Vuelve a comprobarlo.
+This installation is managed externally. Update it with its package manager or open Releases.	Esta instalación se administra externamente. Actualízala con su gestor de paquetes o abre Versiones.
+Update and restart	Actualizar y reiniciar
+Update ready. Restarting…	Actualización lista. Reiniciando…
+Updated to {version}.	Actualizado a {version}.
+Use Releases or your package manager to update this installation.	Usa Versiones o tu gestor de paquetes para actualizar esta instalación.
+You're up to date.	Tienes la última versión.
+{version} is available.	{version} está disponible.
+Forget a website sign-in	Olvidar el inicio de sesión de un sitio web
+Sign in to a website	Iniciar sesión en un sitio web
+Some shared files could not be hard-linked and were copied instead ({size}).	Algunos archivos compartidos no se pudieron enlazar de forma rígida y se copiaron ({size}).

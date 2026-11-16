@@ -32,12 +32,39 @@ pub struct LaunchOptions {
     pub no_sandbox: bool,
     /// Seconds to wait for a launched browser to start listening.
     pub startup_secs: u64,
+    /// Which profile a launched browser uses.
+    pub profile: ProfileChoice,
+    /// The page a launched browser starts on (default `about:blank`).
+    pub start_url: Option<String>,
+    /// Its profile is copied out afterwards as a saved sign-in (cookies kept with a key every
+    /// later launch can read).
+    pub keeps_sign_in: bool,
 }
 
 impl Default for LaunchOptions {
     fn default() -> Self {
-        LaunchOptions { allow_launch: true, headless: true, no_sandbox: false, startup_secs: 30 }
+        LaunchOptions {
+            allow_launch: true,
+            headless: true,
+            no_sandbox: false,
+            startup_secs: 30,
+            profile: ProfileChoice::Fresh,
+            start_url: None,
+            keeps_sign_in: false,
+        }
     }
+}
+
+/// The profile a launched browser gets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ProfileChoice {
+    /// A new empty private profile, deleted when the browser is dropped.
+    #[default]
+    Fresh,
+    /// A new private profile filled with a copy of a saved sign-in first (see
+    /// [`super::site_sign_in::copy_profile`]); deleted when the browser is dropped, so the saved
+    /// sign-in is never changed.
+    SeededFrom(std::path::PathBuf),
 }
 
 /// A connected browser: its loopback endpoint and product info. If we launched it, the owned
@@ -57,6 +84,26 @@ pub struct Browser {
     /// Stops the browser and deletes its profile if the app ends without dropping it (#810).
     #[allow(dead_code)]
     _watch: Option<RunningProcess>,
+}
+
+/// Launch flags for a browser that holds a sign-in (a sign-in window, or a copy of a saved one).
+fn sign_in_args(opts: &LaunchOptions) -> Vec<String> {
+    if opts.profile == ProfileChoice::Fresh && !opts.keeps_sign_in {
+        return Vec::new();
+    }
+    let mut args = Vec::new();
+    // A saved sign-in is made in a window and read later without one: on Linux both launches
+    // must keep cookies with the same key, so neither asks the desktop's keyring.
+    if cfg!(target_os = "linux") {
+        args.push("--password-store=basic".into());
+    }
+    // Only this profile has password saving turned off (`prepare_sign_in_profile`): never let a
+    // copied `Local State` pick another one.
+    args.push(format!("--profile-directory={}", super::site_sign_in::SIGN_IN_PROFILE));
+    // Chromium needs an explicit session restore on macOS to reload session-only cookies. The
+    // copied profile excludes session and tab files, so old pages are not reopened.
+    args.push("--restore-last-session".into());
+    args
 }
 
 struct BrowserProfile(std::path::PathBuf);
@@ -139,6 +186,17 @@ fn snap_in_script(script: &[u8]) -> Option<std::path::PathBuf> {
 }
 
 impl Browser {
+    /// The profile folder of a browser we launched (deleted when this is dropped).
+    pub(crate) fn profile_dir(&self) -> Option<&std::path::Path> {
+        self._profile.as_ref().map(|p| p.0.as_path())
+    }
+
+    /// Stop a browser we launched and wait (at most `d`) until it's gone. Returns whether it
+    /// confirmed in time.
+    pub(crate) fn stop_and_wait(&mut self, d: Duration) -> bool {
+        self._proc.as_mut().is_none_or(|p| p.kill_and_wait(d))
+    }
+
     /// A handle to a browser someone else owns (it is not killed when this drops).
     pub fn attached(endpoint: &Endpoint, product: &str, version: &str) -> Browser {
         Browser {
@@ -190,9 +248,22 @@ impl Browser {
                     .with_remediation(format!("{fix} Or give a loopback CDP endpoint (start a browser with --remote-debugging-port)."))
             })?;
         let exe = snap_behind(&exe).unwrap_or(exe);
-        let profile = BrowserProfile(super::artifact_tools::fresh_dir_in(&profile_base(&exe, dirs::home_dir()), "craft-browser")?);
+        // Always a profile of our own where this browser can reach it (a Snap's or Flatpak's
+        // folder, #747), so a saved sign-in is only ever copied in and out, never used in place.
+        let owned = BrowserProfile(super::artifact_tools::fresh_dir_in(&profile_base(&exe, dirs::home_dir()), "craft-browser")?);
+        if let ProfileChoice::SeededFrom(saved) = &opts.profile {
+            // The caller holds the site's reservation: a profile saved before password stores
+            // were left out loses them here (the copy below skips them either way).
+            super::site_sign_in::remove_credential_stores(saved);
+            // On error the half-filled copy is removed as `owned` drops.
+            super::site_sign_in::copy_profile(saved, &owned.0, &super::site_sign_in::CopyCaps::default())?;
+        }
+        if opts.keeps_sign_in || opts.profile != ProfileChoice::Fresh {
+            super::site_sign_in::prepare_sign_in_profile(&owned.0)?;
+        }
+        let (profile_dir, profile) = (owned.0.clone(), Some(owned));
         let mut args: Vec<String> = vec![
-            format!("--user-data-dir={}", profile.0.display()),
+            format!("--user-data-dir={}", profile_dir.display()),
             "--remote-debugging-port=0".into(),
             "--remote-allow-origins=*".into(),
             "--no-first-run".into(),
@@ -209,7 +280,8 @@ impl Browser {
         if opts.no_sandbox {
             args.push("--no-sandbox".into());
         }
-        args.push("about:blank".into());
+        args.extend(sign_in_args(opts));
+        args.push(opts.start_url.clone().unwrap_or_else(|| "about:blank".into()));
         let cancel = ctx.cancel.clone();
         let tail = StderrTail::default();
         let sink = tail.clone();
@@ -224,7 +296,7 @@ impl Browser {
             .hands_off()
             .spawn()?;
         let name = exe.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "the browser".into());
-        let endpoint = Self::await_devtools(&profile.0, dl, &mut proc, &tail, &name)?;
+        let endpoint = Self::await_devtools(&profile_dir, dl, &mut proc, &tail, &name)?;
         let version = cdp::json_version(&endpoint, dl)?;
         Ok(Browser {
             product: version.get("Browser").and_then(Value::as_str).unwrap_or("unknown").to_string(),
@@ -232,9 +304,9 @@ impl Browser {
             user_agent: version.get("User-Agent").and_then(Value::as_str).unwrap_or_default().to_string(),
             endpoint,
             launched: true,
-            _watch: craft_anything_platform::end_with_this_process(&proc, Some(&profile.0)),
+            _watch: craft_anything_platform::end_with_this_process(&proc, profile.as_ref().map(|p| p.0.as_path())),
             _proc: Some(proc),
-            _profile: Some(profile),
+            _profile: profile,
         })
     }
 
@@ -1107,6 +1179,22 @@ pub fn png_artifact(bytes: &[u8]) -> Result<Value, ToolError> {
 
 #[cfg(test)]
 mod tests {
+    /// Review of #1459: a copied `Local State` must not open a profile where saving passwords is on.
+    #[test]
+    fn sign_in_browsers_open_the_prepared_profile_and_fresh_ones_stay_plain() {
+        use super::{LaunchOptions, ProfileChoice, sign_in_args};
+        let pinned = format!("--profile-directory={}", super::super::site_sign_in::SIGN_IN_PROFILE);
+        let seeded = LaunchOptions { profile: ProfileChoice::SeededFrom("saved".into()), ..LaunchOptions::default() };
+        let window = LaunchOptions { keeps_sign_in: true, ..LaunchOptions::default() };
+        for opts in [&seeded, &window] {
+            let args = sign_in_args(opts);
+            assert!(args.contains(&pinned), "{args:?}");
+            assert!(args.iter().any(|a| a == "--restore-last-session"), "{args:?}");
+            assert_eq!(args.iter().any(|a| a == "--password-store=basic"), cfg!(target_os = "linux"), "{args:?}");
+        }
+        assert!(sign_in_args(&LaunchOptions::default()).is_empty());
+    }
+
     #[test]
     fn a_launched_browser_deletes_its_profile_on_drop() {
         let root = tempfile::tempdir().unwrap();

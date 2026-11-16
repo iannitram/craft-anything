@@ -8,6 +8,7 @@ use super::web_common::{Image, encode_png};
 use crate::tool::{CancelToken, Ctx, Effects, Requires, ToolOutput, ToolSpec, Toolset, parse_params, schema_of};
 use craft_anything_evidence::{Confidence, Coverage, CoverageStatus, ErrorCode, Limitation, Location, Subject, ToolError};
 use craft_anything_formats::godot_pck;
+use craft_anything_formats::unity_audio;
 use craft_anything_formats::unity_bundle;
 use craft_anything_formats::unity_serialized;
 use craft_anything_formats::unity_texture;
@@ -87,8 +88,8 @@ pub fn specs() -> Vec<ToolSpec> {
         spec(
             "game_unity_asset_export",
             "Take an asset out of a Unity game",
-            "Save one object of a Unity serialized file (absolute path of a .assets or level file, or of a bundle: then `file` picks the serialized file inside, the first by default) as a file anyone can open: a texture (Texture2D, by its path_id from game_unity_list) becomes a PNG at `output` (an absolute path that doesn't exist yet). Pixels are read inside the object or from the .resS file it streams from. Formats: Alpha8, R8, RGB24, RGBA32, ARGB32, BGRA32, RGB565, RGBA4444, ARGB4444, RHalf, RGHalf, RGBAHalf, RFloat, RGFloat, RGBAFloat, DXT1, DXT5, BC4, BC5, BC6H and BC7. Floating-point colours are shown in 8-bit sRGB and clip at white. Other formats (crunched, ASTC, ETC…) are refused with their name. Unity 2017.3 and later.",
-            "Save a picture from a Unity game as a PNG.",
+            "Save one object of a Unity serialized file (absolute path of a .assets or level file, or of a bundle: then `file` picks the serialized file inside, the first by default) as a file anyone can open, at `output` (an absolute path that doesn't exist yet), by its path_id from game_unity_list. A texture (Texture2D) becomes a PNG. A sound (AudioClip, Unity 5 and later) is read from the .resource file it's stored in: one in 16-bit PCM (Unity's uncompressed sound), mono or stereo, becomes a WAV, others (Vorbis, ADPCM…) are saved as the FMOD sound bank (FSB5) they're stored in; `output`'s extension is set to .wav or .fsb to match, and `saved_as` says which. Pixels are read inside the object or from the .resS file it streams from. Formats: Alpha8, R8, RGB24, RGBA32, ARGB32, BGRA32, RGB565, RGBA4444, ARGB4444, RHalf, RGHalf, RGBAHalf, RFloat, RGFloat, RGBAFloat, DXT1, DXT5, BC4, BC5, BC6H and BC7. Floating-point colours are shown in 8-bit sRGB and clip at white. Other formats (crunched, ASTC, ETC…) are refused with their name. Textures from Unity 2017.3 on.",
+            "Save a picture or a sound from a Unity game.",
             Toolset::Formats,
             Effects::EVIDENCE.union(Effects::WRITES_FILESYSTEM),
             Requires::Nothing,
@@ -895,19 +896,23 @@ fn game_unity_asset_export(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutpu
         ToolError::new(ErrorCode::NotFound, format!("There's no object with path id {}.", p.path_id))
             .with_remediation("game_unity_list (or game_unity_bundle_list for a bundle) shows the objects and their path ids.")
     })?;
-    if object.class_id != 28 {
+    if object.class_id != 28 && object.class_id != 83 {
         return Err(ToolError::unsupported(format!(
-            "{} objects can't be taken out yet; textures (Texture2D) can.",
+            "{} objects can't be taken out yet; textures (Texture2D) and sounds (AudioClip) can.",
             unity_serialized::class_name(object.class_id)
         )));
     }
-    ctx.report(None, format!("Reading texture {}", p.path_id));
+    let what = if object.class_id == 83 { "sound" } else { "texture" };
+    ctx.report(None, format!("Reading {what} {}", p.path_id));
     let version = known_version(&m.unity_version, Path::new(&p.path));
     if stripped(&version) {
-        return Err(ToolError::unsupported("This file doesn't say which Unity version wrote it, so its textures' layout isn't known.")
+        return Err(ToolError::unsupported(format!("This file doesn't say which Unity version wrote it, so its {what}s' layout isn't known."))
             .with_remediation("Pass a bundle that's inside the game's <Game>_Data folder, beside its globalgamemanagers file."));
     }
     let bytes = src.read(object.offset, u64::from(object.size))?;
+    if object.class_id == 83 {
+        return unity_sound_export(ctx, &p, &out, &mut src, &bytes, &version, h.big_endian);
+    }
     let t = unity_texture::parse(&bytes, &version, h.big_endian).map_err(|e| format_err(e, "a Unity texture"))?;
     let format = unity_texture::format_name(t.format);
     if u64::from(t.width) * u64::from(t.height) > MAX_PIXELS {
@@ -942,6 +947,110 @@ fn game_unity_asset_export(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutpu
         .summary(format!("Saved texture \"{}\" ({}×{}, {format}) as {}.", t.name, t.width, t.height, out.display()))
         .confidence(Confidence::Observed)
         .coverage(Coverage::complete(1))
+        .location(Location::new("path", out.display().to_string()));
+    Ok(ToolOutput::evidence(b.build()?))
+}
+
+/// The largest sound taken out (256 MiB).
+const MAX_SOUND_BYTES: u64 = 256 * 1024 * 1024;
+
+/// `out` ending in `.extension`: a `.wav` or `.fsb` it has is swapped, any other dot in its name kept.
+fn with_sound_extension(out: &Path, extension: &str) -> PathBuf {
+    match out.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("wav" | "fsb") => out.with_extension(extension),
+        _ => {
+            let mut name = out.as_os_str().to_owned();
+            name.push(".");
+            name.push(extension);
+            PathBuf::from(name)
+        }
+    }
+}
+
+/// Save an AudioClip: a WAV when its FSB5 bank holds one plain PCM sound, else the stored bytes.
+fn unity_sound_export(
+    ctx: &mut Ctx<'_>,
+    p: &ExportParams,
+    out: &Path,
+    src: &mut Serialized,
+    bytes: &[u8],
+    version: &str,
+    big_endian: bool,
+) -> Result<ToolOutput, ToolError> {
+    let clip = unity_audio::parse(bytes, version, big_endian).map_err(|e| format_err(e, "a Unity sound"))?;
+    let compression = unity_audio::compression_name(clip.compression);
+    if clip.stream.size > MAX_SOUND_BYTES {
+        return Err(ToolError::new(ErrorCode::OverLimit, format!("{} is {} bytes; the limit is 256 MiB", clip.name, clip.stream.size)));
+    }
+    let stored = src.stream(&clip.stream.path, clip.stream.offset, clip.stream.size)?;
+    let mut lims = Vec::new();
+    let (saved, codec, wav) = if stored.starts_with(unity_audio::FSB5) {
+        match unity_audio::bank(&stored) {
+            Ok(bank) => {
+                let codec = unity_audio::codec_name(bank.codec);
+                let wav = match bank.samples.as_slice() {
+                    [one] => unity_audio::wav(&bank, one, &stored),
+                    _ => None,
+                };
+                if wav.is_none() {
+                    lims.push(Limitation::new(
+                        "stored_as_is",
+                        format!(
+                            "{} is stored as {codec} in an FMOD sound bank (FSB5) of {} sample(s); it's saved as that bank, which tools that read FSB files can convert.",
+                            clip.name,
+                            bank.samples.len()
+                        ),
+                    ));
+                }
+                (if wav.is_some() { "wav" } else { "fsb5" }, Some(codec), wav)
+            }
+            Err(e) => {
+                lims.push(Limitation::new("stored_as_is", format!("{}'s FMOD sound bank isn't one that's read here ({e}); it's saved as it is.", clip.name)));
+                ("fsb5", None, None)
+            }
+        }
+    } else {
+        lims.push(Limitation::new("stored_as_is", format!("{}'s stored sound isn't an FMOD sound bank; its bytes are saved as they are.", clip.name)));
+        ("stored", None, None)
+    };
+    // What's saved isn't known before the sound is read, so the file gets the extension it needs.
+    let out = match saved {
+        "wav" => with_sound_extension(out, "wav"),
+        "fsb5" => with_sound_extension(out, "fsb"),
+        _ => out.to_path_buf(),
+    };
+    if out.exists() {
+        return Err(ToolError::invalid(format!("{} already exists", out.display())).with_remediation("Pick a new file name; nothing is overwritten."));
+    }
+    let file = wav.unwrap_or(stored);
+    crate::project::write_atomic(&out, &file)?;
+    let result = json!({
+        "path_id": p.path_id,
+        "name": clip.name,
+        "class": "AudioClip",
+        "channels": clip.channels,
+        "frequency": clip.frequency,
+        "seconds": clip.length,
+        "compression": compression,
+        "codec": codec,
+        "saved_as": saved,
+        "streamed_from": clip.stream.path,
+        "output": out.display().to_string(),
+        "size": file.len(),
+        "sha256": craft_anything_evidence::sha256_hex(&file),
+    });
+    let shown = match saved {
+        "wav" => "a WAV file".to_string(),
+        "fsb5" => "its FMOD sound bank".to_string(),
+        _ => "its stored bytes".to_string(),
+    };
+    let name = Path::new(&p.path).file_name().map(|n| n.to_string_lossy().into_owned());
+    let b = builder(ctx, "game_unity_asset_export", Subject { kind: "archive".into(), sha256: None, name }, params_json(p))
+        .result(result)
+        .summary(format!("Saved sound \"{}\" ({:.2} s, {compression}) as {shown} at {}.", clip.name, clip.length, out.display()))
+        .confidence(Confidence::Observed)
+        .coverage(Coverage::complete(1))
+        .limitations(lims)
         .location(Location::new("path", out.display().to_string()));
     Ok(ToolOutput::evidence(b.build()?))
 }
@@ -2020,6 +2129,80 @@ mod tests {
         let v = call(&b, 2, "from-bundle.png").unwrap().to_json();
         assert_eq!(v["result"]["width"].as_u64(), Some(4), "{v}");
         assert!(decode("from-bundle.png").rgba.as_chunks::<4>().0.iter().all(|p| *p == [255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn saves_unity_sounds_as_wav_or_as_their_bank() {
+        use craft_anything_testkit::games::{fsb5_bank, unity_audioclip, unity_bundle_files, unity_serialized_file};
+        let e = Engine::new(crate::testing::session());
+        let dir = tempfile::tempdir().unwrap();
+        // A PCM16 mono bank and a Vorbis one, one after the other in the .resource file.
+        let pcm: Vec<u8> = (1..=8).collect();
+        let wav_bank = fsb5_bank(2, &[(8, 1, 4, &pcm)]);
+        let vorbis_bank = fsb5_bank(15, &[(9, 2, 960, &[5; 40])]);
+        let mut resource = wav_bank.clone();
+        resource.extend_from_slice(&vorbis_bank);
+        let at = wav_bank.len() as u64;
+        let mut broken = fsb5_bank(2, &[(8, 1, 4, &pcm)]);
+        broken[4] = 9; // a version that isn't read
+        let broken_at = resource.len() as u64;
+        resource.extend_from_slice(&broken);
+        let resource_name = "sharedassets0.resource";
+        let objects = [
+            (83, unity_audioclip("2019.4.19f1", "Click", 1, 44100, 0.0001, 0, (resource_name, 0, at))),
+            (83, unity_audioclip("2019.4.19f1", "Theme", 2, 48000, 0.02, 1, (resource_name, at, vorbis_bank.len() as u64))),
+            (83, unity_audioclip("2019.4.19f1", "Raw", 1, 8000, 0.1, 0, (resource_name, 2, 6))),
+            (83, unity_audioclip("2019.4.19f1", "Huge", 1, 8000, 0.1, 0, (resource_name, 0, 1 << 40))),
+            (83, unity_audioclip("2019.4.19f1", "Odd", 1, 44100, 0.0001, 0, (resource_name, broken_at, broken.len() as u64))),
+        ];
+        std::fs::write(dir.path().join("sharedassets0.assets"), unity_serialized_file("2019.4.19f1", &objects)).unwrap();
+        std::fs::write(dir.path().join(resource_name), &resource).unwrap();
+        let file = dir.path().join("sharedassets0.assets");
+        let call = |path: &std::path::Path, id: i64, out: &str| {
+            e.call("game_unity_asset_export", json!({"path": path, "path_id": id, "output": dir.path().join(out)}), CallOptions::new(Caller::Mcp))
+        };
+        let v = call(&file, 1, "click.wav").unwrap().to_json();
+        let r = &v["result"];
+        assert_eq!(
+            (r["class"].as_str(), r["compression"].as_str(), r["codec"].as_str(), r["saved_as"].as_str()),
+            (Some("AudioClip"), Some("PCM"), Some("PCM16"), Some("wav")),
+            "{v}"
+        );
+        assert!(v["limitations"].as_array().unwrap().is_empty(), "{v}");
+        let wav = std::fs::read(dir.path().join("click.wav")).unwrap();
+        assert_eq!((&wav[..4], &wav[44..]), (b"RIFF".as_slice(), pcm.as_slice()));
+        assert_eq!(r["sha256"].as_str(), Some(craft_anything_evidence::sha256_hex(&wav).as_str()));
+        // Vorbis is saved as the bank it's stored in, and says so.
+        let v = call(&file, 2, "theme.fsb").unwrap().to_json();
+        assert_eq!((v["result"]["codec"].as_str(), v["result"]["saved_as"].as_str()), (Some("Vorbis"), Some("fsb5")));
+        assert_eq!(v["limitations"][0]["code"].as_str(), Some("stored_as_is"));
+        assert_eq!(std::fs::read(dir.path().join("theme.fsb")).unwrap(), vorbis_bank);
+        // Asked for a WAV, a bank gets the extension it needs; a bank that isn't read is still saved.
+        let v = call(&file, 2, "theme-again.wav").unwrap().to_json();
+        assert_eq!(v["result"]["output"].as_str(), Some(dir.path().join("theme-again.fsb").to_str().unwrap()));
+        assert!(!dir.path().join("theme-again.wav").exists());
+        assert!(call(&file, 2, "theme.wav").unwrap_err().message.contains("already exists"), "theme.fsb is there");
+        let v = call(&file, 5, "odd.sharedassets0-5").unwrap().to_json();
+        assert_eq!((v["result"]["saved_as"].as_str(), v["result"]["codec"].as_str()), (Some("fsb5"), None));
+        assert!(v["limitations"][0]["message"].as_str().unwrap().contains("FSB5 version 9"), "{v}");
+        assert_eq!(std::fs::read(dir.path().join("odd.sharedassets0-5.fsb")).unwrap(), broken, "a dot in the name is kept");
+        // Stored bytes that aren't a bank are saved as they are; a size past the limit isn't read.
+        let v = call(&file, 3, "raw.bin").unwrap().to_json();
+        assert_eq!((v["result"]["saved_as"].as_str(), v["result"]["codec"].as_str()), (Some("stored"), None));
+        assert_eq!(std::fs::read(dir.path().join("raw.bin")).unwrap(), &resource[2..8]);
+        let err = call(&file, 4, "huge.wav").unwrap_err();
+        assert_eq!(err.code, craft_anything_evidence::ErrorCode::OverLimit, "{err:?}");
+        assert!(!dir.path().join("huge.wav").exists());
+
+        // Inside a bundle, the sound is in the bundle's .resource.
+        let clip = unity_audioclip("2022.3.43f1", "Click", 1, 44100, 0.0001, 0, ("archive:/CAB-0123456789abcdef/CAB-0123456789abcdef.resource", 0, at));
+        let assets = unity_serialized_file("2022.3.43f1", &[(83, clip)]);
+        let bundle = unity_bundle_files(&[("CAB-0123456789abcdef", &assets, true), ("CAB-0123456789abcdef.resource", &resource, false)]);
+        let b = dir.path().join("sounds.bundle");
+        std::fs::write(&b, bundle).unwrap();
+        let v = call(&b, 1, "from-bundle.wav").unwrap().to_json();
+        assert_eq!(v["result"]["saved_as"].as_str(), Some("wav"), "{v}");
+        assert_eq!(std::fs::read(dir.path().join("from-bundle.wav")).unwrap(), wav);
     }
 
     #[test]

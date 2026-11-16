@@ -22,13 +22,32 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 /// `--lang`: the UI language for every scene (English when absent).
 static LANG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// `--light`: every scene in Studio Light.
+static LIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn render(out: &std::path::Path, name: &str, w: f32, h: f32, scale: f32, make: impl FnOnce() -> CraftApp + 'static) {
+    render_then(out, name, w, h, scale, make, |_| {});
+}
+
+/// [`render`], after `act` has used the settled screen (a click that opens a list).
+fn render_then(
+    out: &std::path::Path,
+    name: &str,
+    w: f32,
+    h: f32,
+    scale: f32,
+    make: impl FnOnce() -> CraftApp + 'static,
+    act: impl FnOnce(&mut egui_kittest::Harness<'static, CraftApp>),
+) {
     let mut harness =
         egui_kittest::Harness::builder().with_size(egui::vec2(w, h)).with_pixels_per_point(scale).with_max_steps(64).wgpu().build_eframe(move |cc| {
             CraftApp::setup_context(&cc.egui_ctx);
             let mut app = make();
             // A made-up folder: the default names the account of whoever renders the pictures.
             app.settings.projects_dir = Some(PathBuf::from("~/Documents/Craft Anything"));
+            if LIGHT.load(std::sync::atomic::Ordering::Relaxed) {
+                app.settings.theme = "studio-light".into();
+            }
             app.settings.language = LANG.get().cloned().unwrap_or_else(|| "en".into());
             craft_anything_ui_egui::i18n::set_language(&app.settings.language);
             app
@@ -37,6 +56,7 @@ fn render(out: &std::path::Path, name: &str, w: f32, h: f32, scale: f32, make: i
     for _ in 0..24 {
         harness.step();
     }
+    act(&mut harness);
     match harness.render() {
         Ok(img) => {
             let path = out.join(format!("{name}.png"));
@@ -54,6 +74,7 @@ fn main() {
     let out = PathBuf::from(arg(&args, "--out-dir").unwrap_or_else(|| "target/snapshots".into()));
     let scale: f32 = arg(&args, "--scale").and_then(|s| s.parse().ok()).unwrap_or(1.5);
     let only = arg(&args, "--only");
+    LIGHT.store(args.iter().any(|a| a == "--light"), std::sync::atomic::Ordering::Relaxed);
     if let Some(l) = arg(&args, "--lang") {
         let _ = LANG.set(l);
     }
@@ -145,6 +166,56 @@ fn main() {
             a.state.settings_open = true;
             a
         });
+    }
+    // Settings with the language list open: a dropdown's rows, the tick on the chosen one.
+    if want("settings-dropdown") {
+        render_then(
+            &out,
+            "settings-dropdown",
+            w,
+            h,
+            scale,
+            || {
+                let mut a = demo::app(demo::engine(Mode::Beginner, true));
+                demo::fill_projects(&mut a);
+                a.state.settings_open = true;
+                a
+            },
+            |harness| {
+                use egui_kittest::kittest::Queryable as _;
+                harness.get_by_value("English").click();
+                harness.step();
+                // The list fades in on the clock.
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                for _ in 0..12 {
+                    harness.step();
+                }
+            },
+        );
+    }
+    // The title bar's Help menu, open.
+    if want("help-menu") {
+        render_then(
+            &out,
+            "help-menu",
+            w,
+            h,
+            scale,
+            || {
+                let mut a = demo::app(demo::engine(Mode::Beginner, true));
+                demo::fill_projects(&mut a);
+                a
+            },
+            |harness| {
+                use egui_kittest::kittest::Queryable as _;
+                harness.get_by_label("Help").click();
+                harness.step();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                for _ in 0..12 {
+                    harness.step();
+                }
+            },
+        );
     }
     if want("palette") {
         render(&out, "palette", w, h, scale, || {

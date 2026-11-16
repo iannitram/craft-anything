@@ -1,13 +1,14 @@
 //! Design system: two themes (Studio dark, Studio Light), colour tokens, radii and type.
 //!
 //! A calm desktop look: neutral graphite (or near-white) surfaces, a slightly darker sidebar,
-//! soft rounded cards and controls, sentence-case DM Sans throughout, and ink-filled main buttons.
+//! lightly rounded cards and controls, sentence-case Figtree throughout, and ink-filled main buttons.
 //! Indigo is the app colour for highlights, progress, links and selection.
 //! Widgets read [`Tokens::get`] instead of hard-coding colours, so a theme switch applies everywhere.
 //! Confidence has its own fixed palette so "how sure are we" reads the same in both themes.
 
 use craft_anything_engine::evidence::Confidence;
-use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Visuals};
+use egui::epaint::text::VariationCoords;
+use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, FontTweak, Stroke, TextStyle, Visuals};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -56,6 +57,8 @@ pub struct Tokens {
     pub card_border: Color32,
     /// A card a step above `card` (hovered cards, chips).
     pub raised: Color32,
+    /// What can be typed in or pressed: a shade lighter than the card it sits on, so it reads
+    /// as something to use.
     pub field: Color32,
     pub field_border: Color32,
     pub hover: Color32,
@@ -118,10 +121,10 @@ impl Tokens {
                 card: Color32::from_rgb(0x1b, 0x1c, 0x1f),
                 card_border: Color32::from_rgb(0x34, 0x34, 0x36),
                 raised: Color32::from_rgb(0x22, 0x23, 0x25),
-                field: Color32::from_rgb(0x1b, 0x1c, 0x1f),
+                field: Color32::from_rgb(0x22, 0x23, 0x26),
                 field_border: Color32::from_rgb(0x6c, 0x6c, 0x6c),
-                hover: Color32::from_rgb(0x22, 0x23, 0x25),
-                pressed: Color32::from_rgb(0x2d, 0x2e, 0x30),
+                hover: Color32::from_rgb(0x2a, 0x2b, 0x2e),
+                pressed: Color32::from_rgb(0x33, 0x34, 0x37),
                 text: Color32::from_rgb(0xf2, 0xf1, 0xee),
                 text_dim: Color32::from_rgb(0xb3, 0xb3, 0xb2),
                 text_faint: Color32::from_rgb(0x8d, 0x8d, 0x8d),
@@ -137,9 +140,9 @@ impl Tokens {
                 warning: BEST_GUESS,
                 success: Color32::from_rgb(0x5b, 0xbf, 0x8f),
                 code_bg: Color32::from_rgb(0x06, 0x06, 0x07),
-                radius_sm: 6.0,
-                radius: 8.0,
-                radius_lg: 12.0,
+                radius_sm: RADIUS_SM,
+                radius: RADIUS,
+                radius_lg: RADIUS_LG,
             },
             // getartcraft.com's light: warm paper (#f2f1ee), its sunken #e9e8e4 for the sidebar,
             // raised #faf9f7 for cards, ink #101014.
@@ -150,7 +153,7 @@ impl Tokens {
                 card: Color32::from_rgb(0xfa, 0xf9, 0xf7),
                 card_border: Color32::from_rgb(0xce, 0xcd, 0xcb),
                 raised: Color32::from_rgb(0xe9, 0xe8, 0xe4),
-                field: Color32::from_rgb(0xfa, 0xf9, 0xf7),
+                field: Color32::WHITE,
                 field_border: Color32::from_rgb(0x86, 0x85, 0x85),
                 hover: Color32::from_rgb(0xe4, 0xe4, 0xe1),
                 pressed: Color32::from_rgb(0xdb, 0xda, 0xd8),
@@ -169,9 +172,9 @@ impl Tokens {
                 warning: Color32::from_rgb(0x9a, 0x67, 0x00),
                 success: Color32::from_rgb(0x12, 0x75, 0x36),
                 code_bg: Color32::from_rgb(0xe9, 0xe8, 0xe4),
-                radius_sm: 6.0,
-                radius: 8.0,
-                radius_lg: 12.0,
+                radius_sm: RADIUS_SM,
+                radius: RADIUS,
+                radius_lg: RADIUS_LG,
             },
         }
     }
@@ -196,15 +199,21 @@ impl Tokens {
     }
 }
 
+/// Corners: tags and segments, controls and fields, cards and dialogs. Rounded, but only just.
+const RADIUS_SM: f32 = 4.0;
+const RADIUS: f32 = 6.0;
+const RADIUS_LG: f32 = 8.0;
+
 fn tokens_id() -> egui::Id {
     egui::Id::new("craft-anything-theme")
 }
 
 // ---- fonts -------------------------------------------------------------------------------------
 
-pub static DM_SANS_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/DMSans-Regular.ttf");
-pub static DM_SANS_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/DMSans-Medium.ttf");
-pub static DM_SANS_BOLD: &[u8] = include_bytes!("../../../assets/fonts/DMSans-Bold.ttf");
+/// Figtree, a variable font: one file set to each weight used here.
+pub static FIGTREE: &[u8] = include_bytes!("../../../assets/fonts/Figtree-Variable.ttf");
+/// The faces cut from it: text, labels, and headings and emphasis.
+const FIGTREE_FACES: [(&str, f32); 3] = [("Figtree", 400.0), ("Figtree-Medium", 500.0), ("Figtree-SemiBold", 600.0)];
 pub static JETBRAINS_MONO: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
 
 /// A font from the optional craft-fonts build input (empty unless built with `CRAFT_FONTS_DIR`).
@@ -218,39 +227,55 @@ pub struct CraftFont {
 
 include!(concat!(env!("OUT_DIR"), "/craft_fonts.rs"));
 
-/// Install DM Sans (three weights: body, labels and bold for headings; it has no static
-/// SemiBold), JetBrains Mono (code), plus any craft-fonts as fallbacks.
+/// Install Figtree (three weights: text, labels, and semibold for headings), JetBrains Mono
+/// (code), plus any craft-fonts as fallbacks.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    let mut add = |name: &str, bytes: &'static [u8]| {
-        fonts.font_data.insert(name.to_owned(), Arc::new(FontData::from_static(bytes)));
-    };
-    add("DMSans", DM_SANS_REGULAR);
-    add("DMSans-Medium", DM_SANS_MEDIUM);
-    add("DMSans-Bold", DM_SANS_BOLD);
-    add("JetBrainsMono", JETBRAINS_MONO);
+    for (name, weight) in FIGTREE_FACES {
+        let tweak = FontTweak { coords: VariationCoords::new([(*b"wght", weight)]), ..Default::default() };
+        fonts.font_data.insert(name.to_owned(), Arc::new(FontData::from_static(FIGTREE).tweak(tweak)));
+    }
+    fonts.font_data.insert("JetBrainsMono".to_owned(), Arc::new(FontData::from_static(JETBRAINS_MONO)));
     let mut fallbacks = Vec::new();
+    let mut bold_fallbacks = Vec::new();
     for f in CRAFT_FONTS {
         let name = format!("craft:{}:{}", f.family, f.style);
         fonts.font_data.insert(name.clone(), Arc::new(FontData::from_static(f.bytes)));
         if f.style.eq_ignore_ascii_case("regular") {
             fallbacks.push(name);
+        } else if f.style.eq_ignore_ascii_case("bold") {
+            bold_fallbacks.push(name);
         }
     }
     // Sans first: a mincho/serif fallback makes Japanese and Chinese UI text look like prose.
     let fallbacks = sans_first(fallbacks);
-    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "DMSans".to_owned());
+    let bold_fallbacks = sans_first(bold_fallbacks);
+    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "Figtree".to_owned());
     fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "JetBrainsMono".to_owned());
     for fam in [FontFamily::Proportional, FontFamily::Monospace] {
         fonts.families.entry(fam).or_default().extend(fallbacks.iter().cloned());
     }
     let base: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    for (fam, primary) in [("medium", "DMSans-Medium"), ("semibold", "DMSans-Bold")] {
-        let mut stack = vec![primary.to_owned()];
-        stack.extend(base.iter().cloned());
-        fonts.families.insert(FontFamily::Name(fam.into()), stack);
+    for (fam, stack) in weighted_families(&base, &bold_fallbacks) {
+        fonts.families.insert(fam, stack);
     }
     ctx.set_fonts(fonts);
+}
+
+/// The medium and semibold families: Figtree's own weight first, then a script's bold face from
+/// craft-fonts where it has one, then the whole proportional stack. Without the bold fallback a
+/// heading in Japanese or Chinese fell back to that script's regular face, so it looked lighter
+/// than the Latin beside it (#1808).
+fn weighted_families(base: &[String], bold: &[String]) -> Vec<(FontFamily, Vec<String>)> {
+    [("medium", "Figtree-Medium"), ("semibold", "Figtree-SemiBold")]
+        .into_iter()
+        .map(|(fam, primary)| {
+            let mut stack = vec![primary.to_owned()];
+            stack.extend(bold.iter().cloned());
+            stack.extend(base.iter().cloned());
+            (FontFamily::Name(fam.into()), stack)
+        })
+        .collect()
 }
 
 /// Fallback faces, most wanted first. A stable sort keeps the manifest's order inside a rank.
@@ -298,20 +323,131 @@ pub fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("semibold".into()))
 }
 /// The type scale: every text size in the interface is one of these.
-/// Headings (`heading`, DM Sans bold), largest first: a screen's title, a step or a dialog's
+/// Headings (`heading`, Figtree semibold), largest first: a screen's title, a step or a dialog's
 /// title, a card's or a list item's title.
 pub const TITLE: f32 = 26.0;
 pub const SECTION: f32 = 18.0;
 pub const CARD: f32 = 16.0;
 /// Text: the line under a title (and Simple mode's main field), reading text, secondary text
-/// and list rows, fine print (paths, counts, notes), and tags painted in tight spots.
+/// and list rows, the labels of small controls and section captions, fine print (paths, counts,
+/// notes), and tags painted in tight spots.
 pub const LEAD: f32 = 17.0;
 pub const BODY: f32 = 15.0;
 pub const SMALL: f32 = 14.0;
+pub const LABEL: f32 = 13.0;
 pub const CAPTION: f32 = 12.0;
 pub const TINY: f32 = 11.0;
+/// Code, paths and numbers in JetBrains Mono (the workbench's dense lists may use `TINY`).
+pub const CODE: f32 = 12.5;
 
-/// A heading: DM Sans bold, at one of the heading sizes above.
+/// The spacing steps: every gap between things is one of these.
+pub mod space {
+    /// A nudge between two lines that belong together.
+    pub const XXS: f32 = 2.0;
+    pub const XS: f32 = 4.0;
+    pub const SM: f32 = 8.0;
+    pub const MD: f32 = 12.0;
+    pub const LG: f32 = 16.0;
+    pub const XL: f32 = 24.0;
+    pub const XXL: f32 = 32.0;
+}
+
+/// Icon sizes.
+pub mod icon {
+    pub const XS: f32 = 12.0;
+    pub const SM: f32 = 14.0;
+    pub const MD: f32 = 16.0;
+    pub const LG: f32 = 20.0;
+    pub const XL: f32 = 24.0;
+    pub const XXL: f32 = 32.0;
+}
+
+/// The padding inside frames, built from the spacing steps.
+pub mod pad {
+    use egui::Margin;
+    /// Around the rows of a menu or a dropdown's list.
+    pub const MENU: Margin = Margin::same(4);
+    /// Code blocks and dense workbench boxes.
+    pub const TIGHT: Margin = Margin::same(8);
+    pub const PANEL: Margin = Margin::same(12);
+    pub const CARD: Margin = Margin::same(16);
+    /// Dialogs, side panes and a screen's main card.
+    pub const ROOMY: Margin = Margin::same(24);
+    /// A card that holds one row.
+    pub const ROW: Margin = Margin::symmetric(16, 12);
+    /// A banner across the window.
+    pub const BAR: Margin = Margin::symmetric(16, 8);
+    /// A tag around a word or two.
+    pub const CHIP: Margin = Margin::symmetric(8, 4);
+    /// A strip that only keeps its content off the edges.
+    pub const GUTTER: Margin = Margin::symmetric(8, 0);
+    /// A text field as tall as a large control, and one as tall as a medium control.
+    pub const FIELD: Margin = Margin::symmetric(12, 10);
+    pub const FIELD_COMPACT: Margin = Margin::symmetric(8, 6);
+}
+
+/// The sizes a control (button, icon button, switch, field) comes in. Height, label size, side
+/// padding and icon size go together, so two controls of one size always line up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ControlSize {
+    /// Inline and dense: toolbars, rows of a list, the workbench.
+    Small,
+    /// The default.
+    #[default]
+    Medium,
+    /// A screen's main switch or field.
+    Large,
+    /// The one action a screen is for (Simple mode's Start).
+    Hero,
+}
+
+impl ControlSize {
+    pub const ALL: [ControlSize; 4] = [ControlSize::Small, ControlSize::Medium, ControlSize::Large, ControlSize::Hero];
+
+    pub const fn height(self) -> f32 {
+        match self {
+            ControlSize::Small => 24.0,
+            ControlSize::Medium => 32.0,
+            ControlSize::Large => 40.0,
+            ControlSize::Hero => 48.0,
+        }
+    }
+
+    /// The label's size (set in the medium weight).
+    pub const fn text(self) -> f32 {
+        match self {
+            ControlSize::Small => LABEL,
+            // The size of the text around it, and of what is typed into a field beside it.
+            ControlSize::Medium | ControlSize::Large => BODY,
+            ControlSize::Hero => CARD,
+        }
+    }
+
+    /// The room left and right of the label.
+    pub const fn pad_x(self) -> f32 {
+        match self {
+            ControlSize::Small => space::MD,
+            ControlSize::Medium => space::LG,
+            ControlSize::Large | ControlSize::Hero => space::XL,
+        }
+    }
+
+    pub const fn icon(self) -> f32 {
+        match self {
+            ControlSize::Small => icon::SM,
+            ControlSize::Medium | ControlSize::Large => icon::MD,
+            ControlSize::Hero => icon::LG,
+        }
+    }
+}
+
+/// The line height for a paragraph set at `size`: a little more air than the font's own, which
+/// packs wrapped lines tightly.
+pub fn leading(size: f32) -> f32 {
+    (size * 1.45).round()
+}
+
+/// A heading: Figtree semibold, at one of the heading sizes above.
 pub fn heading(text: impl Into<String>, size: f32) -> egui::RichText {
     egui::RichText::new(text).font(semibold(size))
 }
@@ -331,10 +467,9 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgba_premultiplied(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()), m(a.a(), b.a()))
 }
 
-/// A short label (captions, buttons, the title bar) in sentence case. `size` is the old
-/// uppercase-mono size; mixed-case DM Sans needs a point and a half more to read the same.
+/// A short label (captions, buttons, the title bar): Figtree medium at one of the text sizes.
 pub fn label_text(text: &str, size: f32) -> egui::RichText {
-    egui::RichText::new(text).font(medium(size + 1.5))
+    egui::RichText::new(text).font(medium(size))
 }
 
 /// Scroll bars that can always be seen and grabbed. egui's thin preset paints the thumb in the
@@ -344,16 +479,18 @@ pub fn label_text(text: &str, size: f32) -> egui::RichText {
 pub fn scroll_style() -> egui::style::ScrollStyle {
     egui::style::ScrollStyle {
         floating: true,
-        bar_width: 10.0,
+        bar_width: 8.0,
         floating_width: 6.0,
         floating_allocated_width: 8.0,
+        handle_min_length: space::XXL,
         foreground_color: true,
+        // No track: only the thumb shows, a pill that thickens a little under the pointer.
         dormant_background_opacity: 0.0,
-        active_background_opacity: 0.5,
-        interact_background_opacity: 0.8,
+        active_background_opacity: 0.0,
+        interact_background_opacity: 0.0,
         dormant_handle_opacity: SCROLL_THUMB_AT_REST,
-        active_handle_opacity: 0.65,
-        interact_handle_opacity: 0.85,
+        active_handle_opacity: 0.6,
+        interact_handle_opacity: 0.8,
         ..egui::style::ScrollStyle::solid()
     }
 }
@@ -361,12 +498,19 @@ pub fn scroll_style() -> egui::style::ScrollStyle {
 /// How opaque a scroll bar's thumb is at rest (over the text colour).
 const SCROLL_THUMB_AT_REST: f32 = 0.5;
 
+/// How far one notch of the mouse wheel scrolls, in points. egui's own step is 40, which takes
+/// two or three turns for what a browser scrolls in one; it still eases to the new place.
+pub const WHEEL_STEP: f32 = 100.0;
+
 /// Apply a theme. `roomy` = Beginner mode (bigger type, more air).
 pub fn apply(ctx: &egui::Context, kind: ThemeKind, roomy: bool) {
     let t = Tokens::for_kind(kind);
     ctx.data_mut(|d| d.insert_temp(tokens_id(), t));
     ctx.set_theme(if t.dark() { egui::Theme::Dark } else { egui::Theme::Light });
     let mut v = if t.dark() { Visuals::dark() } else { Visuals::light() };
+    // Each glyph on a whole pixel. egui's default draws a glyph at one of four offsets inside a
+    // pixel for more even spacing, which softens small text on a display at 100 %.
+    v.text_options.subpixel_binning = false;
     v.panel_fill = t.chrome;
     v.window_fill = t.card;
     v.window_stroke = Stroke::new(1.0, t.card_border);
@@ -380,26 +524,30 @@ pub fn apply(ctx: &egui::Context, kind: ThemeKind, roomy: bool) {
     v.window_corner_radius = t.r_lg();
     v.menu_corner_radius = t.r();
     v.window_shadow = egui::Shadow { offset: [0, 10], blur: 28, spread: 0, color: t.shadow };
-    v.popup_shadow = egui::Shadow { offset: [0, 4], blur: 14, spread: 0, color: t.shadow };
+    v.popup_shadow = egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: t.shadow };
     v.text_edit_bg_color = Some(t.field);
     v.selection.bg_fill = t.accent_soft;
     v.selection.stroke = Stroke::new(1.0, t.accent);
     v.handle_shape = egui::style::HandleShape::Circle;
     v.striped = false;
     v.indent_has_left_vline = false;
-    let r = t.r_sm();
+    // egui's own buttons, combo boxes and fields share the corner of ours.
+    let r = t.r();
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = t.card;
     w.noninteractive.weak_bg_fill = t.card;
     w.noninteractive.bg_stroke = Stroke::new(1.0, t.separator);
     w.noninteractive.fg_stroke = Stroke::new(1.0, t.text_dim);
-    w.noninteractive.corner_radius = r;
-    // Buttons and combo boxes are hairline boxes on the surface (weak fill transparent at rest).
+    w.noninteractive.corner_radius = t.r_sm();
+    // Buttons and combo boxes are field-coloured boxes with a hairline edge.
+    // One edge for every control, ours and egui's: soft at rest, firmer under the pointer, the
+    // app colour while it's pressed or open.
     for (wv, bg, weak, stroke) in [
-        (&mut w.inactive, t.field, Color32::TRANSPARENT, t.field_border),
-        (&mut w.hovered, t.hover, t.hover, t.text_faint),
+        (&mut w.inactive, t.field, t.field, t.card_border),
+        (&mut w.hovered, t.hover, t.hover, t.field_border),
         (&mut w.active, t.pressed, t.pressed, t.accent),
-        (&mut w.open, t.hover, t.hover, t.field_border),
+        // An open dropdown is edged in the app colour, like a field being typed in.
+        (&mut w.open, t.hover, t.hover, t.accent),
     ] {
         wv.bg_fill = bg;
         wv.weak_bg_fill = weak;
@@ -409,23 +557,29 @@ pub fn apply(ctx: &egui::Context, kind: ThemeKind, roomy: bool) {
         wv.expansion = 0.0;
     }
     ctx.set_visuals(v);
-    // Simple mode is for anyone, including people who find small text hard to read.
-    let body = if roomy { 16.0 } else { 13.0 };
+    // Simple mode is for anyone, including people who find small text hard to read. egui's own
+    // controls (combo boxes, menu rows) are as tall as ours of the mode's size, with its label.
+    let control = if roomy { ControlSize::Medium } else { ControlSize::Small };
     ctx.global_style_mut(|s| {
         s.text_styles = [
-            (TextStyle::Small, FontId::proportional(if roomy { 13.5 } else { 11.0 })),
-            (TextStyle::Body, FontId::proportional(body)),
-            (TextStyle::Button, FontId::proportional(body)),
+            (TextStyle::Small, FontId::proportional(if roomy { LABEL } else { TINY })),
+            (TextStyle::Body, FontId::proportional(if roomy { BODY } else { LABEL })),
+            (TextStyle::Button, FontId::proportional(control.text())),
             (TextStyle::Heading, semibold(if roomy { SECTION } else { CARD })),
-            (TextStyle::Monospace, FontId::monospace(if roomy { 13.5 } else { 12.5 })),
+            (TextStyle::Monospace, FontId::monospace(if roomy { LABEL } else { CODE })),
         ]
         .into();
-        s.spacing.item_spacing = if roomy { egui::vec2(10.0, 8.0) } else { egui::vec2(8.0, 5.0) };
-        s.spacing.button_padding = if roomy { egui::vec2(12.0, 6.0) } else { egui::vec2(9.0, 4.0) };
-        s.spacing.interact_size = egui::vec2(24.0, if roomy { 28.0 } else { 24.0 });
-        s.spacing.menu_margin = egui::Margin::same(6);
-        s.spacing.window_margin = egui::Margin::same(18);
-        s.spacing.icon_width = 14.0;
+        s.spacing.item_spacing = egui::vec2(space::SM, if roomy { space::SM } else { space::XS });
+        // Padding that brings a line of the label up to the control's height; a row of plain text
+        // stays as tall as a small control.
+        let pad_y = ((control.height() - control.text() * 1.2) / 2.0).round();
+        s.spacing.button_padding = egui::vec2(if roomy { space::MD } else { space::SM }, pad_y);
+        s.spacing.interact_size = egui::Vec2::splat(ControlSize::Small.height());
+        s.spacing.menu_margin = pad::MENU;
+        // A dropdown's list shows nine rows and a half before it scrolls: the half row says there's more.
+        s.spacing.combo_height = 9.5 * (ControlSize::Medium.height() + space::XXS);
+        s.spacing.window_margin = pad::ROOMY;
+        s.spacing.icon_width = icon::SM;
         s.spacing.scroll = scroll_style();
         s.spacing.tooltip_width = 320.0;
         s.interaction.tooltip_delay = 0.3;
@@ -501,6 +655,63 @@ mod tests {
             }
         }
         assert!(checked > 40, "the source scan checked only {checked} text sizes");
+    }
+
+    /// Outside this file nothing writes a gap, a frame's padding, a colour or a font size as a
+    /// number: screens take them from the scale, so they can't drift apart again. (A size worked
+    /// out from another, such as `body.size + 2.0`, is left to the reviewer.)
+    #[test]
+    fn screens_take_sizes_and_colours_from_the_scale() {
+        let followed_by_digit =
+            |line: &str, marker: &str| line.match_indices(marker).any(|(at, m)| line[at + m.len()..].starts_with(|c: char| c.is_ascii_digit()));
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        let mut files = 0;
+        for entry in std::fs::read_dir(&src).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "rs") || path.file_name().is_some_and(|n| n == "theme.rs") {
+                continue;
+            }
+            files += 1;
+            for (n, line) in std::fs::read_to_string(&path).unwrap().lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let numbered =
+                    ["add_space(", "Margin::same(", "Margin::symmetric(", "medium(", "semibold(", "mono(", "FontId::proportional(", "FontId::monospace("];
+                let named = ["Color32::from_rgb", "Color32::from_gray", "Color32::WHITE", "Color32::BLACK"];
+                if numbered.iter().any(|m| followed_by_digit(line, m)) || named.iter().any(|m| line.contains(m)) {
+                    found.push(format!("{}:{}: {}", path.file_name().unwrap().to_string_lossy(), n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(files > 10, "the source scan found only {files} files");
+        assert!(
+            found.is_empty(),
+            "use the theme's scale (`space`, `pad`, the text sizes, `Tokens`):
+{}",
+            found.join(
+                "
+"
+            )
+        );
+    }
+
+    /// Controls step up evenly, and each size's label and icon come from the scale.
+    #[test]
+    fn control_sizes_step_up_on_the_grid() {
+        let texts = [TINY, CAPTION, LABEL, SMALL, BODY, CARD, LEAD, SECTION, TITLE];
+        let icons = [icon::XS, icon::SM, icon::MD, icon::LG, icon::XL, icon::XXL];
+        for pair in ControlSize::ALL.windows(2) {
+            assert_eq!(pair[1].height() - pair[0].height(), space::SM, "{pair:?}");
+            assert!(pair[1].text() >= pair[0].text() && pair[1].pad_x() >= pair[0].pad_x() && pair[1].icon() >= pair[0].icon(), "{pair:?}");
+        }
+        for size in ControlSize::ALL {
+            assert!(texts.contains(&size.text()) && icons.contains(&size.icon()), "{size:?}");
+            // The label and the padding around it fit the height.
+            assert!(size.text() * 1.3 + space::XS <= size.height(), "{size:?}");
+        }
+        assert_eq!(ControlSize::default(), ControlSize::Medium);
     }
 
     /// The text between `open`'s parenthesis and its match, or `None` when it isn't closed on
@@ -650,7 +861,7 @@ mod tests {
     }
 
     /// Releases are built with craft-fonts (#19), and so is CI; a build without them has only
-    /// DM Sans, and shows other scripts as boxes.
+    /// Figtree, and shows other scripts as boxes.
     #[test]
     fn with_craft_fonts_every_script_people_type_shows() {
         if CRAFT_FONTS.is_empty() {
@@ -689,6 +900,23 @@ mod tests {
                 assert!(ctx.fonts_mut(|f| f.has_glyphs(&font, text)), "{script} ({text}) shows as boxes in {font:?}");
             }
         }
+    }
+
+    /// #1808: a heading's family takes a script's own bold face before its regular one, so
+    /// Japanese or Chinese headings aren't lighter than the Latin beside them.
+    #[test]
+    fn a_heading_takes_a_scripts_bold_face_before_its_regular_one() {
+        let base = vec!["Figtree".to_string(), "craft:japanese:regular".to_string()];
+        let bold = vec!["craft:japanese:bold".to_string()];
+        let families = weighted_families(&base, &bold);
+        let stack = |name: &str| {
+            families.iter().find(|(f, _)| f == &FontFamily::Name(name.into())).map(|(_, s)| s.clone()).unwrap_or_else(|| panic!("{name} is installed"))
+        };
+        assert_eq!(stack("semibold"), ["Figtree-SemiBold", "craft:japanese:bold", "Figtree", "craft:japanese:regular"]);
+        assert_eq!(stack("medium"), ["Figtree-Medium", "craft:japanese:bold", "Figtree", "craft:japanese:regular"]);
+        // Without a bold face the stack is what it always was.
+        let regular_only = weighted_families(&base, &[]);
+        assert_eq!(regular_only[1].1, ["Figtree-SemiBold", "Figtree", "craft:japanese:regular"]);
     }
 
     #[test]
@@ -734,8 +962,17 @@ mod tests {
     fn contrast_meets_wcag_aa_in_both_themes() {
         for k in ThemeKind::ALL {
             let t = Tokens::for_kind(k);
-            // `success` is text too: the Clean room and Ready pills.
-            for (name, fg) in [("text", t.text), ("text_dim", t.text_dim), ("text_faint", t.text_faint), ("accent_ink", t.accent_ink), ("success", t.success)] {
+            // `success` is text too (the Clean room and Ready pills), and so is `danger` (warnings
+            // in words).
+            let inks = [
+                ("text", t.text),
+                ("text_dim", t.text_dim),
+                ("text_faint", t.text_faint),
+                ("accent_ink", t.accent_ink),
+                ("success", t.success),
+                ("danger", t.danger),
+            ];
+            for (name, fg) in inks {
                 for bg in [t.canvas, t.card, t.chrome, t.raised] {
                     assert!(contrast(fg, bg) >= 4.5, "{k:?} {name} on {bg:?}: {:.2}", contrast(fg, bg));
                 }
@@ -744,8 +981,10 @@ mod tests {
             // Send's icon on its hover colour (an icon, so 3:1).
             assert!(contrast(t.on_accent, t.accent_hover) >= 3.0, "{k:?} icon on the hover colour: {:.2}", contrast(t.on_accent, t.accent_hover));
             assert!(contrast(t.field_border, t.canvas) >= 3.0, "{k:?} control borders: {:.2}", contrast(t.field_border, t.canvas));
-            // Main buttons are ink-filled with the canvas colour as their label.
+            // Main buttons are ink-filled with the canvas colour as their label; a button that
+            // deletes is filled in the danger colour, with the same label.
             assert!(contrast(t.canvas, t.text) >= 4.5, "{k:?} main buttons");
+            assert!(contrast(t.canvas, t.danger) >= 4.5, "{k:?} buttons that delete: {:.2}", contrast(t.canvas, t.danger));
             assert_eq!(t.accent, BRAND);
         }
     }

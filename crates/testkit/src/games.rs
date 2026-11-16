@@ -408,6 +408,64 @@ pub fn unity_texture2d(
     out
 }
 
+/// A Unity AudioClip object's bytes (little-endian) as `unity_version` (5.0 or later) writes it:
+/// `channels` at `frequency` Hz, `seconds` long, in compression format `compression`, stored at
+/// `(path, offset, size)`.
+pub fn unity_audioclip(unity_version: &str, name: &str, channels: i32, frequency: i32, seconds: f32, compression: i32, stream: (&str, u64, u64)) -> Vec<u8> {
+    let major = unity_version.split('.').next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+    let mut out = Vec::new();
+    let string = |out: &mut Vec<u8>, s: &str| {
+        out.extend_from_slice(&(s.len() as i32).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+        out.resize(out.len().div_ceil(4) * 4, 0);
+    };
+    string(&mut out, name);
+    for x in [1, channels, frequency, 16] {
+        out.extend_from_slice(&x.to_le_bytes()); // load type, channels, frequency, bits per sample
+    }
+    out.extend_from_slice(&seconds.to_le_bytes());
+    out.push(0); // tracker format
+    if major >= 2017 {
+        out.push(0); // ambisonic
+    }
+    out.resize(out.len().div_ceil(4) * 4, 0);
+    out.extend_from_slice(&0i32.to_le_bytes()); // subsound index
+    out.extend_from_slice(&[1, 0, 0]); // preload, load in background, legacy 3D
+    out.resize(out.len().div_ceil(4) * 4, 0);
+    string(&mut out, stream.0);
+    out.extend_from_slice(&stream.1.to_le_bytes());
+    out.extend_from_slice(&stream.2.to_le_bytes());
+    out.extend_from_slice(&compression.to_le_bytes());
+    out
+}
+
+/// An FSB5 bank (version 1) in `codec` holding one sample per `(rate index, channels, frames,
+/// data)`: mono or stereo in the header, other counts in a channels chunk. Each sample's data is
+/// padded to 32 bytes, as FMOD writes it.
+pub fn fsb5_bank(codec: u32, samples: &[(u64, u8, u64, &[u8])]) -> Vec<u8> {
+    let mut headers = Vec::new();
+    let mut data = Vec::new();
+    for (rate, channels, frames, bytes) in samples {
+        let chunk = *channels > 2;
+        let raw = u64::from(chunk) | rate << 1 | u64::from(*channels == 2) << 5 | (data.len() as u64 / 16) << 6 | frames << 34;
+        headers.extend_from_slice(&raw.to_le_bytes());
+        if chunk {
+            headers.extend_from_slice(&(1u32 << 1 | 1 << 25).to_le_bytes()); // one byte: the channel count
+            headers.push(*channels);
+        }
+        data.extend_from_slice(bytes);
+        data.resize(data.len().div_ceil(32) * 32, 0);
+    }
+    let mut out = b"FSB5".to_vec();
+    for x in [1, samples.len() as u32, headers.len() as u32, 0, data.len() as u32, codec] {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out.extend_from_slice(&[0; 32]);
+    out.extend_from_slice(&headers);
+    out.extend_from_slice(&data);
+    out
+}
+
 /// A cooked Unreal 4.27 texture package (`.uasset`, `.uexp`) named `name` in `pixel_format`: one
 /// Texture2D export with tagged properties, its first mip optionally in the `.ubulk`
 /// (`(width, height, length)` at offset 0), then a `width`×`height` mip with `pixels` inline.

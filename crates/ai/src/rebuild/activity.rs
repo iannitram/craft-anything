@@ -237,9 +237,10 @@ impl Activity {
                 }
                 AgentEvent::ConsentNeeded { title, .. } => new.push((LineKind::Note, format!("Asking permission: {title}"))),
                 // A cost isn't said here: a resumed agent's figure can't be tied to one turn.
-                AgentEvent::TurnDone { input_tokens, output_tokens, .. } => {
+                AgentEvent::TurnDone { input_tokens, output_tokens, tokens_unknown, .. } => {
                     state.going.clear();
-                    new.push((LineKind::Note, format!("The builder's turn ended ({input_tokens} tokens in, {output_tokens} out)")));
+                    let usage = if *tokens_unknown { "token count unknown".into() } else { format!("{input_tokens} tokens in, {output_tokens} out") };
+                    new.push((LineKind::Note, format!("The builder's turn ended ({usage})")));
                 }
                 AgentEvent::Error { message, remediation, log } => {
                     new.push((LineKind::Problem, message.clone()));
@@ -457,6 +458,7 @@ mod tests {
             backend: "x".into(),
             input_tokens: 1,
             output_tokens: 2,
+            tokens_unknown: false,
             cost_usd: Some(9.0),
             cost_is_estimate: true,
         }));

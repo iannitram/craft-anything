@@ -44,7 +44,7 @@ fn response(out: &[Value], id: u64) -> Value {
 #[test]
 fn approval_tool_answers_in_the_permission_prompt_shape() {
     let out = run(&[
-        req(1, "tools/call", json!({"name": "core_action_approve", "arguments": {"tool_name": "Read", "input": {"file_path": "x"}, "tool_use_id": "t"}})),
+        req(1, "tools/call", json!({"name": "core_action_approve", "arguments": {"tool_name": "TodoWrite", "input": {"todos": []}, "tool_use_id": "t"}})),
         req(2, "tools/call", json!({"name": "core_action_approve", "arguments": {"input": {}}})),
     ]);
     for id in [1, 2] {
@@ -58,7 +58,7 @@ fn approval_tool_answers_in_the_permission_prompt_shape() {
         assert!(decision["behavior"] == "allow" || decision["behavior"] == "deny", "{decision}");
     }
     let ok: Value = serde_json::from_str(response(&out, 1)["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(ok, json!({"behavior": "allow", "updatedInput": {"file_path": "x"}}));
+    assert_eq!(ok, json!({"behavior": "allow", "updatedInput": {"todos": []}}));
     let bad: Value = serde_json::from_str(response(&out, 2)["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(bad["behavior"], "deny", "a malformed request is refused in the protocol's own words");
 }
@@ -66,10 +66,10 @@ fn approval_tool_answers_in_the_permission_prompt_shape() {
 /// #253: an allowed action with a large input came back as an `over_limit` error with no decision.
 #[test]
 fn a_large_approval_keeps_its_decision() {
-    let input = json!({"file_path": "x", "note": "a".repeat(4096)});
+    let input = json!({"todos": [], "note": "a".repeat(4096)});
     let out = run_with(
         ServerOptions { max_response_bytes: 300, ..Default::default() },
-        &[req(1, "tools/call", json!({"name": "core_action_approve", "arguments": {"tool_name": "Read", "input": input, "tool_use_id": "t"}}))],
+        &[req(1, "tools/call", json!({"name": "core_action_approve", "arguments": {"tool_name": "TodoWrite", "input": input, "tool_use_id": "t"}}))],
     );
     let r = response(&out, 1)["result"].clone();
     assert_eq!(r["isError"], false, "{r}");
@@ -232,6 +232,34 @@ fn progress_token_gets_notifications_and_cancel_of_unknown_is_ignored() {
     assert!(!progress.is_empty());
     assert_eq!(progress[0]["params"]["progressToken"], "p1");
     assert_eq!(response(&out, 1)["result"]["isError"], false);
+}
+
+#[test]
+fn progress_needs_a_token() {
+    let out = run(&[req(1, "tools/call", json!({"name": "core_session_show", "arguments": {}}))]);
+    assert!(out.iter().all(|m| m["method"] != "notifications/progress"), "{out:?}");
+    assert_eq!(response(&out, 1)["result"]["isError"], false);
+}
+
+#[test]
+fn only_strings_and_numbers_are_progress_tokens() {
+    for token in [json!(null), json!({"bad": 1}), json!([1, 2]), json!(true)] {
+        let out = run(&[req(1, "tools/call", json!({"name": "core_session_show", "arguments": {}, "_meta": {"progressToken": token.clone()}}))]);
+        assert!(out.iter().all(|m| m["method"] != "notifications/progress"), "token {token}: {out:?}");
+        assert_eq!(response(&out, 1)["result"]["isError"], false);
+    }
+    let out = run(&[req(1, "tools/call", json!({"name": "core_session_show", "arguments": {}, "_meta": {"progressToken": 7}}))]);
+    let progress: Vec<&Value> = out.iter().filter(|m| m["method"] == "notifications/progress").collect();
+    assert!(!progress.is_empty(), "a number is a valid token: {out:?}");
+    assert_eq!(progress[0]["params"]["progressToken"], 7);
+}
+
+#[test]
+fn progress_comes_before_the_response() {
+    let out = run(&[req(1, "tools/call", json!({"name": "core_session_show", "arguments": {}, "_meta": {"progressToken": "p1"}}))]);
+    let progress = out.iter().position(|m| m["method"] == "notifications/progress").expect("a progress notification");
+    let result = out.iter().position(|m| m["id"] == json!(1)).expect("the response");
+    assert!(progress < result, "progress must come before its result: {out:?}");
 }
 
 #[test]
@@ -446,6 +474,8 @@ fn restricted_mode_allows_web_and_capture_tools_when_operator_permits() {
     assert!(!names.contains(&"web_page_states_capture".to_string()));
     assert!(!names.contains(&"build_command_run".to_string()));
     assert!(!names.iter().any(|n| n.starts_with("adb_")));
+    // Signing in opens a window on the host's desktop: never with --restricted.
+    assert!(!names.contains(&"web_site_sign_in".to_string()) && !names.contains(&"web_site_sign_out".to_string()));
 
     // With allow_capture
     let opts_cap = ServerOptions { restricted: true, all_tools: true, allow_capture: true, ..Default::default() };
@@ -458,6 +488,55 @@ fn restricted_mode_allows_web_and_capture_tools_when_operator_permits() {
     assert!(!names_cap.iter().any(|n| n.starts_with("adb_")));
 }
 
+/// Review of #1459: --allow-web (with --allow-run) must not let a restricted client open the
+/// desktop person's saved account; sign-in is hidden there, so reusing one would bypass that.
+#[test]
+fn restricted_web_opens_never_use_a_saved_sign_in() {
+    use craft_anything_engine::tools::site_sign_in;
+    let session = craft_anything_engine::testing::session();
+    // A saved sign-in for the site, as web_site_sign_in leaves it.
+    let key = site_sign_in::site_key("https://example.com").unwrap();
+    let dir = site_sign_in::sign_ins_dir(&session).join(&key);
+    std::fs::create_dir_all(dir.join("profile/Default")).unwrap();
+    std::fs::write(dir.join("profile/Default/Cookies"), b"fake-cookie-db").unwrap();
+    std::fs::write(dir.join("sign-in.json"), json!({"version": 1, "site": key, "saved_at": 1}).to_string()).unwrap();
+    assert!(site_sign_in::saved(&session, &key).is_some(), "the fixture must look like a saved sign-in");
+    let engine = Arc::new(Engine::new(session));
+    let opts = ServerOptions { restricted: true, allow_web: true, allow_run: true, ..Default::default() };
+
+    let input: String = [
+        req(1, "tools/call", json!({"name": "web_site_open", "arguments": {"url": "https://example.com", "signed_in": true}})),
+        req(2, "tools/call", json!({"name": "mcp__craft-anything__web_site_open", "arguments": {"url": "https://example.com", "signed_in": "yes"}})),
+    ]
+    .iter()
+    .map(|l| format!("{l}\n"))
+    .collect();
+    let buf = Buf::default();
+    serve(engine.clone(), opts.clone(), std::io::Cursor::new(input.into_bytes()), Box::new(buf.clone())).unwrap();
+    let out: Vec<Value> = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    for id in [1, 2] {
+        let r = response(&out, id);
+        assert_eq!(r["result"]["isError"], true, "id {id}");
+        let e: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(e["error"]["details"]["reason"], "restricted_mode", "id {id}: {e}");
+        assert_eq!(e["error"]["details"]["param"], "signed_in", "id {id}: {e}");
+    }
+
+    // Omitted (which would pick the saved sign-in) and explicit false both reach the tool as false.
+    let server = Server::new(engine.clone(), opts, Box::new(Buf::default()));
+    for args in [
+        json!({"url": "https://example.com"}),
+        json!({"url": "https://example.com", "signed_in": false}),
+        json!({"url": "https://example.com", "signed_in": null}),
+    ] {
+        assert_eq!(server.restricted_args("web_site_open", args).unwrap()["signed_in"], false);
+    }
+    // Other tools and unrestricted servers are left alone.
+    assert_eq!(server.restricted_args("core_session_show", json!({})).unwrap(), json!({}));
+    let open = Server::new(engine, ServerOptions::default(), Box::new(Buf::default()));
+    assert_eq!(open.restricted_args("web_site_open", json!({"url": "https://example.com"})).unwrap(), json!({"url": "https://example.com"}));
+}
+
 #[test]
 fn restricted_mode_server_options_from_env() {
     let map = [("CRAFT_ANYTHING_MCP_RESTRICTED", "1"), ("CRAFT_ANYTHING_MCP_ALLOW_WEB", "true"), ("CRAFT_ANYTHING_MCP_ALLOW_CAPTURE", "1")]
@@ -468,4 +547,13 @@ fn restricted_mode_server_options_from_env() {
     assert!(opts.restricted);
     assert!(opts.allow_web);
     assert!(opts.allow_capture);
+}
+
+/// A client config that adds `--allow-run` must not remove the approval boundary silently.
+#[test]
+fn allow_run_says_what_it_turns_off_on_startup() {
+    assert_eq!(startup_notice(&ServerOptions::default()), None, "the default server keeps the approval step");
+    let notice = startup_notice(&ServerOptions { allow_run: true, ..Default::default() }).expect("--allow-run is worth a line");
+    assert!(notice.contains("--allow-run"), "{notice}");
+    assert!(notice.contains("without asking"), "say what it turns off: {notice}");
 }

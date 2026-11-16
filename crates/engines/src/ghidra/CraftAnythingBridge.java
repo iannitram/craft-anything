@@ -20,12 +20,25 @@
 import ghidra.app.cmd.disassemble.DisassembleCommand;
 import ghidra.app.cmd.function.CreateFunctionCmd;
 import ghidra.app.script.GhidraScript;
+import ghidra.app.util.PseudoDisassembler;
+import ghidra.app.util.PseudoInstruction;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
+import ghidra.program.model.lang.OperandType;
+import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Instruction;
+import ghidra.program.model.listing.Listing;
+import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.pcode.JumpTable;
+import ghidra.program.model.scalar.Scalar;
+import ghidra.program.model.symbol.FlowType;
+import ghidra.program.model.symbol.RefType;
+import ghidra.program.model.symbol.Reference;
+import ghidra.program.model.symbol.SourceType;
 import ghidra.util.task.TimeoutTaskMonitor;
 
 import java.io.BufferedReader;
@@ -39,9 +52,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
 
 public class CraftAnythingBridge extends GhidraScript {
@@ -161,6 +178,7 @@ public class CraftAnythingBridge extends GhidraScript {
                 f = createFunctionAt(a);
                 made.add(f.getEntryPoint());
             }
+            boundJumpTables(f);
             DecompileResults results = decompiler.decompileFunction(f, 0, monitor);
             String c = results != null && results.getDecompiledFunction() != null
                 ? results.getDecompiledFunction().getC() : null;
@@ -222,6 +240,229 @@ public class CraftAnythingBridge extends GhidraScript {
         } finally {
             currentProgram.endTransaction(tx, f != null);
         }
+    }
+
+    // A jump on a byte through a table of 32-bit offsets with no bounds check (`movzx` a byte,
+    // `lea` the table, `movsxd` an entry, `add`, `jmp reg`; Rust's async state machines do this):
+    // the decompiler can't tell where the table ends, reads 256 entries, follows the ones that land
+    // inside other functions and the decompile grows without end (#1715). Give it the table's real
+    // targets, the way a person overrides a switch, before decompiling. Guarded tables only get
+    // their targets added, so the code behind them joins the body and its own tables are found.
+    // In memory for this run, like a function made on demand.
+    private void boundJumpTables(Function f) {
+        TimeoutTaskMonitor limit = TimeoutTaskMonitor.timeoutIn(CREATE_SECONDS, TimeUnit.SECONDS, monitor);
+        Listing listing = currentProgram.getListing();
+        Set<Address> seen = new HashSet<>();
+        int tx = currentProgram.startTransaction("Craft Anything: bound jump tables");
+        boolean done = false;
+        try {
+            // Each round can add code with more tables in it; a few rounds cover real functions.
+            for (int round = 0; round < 16 && !limit.isCancelled(); round++) {
+                boolean grew = false;
+                // Collected first: disassembling the targets changes the listing being walked.
+                List<Instruction> jumps = new ArrayList<>();
+                for (Instruction i : listing.getInstructions(f.getBody(), true)) {
+                    FlowType flow = i.getFlowType();
+                    if (flow.isComputed() && flow.isJump() && !flow.isConditional() && (i.getOperandType(0) & OperandType.REGISTER) != 0
+                        && seen.add(i.getAddress())) {
+                        jumps.add(i);
+                    }
+                }
+                for (Instruction jmp : jumps) {
+                    if (limit.isCancelled()) break;
+                    Dispatch d = dispatchBefore(jmp);
+                    if (d == null) continue;
+                    List<Address> targets = tableTargets(f, jmp.getAddress(), d.table);
+                    if (targets.isEmpty()) continue;
+                    for (Address t : targets) {
+                        jmp.addOperandReference(0, t, RefType.COMPUTED_JUMP, SourceType.USER_DEFINED);
+                        if (listing.getInstructionAt(t) == null) {
+                            new DisassembleCommand(t, null, true).applyTo(currentProgram, limit);
+                        }
+                    }
+                    if (!d.guarded) {
+                        new JumpTable(jmp.getAddress(), new ArrayList<>(targets), true, 0).writeOverride(f);
+                        println("Craft Anything: bounded the jump table at " + jmp.getAddress() + " to " + targets.size() + " entries");
+                    }
+                    grew = true;
+                }
+                if (!grew) break;
+                CreateFunctionCmd.fixupFunctionBody(currentProgram, f, limit);
+            }
+            done = true;
+        } catch (Exception e) {
+            // Best effort: everything is undone and the decompile goes ahead as it would have.
+            println("Craft Anything: couldn't bound the jump tables in " + f.getName() + ": " + safe(e.getMessage()));
+        } finally {
+            currentProgram.endTransaction(tx, done);
+        }
+    }
+
+    /** A table dispatch: the table's address, and whether a bounds check or mask comes before it. */
+    private static final class Dispatch {
+        final Address table;
+        final boolean guarded;
+
+        Dispatch(Address table, boolean guarded) {
+            this.table = table;
+            this.guarded = guarded;
+        }
+    }
+
+    // Walks back from `jmp reg` to the `movsxd [base + index*4]`, the `lea` that sets `base` to the
+    // table and the `movzx` of a byte into `index`, then two instructions further. A guard bounds
+    // that index: an `and` of it, or a `cmp` of it (or of the byte it was loaded from) followed by a
+    // conditional jump. Other instructions in between, other conditional jumps too, aren't guards.
+    private Dispatch dispatchBefore(Instruction jmp) {
+        Listing listing = currentProgram.getListing();
+        Register base = null;
+        Register index = null;
+        Address table = null;
+        String loadedFrom = null;
+        boolean jumpAfter = false;
+        boolean guarded = false;
+        int further = -1;
+        Instruction i = jmp;
+        for (int n = 0; n < 20 && further != 0; n++) {
+            if (further > 0) further--;
+            i = listing.getInstructionBefore(i.getAddress());
+            if (i == null) break;
+            FlowType flow = i.getFlowType();
+            if (flow.isCall() || flow.isTerminal() || (flow.isJump() && !flow.isConditional())) break;
+            if (flow.isConditional()) {
+                jumpAfter = true;
+                continue;
+            }
+            String m = i.getMnemonicString();
+            if (base == null) {
+                if ("MOVSXD".equals(m) && i.toString().contains("*0x4]")) {
+                    List<Register> regs = new ArrayList<>();
+                    for (Object o : i.getOpObjects(1)) {
+                        if (o instanceof Register r) regs.add(r.getBaseRegister());
+                    }
+                    if (regs.size() != 2) return null;
+                    base = regs.get(0);
+                    index = regs.get(1);
+                }
+                continue;
+            }
+            Register written = i.getRegister(0) == null ? null : i.getRegister(0).getBaseRegister();
+            if (table == null && "LEA".equals(m) && base.equals(written)) {
+                table = leaTarget(i);
+                if (table == null) return null;
+            } else if (loadedFrom == null) {
+                if (("AND".equals(m) || ("CMP".equals(m) && jumpAfter)) && index.equals(written)) guarded = true;
+                if ("MOVZX".equals(m) && index.equals(written) && i.toString().contains("byte ptr")) loadedFrom = i.getDefaultOperandRepresentation(1);
+            } else if ("CMP".equals(m) && jumpAfter && loadedFrom.equals(i.getDefaultOperandRepresentation(0))) {
+                guarded = true;
+            }
+            if (table != null && loadedFrom != null && further < 0) further = 2;
+        }
+        return table != null && loadedFrom != null ? new Dispatch(table, guarded) : null;
+    }
+
+    // The table's targets: an entry is the target's offset from the table. The table ends where
+    // another one starts (an address a `lea` in this function, or anything else, refers to) or at
+    // the first entry whose target isn't the start of an instruction in this function.
+    private List<Address> tableTargets(Function f, Address jmp, Address table) {
+        List<Address> targets = new ArrayList<>();
+        Sweep s = sweep(f, jmp);
+        if (s == null) return targets;
+        Address end = s.tables.higher(table);
+        for (int k = 0; k < 256; k++) {
+            try {
+                Address at = table.add(4L * k);
+                if ((end != null && at.compareTo(end) >= 0) || (k > 0 && currentProgram.getReferenceManager().hasReferencesTo(at))) break;
+                Address t = table.add(currentProgram.getMemory().getInt(at));
+                if (!s.starts.contains(t)) break;
+                targets.add(t);
+            } catch (Exception e) {
+                break;
+            }
+        }
+        return targets;
+    }
+
+    /** What a linear pass over one function's bytes found: where instructions start, what `lea`s point at. */
+    private static final class Sweep {
+        final Set<Address> starts = new HashSet<>();
+        final TreeSet<Address> tables = new TreeSet<>();
+    }
+
+    /** Sweeps by the start of the stretch they cover, for this run. */
+    private final Map<Address, Sweep> sweeps = new HashMap<>();
+
+    // The code after an unguarded table is reached only through it, so the analysis never
+    // disassembled it and nothing marks where the next table starts. Decode the function's whole
+    // stretch in a row, in memory only: its `.pdata` entry on Windows, else up to the next function.
+    private Sweep sweep(Function f, Address jmp) {
+        Address[] range = pdataRange(jmp);
+        if (range == null) {
+            MemoryBlock block = currentProgram.getMemory().getBlock(f.getEntryPoint());
+            if (block == null) return null;
+            FunctionIterator next = currentProgram.getFunctionManager().getFunctions(f.getEntryPoint().next(), true);
+            Address hi = next.hasNext() ? next.next().getEntryPoint() : block.getEnd();
+            range = new Address[] {f.getEntryPoint(), hi};
+        }
+        Sweep s = sweeps.get(range[0]);
+        if (s != null) return s;
+        s = new Sweep();
+        PseudoDisassembler decoder = new PseudoDisassembler(currentProgram);
+        Address a = range[0];
+        try {
+            for (int n = 0; n < SWEEP_INSTRUCTIONS && a.compareTo(range[1]) < 0; n++) {
+                PseudoInstruction i;
+                try {
+                    i = decoder.disassemble(a);
+                } catch (Exception e) {
+                    i = null;
+                }
+                if (i == null) {
+                    a = a.add(1);
+                    continue;
+                }
+                s.starts.add(a);
+                Address t = "LEA".equals(i.getMnemonicString()) ? leaTarget(i) : null;
+                if (t != null) s.tables.add(t);
+                a = a.add(i.getLength());
+            }
+        } catch (Exception e) {
+            // Ran off the end of the address space: keep what was found.
+        }
+        sweeps.put(range[0], s);
+        return s;
+    }
+
+    /** The instructions one sweep decodes at most (a function that big is very rare). */
+    private static final int SWEEP_INSTRUCTIONS = 1 << 20;
+
+    // The x64 exception table (`.pdata`: begin, end and unwind RVAs) holds every function's extent.
+    private Address[] pdataRange(Address at) {
+        MemoryBlock pdata = currentProgram.getMemory().getBlock(".pdata");
+        if (pdata == null || !pdata.isInitialized()) return null;
+        Address base = currentProgram.getImageBase();
+        try {
+            for (long off = 0; off + 12 <= pdata.getSize(); off += 12) {
+                Address begin = base.add(Integer.toUnsignedLong(currentProgram.getMemory().getInt(pdata.getStart().add(off))));
+                Address end = base.add(Integer.toUnsignedLong(currentProgram.getMemory().getInt(pdata.getStart().add(off + 4))));
+                if (begin.compareTo(at) <= 0 && at.compareTo(end) < 0) return new Address[] {begin, end};
+            }
+        } catch (Exception e) {
+            return null;
+        }
+        return null;
+    }
+
+    // Where a `lea` with a fixed address (`[rip + x]`) points.
+    private Address leaTarget(Instruction i) {
+        for (Reference r : i.getReferencesFrom()) {
+            if (r.isMemoryReference() && !r.getReferenceType().isFlow()) return r.getToAddress();
+        }
+        Object[] op = i.getOpObjects(1);
+        if (op.length != 1) return null;
+        if (op[0] instanceof Address a) return a;
+        if (op[0] instanceof Scalar s && i.toString().contains("[0x")) return toAddr(s.getUnsignedValue());
+        return null;
     }
 
     private Function findByName(String name) {

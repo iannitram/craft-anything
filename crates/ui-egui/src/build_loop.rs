@@ -246,14 +246,14 @@ pub(crate) fn popover(app: &mut CraftApp, button: &egui::Response) {
         ui.checkbox(&mut s.on, RichText::new(tr("Loop the build")).strong());
         let note = tr("When a run ends well, a fresh builder (a clean context) carries on from the last one's handoff, until a limit below ends the loop.");
         ui.add(egui::Label::new(RichText::new(note).size(theme::SMALL).color(t.text_faint)).wrap());
-        ui.add_space(6.0);
+        ui.add_space(theme::space::SM);
         ui.label(RichText::new(tr("Each run is told")).size(theme::SMALL).color(t.text_dim));
         let prompt = ui.add(egui::TextEdit::multiline(&mut s.prompt).hint_text(DEFAULT_LOOP_PROMPT).desired_rows(4).desired_width(f32::INFINITY));
         editing |= prompt.has_focus();
         if !s.prompt.trim().is_empty() && widgets::link(ui, "Use the built-in prompt").clicked() {
             s.prompt.clear();
         }
-        ui.add_space(6.0);
+        ui.add_space(theme::space::SM);
         egui::Grid::new("build-loop-limits").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
             ui.label(RichText::new(tr("Rounds per run")).size(theme::SMALL));
             let r = ui.add(egui::DragValue::new(&mut s.rounds_per_run).range(1..=MAX_ROUNDS_PER_RUN));
@@ -306,11 +306,11 @@ pub(crate) fn popover(app: &mut CraftApp, button: &egui::Response) {
             ui.end_row();
         });
         if s.on && !s.has_limit() {
-            ui.add_space(4.0);
+            ui.add_space(theme::space::XS);
             let warn = tr("No limit is on: the loop runs until you pause it.");
             ui.add(egui::Label::new(RichText::new(warn).size(theme::SMALL).color(t.warning)).wrap());
         }
-        ui.add_space(6.0);
+        ui.add_space(theme::space::SM);
         match &status {
             Some(line) => {
                 ui.horizontal(|ui| {
@@ -396,10 +396,11 @@ fn end_words(why: LoopEnd) -> String {
 /// Where a loop is, for the popover: "Run 3 of 10 · 1.2M tokens · until 7am".
 fn status_words(state: &LoopState) -> String {
     let run = state.runs.saturating_add(1).to_string();
-    let mut parts = vec![match state.settings.runs.get() {
+    let first = match state.settings.runs.get() {
         Some(n) => trf("Run {run} of {n}", &[("run", &run), ("n", &n.to_string())]),
         None => trf("Run {run}", &[("run", &run)]),
-    }];
+    };
+    let mut parts = vec![first];
     parts.push(match state.settings.tokens.get() {
         _ if state.tokens_unreported => tr("tokens not reported by this builder"),
         Some(b) => trf("{used} of {budget} tokens", &[("used", &tokens_words(state.tokens)), ("budget", &tokens_words(b))]),

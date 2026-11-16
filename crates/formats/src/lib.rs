@@ -58,6 +58,7 @@ pub mod strings;
 pub mod swift;
 pub mod swift_demangle;
 pub mod tarcpio;
+pub mod unity_audio;
 pub mod unity_bundle;
 pub mod unity_serialized;
 pub mod unity_texture;
@@ -82,10 +83,13 @@ pub fn pe_is_managed(data: &[u8]) -> bool {
     if r.slice(pe_off, 4) != Some(b"PE\0\0") {
         return false;
     }
-    let opt = pe_off + 24;
-    let dirs = match r.u16_le(opt) {
-        Some(0x10b) => opt + 96,
-        Some(0x20b) => opt + 112,
+    let Some(coff) = r.slice(pe_off, 24).map(Reader::new) else { return false };
+    let Some(size) = coff.u16_le(20).map(usize::from) else { return false };
+    let Some(opt) = pe_off.checked_add(24) else { return false };
+    let Some(r) = r.slice(opt, size).map(Reader::new) else { return false };
+    let dirs = match r.u16_le(0) {
+        Some(0x10b) => 96usize,
+        Some(0x20b) => 112usize,
         _ => return false,
     };
     let Some(count) = r.u32_le(dirs.wrapping_sub(4)) else { return false };
@@ -96,28 +100,13 @@ pub fn pe_is_managed(data: &[u8]) -> bool {
     matches!((r.u32_le(entry), r.u32_le(entry + 4)), (Some(rva), Some(size)) if rva != 0 && size != 0)
 }
 
-/// True when a ZIP's central directory names `entry` (cheap scan, no decompression).
+/// True when the ZIP's own central directory names `entry`, without decompressing members.
 pub fn zip_has_entry(data: &[u8], entry: &str) -> bool {
-    let needle = entry.as_bytes();
-    // Central directory headers: PK\x01\x02 … name at +46, name length at +28.
-    let mut i = 0usize;
-    while let Some(pos) = data.get(i..).and_then(|rest| rest.windows(4).position(|w| w == b"PK\x01\x02")) {
-        let at = i + pos;
-        let r = Reader::new(data);
-        if r.u16_le(at + 28).and_then(|n| r.slice(at + 46, usize::from(n))) == Some(needle) {
-            return true;
-        }
-        i = at + 4;
-    }
-    false
+    zip::has_entry(data, entry)
 }
 
-/// True when bytes look like an Electron ASAR archive: a Chromium pickle header whose JSON
-/// starts with `{"files":`.
-pub fn looks_like_asar(data: &[u8]) -> bool {
-    let r = Reader::new(data);
-    matches!(r.u32_le(0), Some(4)) && data.get(16..25) == Some(b"{\"files\":")
-}
+/// The ASAR reader's own check, so format dispatch and the reader agree on what an ASAR is.
+pub use asar::looks_like_asar;
 
 #[cfg(test)]
 mod tests {
@@ -139,8 +128,6 @@ mod tests {
 
     #[test]
     fn asar_header() {
-        let mut a = vec![4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        a.extend_from_slice(b"{\"files\":{}}");
-        assert!(looks_like_asar(&a));
+        assert!(looks_like_asar(&asar::build(&[("a.js", b"a();")])));
     }
 }

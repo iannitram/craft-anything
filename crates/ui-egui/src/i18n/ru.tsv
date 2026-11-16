@@ -326,6 +326,7 @@ Deep mode now decompiles with Ghidra. The first look at a large program can take
 Deep mode on	Включён режим «Глубокий»
 Deep: we read its code, files and page source with every tool we have, and with Ghidra when it's installed. Click to switch.	Глубокий: мы читаем его код, файлы и исходник страницы всеми имеющимися инструментами, а также Ghidra, если он установлен. Нажмите, чтобы переключить.
 Default	По умолчанию
+Default (its own settings)	По умолчанию (собственные настройки)
 Delete a project	Удалить проект
 Delete it	Удалить
 Delete the project	Удалить проект
@@ -1366,6 +1367,7 @@ your files there are the app, edited in place	ваши файлы там — э�
 {name} builds what you make; answers come from {brain}.	{name} собирает то, что вы создаёте; ответы поступают от {brain}.
 {name} can't be attached: a message takes pictures up to 20 MB.	Не удалось прикрепить {name}: сообщение принимает изображения не больше 20 МБ.
 {name} can't be attached: it isn't a PNG, JPEG, GIF or WebP picture.	Не удалось прикрепить {name}: это не изображение PNG, JPEG, GIF или WebP.
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name} нельзя ограничить только чтением, поэтому ему не задают вопросы. Спросите через Claude Code или через ИИ с ключом API.
 {name} is ready	{name} готов
 {name} is ready.	{name} готов.
 {name} isn't available yet in this build.	{name} пока недоступен в этой сборке.
@@ -1467,3 +1469,27 @@ Connecting to {name}… {seconds} s	Подключение к {name}… {seconds
 Stopped adding {name}.	Добавление {name} остановлено.
 It isn't there any more, so {program} runs in its place.	Его там больше нет, поэтому вместо него запускается {program}.
 Use it	Использовать
+
+# Native update checks and verified installation.
+ArtCraft Launcher manages this app's version. Change its version there.	Версией этого приложения управляет ArtCraft Launcher. Измените версию в нём.
+Check again	Проверить снова
+Check for Updates	Проверить обновления
+Check for Updates…	Проверить обновления…
+Checking for updates…	Проверка обновлений…
+Couldn't check for updates: {error}	Не удалось проверить обновления: {error}
+Downloading and verifying the update…	Загрузка и проверка обновления…
+No installer is available for this platform.	Для этой платформы нет установщика.
+Releases	Выпуски
+Save your work and stop running tasks before installing an update.	Перед установкой обновления сохраните работу и остановите выполняющиеся задачи.
+The update failed: {error}	Ошибка обновления: {error}
+The update worker stopped unexpectedly. Try checking again.	Процесс обновления неожиданно остановился. Повторите проверку.
+This installation is managed externally. Update it with its package manager or open Releases.	Эта установка управляется извне. Обновите её через менеджер пакетов или откройте выпуски.
+Update and restart	Обновить и перезапустить
+Update ready. Restarting…	Обновление готово. Перезапуск…
+Updated to {version}.	Обновлено до {version}.
+Use Releases or your package manager to update this installation.	Обновите эту установку через выпуски или менеджер пакетов.
+You're up to date.	Установлена последняя версия.
+{version} is available.	Доступна версия {version}.
+Forget a website sign-in	Забыть вход на сайт
+Sign in to a website	Войти на сайт
+Some shared files could not be hard-linked and were copied instead ({size}).	Некоторые общие файлы не удалось связать жёсткими ссылками, и они были скопированы ({size}).

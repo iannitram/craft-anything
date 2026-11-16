@@ -61,6 +61,7 @@ pub const TOOLS: &[&str] = &[
     "project_questions_set",
     "project_loop_set",
     "project_approvals_set",
+    "project_builder_set",
     "project_build_finish",
     "project_pin_create",
     "project_pins_list",
@@ -111,6 +112,10 @@ pub const TOOLS: &[&str] = &[
     "web_page_screenshot_take",
     "web_pixels_compare",
     "web_site_close",
+    // Signing in as yourself in a visible window, and forgetting that sign-in: still a user's view
+    // from outside (a policy call; drop these two lines to make them Deep-only).
+    "web_site_sign_in",
+    "web_site_sign_out",
     // Checks a script's form; it touches no target and starts no browser.
     "web_walkthrough_check",
     // A program watched from outside: its window, the controls on its screen, a recorded run.
@@ -168,7 +173,7 @@ mod tests {
     #[test]
     fn every_engine_tool_in_the_table_exists_and_none_is_listed_twice() {
         let r = crate::Registry::with_all_tools();
-        let higher_layers = ["rebuild_", "assets_key_", "ai_", "setup_"];
+        let higher_layers = ["rebuild_", "assets_key_", "ai_", "setup_", "project_builder_"];
         for id in TOOLS {
             assert!(r.get(id).is_some() || higher_layers.iter().any(|p| id.starts_with(p)), "{id} isn't a tool");
             assert_eq!(TOOLS.iter().filter(|t| *t == id).count(), 1, "{id} is listed twice");

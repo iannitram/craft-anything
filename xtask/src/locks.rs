@@ -8,7 +8,7 @@
 //! - `match`, `if let` or `while let` on a `.session()`, with another in its body;
 //! - `let g = ….session();` followed in that block by `.session()` or `engine.call(…)`, before `drop(g)`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use syn::visit::{self, Visit};
 
 fn is_session(m: &syn::ExprMethodCall) -> bool {
@@ -135,15 +135,19 @@ impl Finder {
 }
 
 impl Visit<'_> for Finder {
-    fn visit_item_mod(&mut self, m: &syn::ItemMod) {
-        let test = m.attrs.iter().any(|a| a.path().is_ident("cfg") && a.meta.to_token_stream_string().contains("test"));
-        if !test {
-            visit::visit_item_mod(self, m);
+    fn visit_item(&mut self, item: &syn::Item) {
+        if !super::source_policy::test_only(super::source_policy::attrs(item)) {
+            visit::visit_item(self, item);
         }
     }
-    fn visit_item_fn(&mut self, f: &syn::ItemFn) {
-        if !f.attrs.iter().any(|a| a.path().is_ident("test")) {
-            visit::visit_item_fn(self, f);
+    fn visit_impl_item_fn(&mut self, item: &syn::ImplItemFn) {
+        if !super::source_policy::test_only(&item.attrs) {
+            visit::visit_impl_item_fn(self, item);
+        }
+    }
+    fn visit_trait_item_fn(&mut self, item: &syn::TraitItemFn) {
+        if !super::source_policy::test_only(&item.attrs) {
+            visit::visit_trait_item_fn(self, item);
         }
     }
     fn visit_expr_if(&mut self, e: &syn::ExprIf) {
@@ -175,69 +179,63 @@ impl Visit<'_> for Finder {
     }
 }
 
-trait MetaText {
-    fn to_token_stream_string(&self) -> String;
-}
-
-impl MetaText for syn::Meta {
-    fn to_token_stream_string(&self) -> String {
-        match self {
-            syn::Meta::List(l) => l.tokens.to_string(),
-            _ => String::new(),
-        }
-    }
-}
-
+#[cfg(test)]
 fn problems_in(source: &str) -> Result<Vec<String>, String> {
     let file = syn::parse_file(source).map_err(|e| e.to_string())?;
-    let mut f = Finder::default();
-    f.visit_file(&file);
-    Ok(f.found)
+    Ok(problems(&file))
 }
 
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for e in entries.flatten() {
-        let p = e.path();
-        let name = e.file_name().to_string_lossy().into_owned();
-        if p.is_dir() {
-            if !matches!(name.as_str(), "tests" | "examples" | "target") {
-                rust_files(&p, out);
-            }
-        } else if name.ends_with(".rs") && name != "tests.rs" {
-            out.push(p);
-        }
+fn problems(file: &syn::File) -> Vec<String> {
+    let mut finder = Finder::default();
+    if !super::source_policy::test_only(&file.attrs) {
+        finder.visit_file(file);
     }
+    finder.found
 }
 
 pub fn check(root: &Path) -> bool {
-    let mut files = Vec::new();
-    rust_files(&root.join("crates"), &mut files);
-    rust_files(&root.join("apps"), &mut files);
     let mut bad = 0;
-    for file in &files {
-        let Ok(source) = std::fs::read_to_string(file) else { continue };
-        if !source.contains("session()") {
-            continue;
-        }
-        let shown = file.strip_prefix(root).unwrap_or(file).display().to_string();
-        match problems_in(&source) {
-            Ok(found) => {
-                for f in found {
-                    eprintln!("{shown}:{f}");
-                    bad += 1;
-                }
-            }
+    let mut count = 0;
+    for dir in ["crates", "apps"] {
+        let files = match super::source_policy::rust_files(&root.join(dir), &["tests", "examples", "target"]) {
+            Ok(files) => files,
             Err(e) => {
-                eprintln!("{shown}: couldn't read it: {e}");
+                eprintln!("locks: {e}");
+                bad += 1;
+                continue;
+            }
+        };
+        let files = match super::source_policy::read_all(files, root) {
+            Ok(files) => files,
+            Err(e) => {
+                eprintln!("locks: {e}");
+                bad += 1;
+                continue;
+            }
+        };
+        let tests = match super::source_policy::test_files(&files) {
+            Ok(tests) => tests,
+            Err(e) => {
+                eprintln!("locks: {e}");
+                bad += 1;
+                continue;
+            }
+        };
+        for (file, syntax) in files {
+            if file.canonicalize().is_ok_and(|p| tests.contains(&p)) {
+                continue;
+            }
+            count += 1;
+            for problem in problems(&syntax) {
+                eprintln!("{}:{problem}", file.strip_prefix(root).unwrap_or(&file).display());
                 bad += 1;
             }
         }
     }
     if bad == 0 {
-        println!("locks: ok ({} files)", files.len());
+        println!("locks: ok ({count} files)");
     } else {
-        eprintln!("locks: {bad} place(s) would wait on a lock they already hold");
+        eprintln!("locks: {bad} source error(s) or place(s) that would wait on a lock they already hold");
     }
     bad == 0
 }
@@ -260,6 +258,16 @@ mod tests {
         assert!(flagged("let g = e.session(); e.session().y();"));
         assert!(flagged("let g = self.engine.session(); self.engine.call(\"t\", p, o);"));
         assert!(flagged("if e.session().a() && e.session().b() { }"));
+    }
+
+    #[test]
+    fn cfg_test_is_an_item_scope_not_a_substring() {
+        for cfg in ["not(test)", "any(test, unix)"] {
+            let text = format!("#[cfg({cfg})] mod production {{ fn f() {{ let n = e.session().a() + e.session().b(); }} }}");
+            assert!(!problems_in(&text).unwrap().is_empty(), "cfg({cfg}) can run in production");
+        }
+        let text = "#[cfg(all(unix, test))] fn test_only() { let n = e.session().a() + e.session().b(); }";
+        assert!(problems_in(text).unwrap().is_empty());
     }
 
     #[test]

@@ -83,7 +83,8 @@ pub fn not_found_help(id: &str, set: Option<&Path>, flatpak: bool) -> (String, S
     (reason, remediation)
 }
 
-/// Find an engine: user override, then the managed store (`<store>/<id>/bin/<exe>`), then PATH,
+/// Find an engine: user override, then the managed store (its [`ExternalEngine::store_folder`],
+/// `<store>/<id>` unless a guided setup puts it elsewhere), then PATH,
 /// then its standard install folders, then the folders where an unpacked copy is usually kept.
 pub fn locate(id: &str, overrides: &dyn ToolPathLookup, store: &Path) -> Option<PathBuf> {
     locate_configured(id, overrides, store).or_else(|| {
@@ -104,15 +105,16 @@ pub fn locate_configured(id: &str, overrides: &dyn ToolPathLookup, store: &Path)
     }
     let e = engine(id)?;
     let exes = e.host_exes();
-    if let Some(p) = in_managed(&store.join(id), exes) {
+    let managed = store.join(e.store_folder());
+    if let Some(p) = in_managed(&managed, exes) {
         return Some(p);
     }
     // A single-file install (a .jar) is found by the name its pin saved it under.
     for pin in e.pins() {
         if let ArchiveFormat::File { name } = pin.format
-            && store.join(id).join(name).is_file()
+            && managed.join(name).is_file()
         {
-            return Some(store.join(id).join(name));
+            return Some(managed.join(name));
         }
     }
     None
@@ -187,6 +189,23 @@ mod tests {
     fn unknown_engine_is_none() {
         assert!(locate("definitely-not-an-engine", &NoOverrides, Path::new("/nonexistent")).is_none());
         assert_eq!(display_name("adb"), "Android platform tools (adb)");
+    }
+
+    /// Asked to install Java, we say Ghidra's setup brings it; that setup unpacks it under
+    /// `<store>/jdk`, which the Java runtime engine has to find (it was looked for in `<store>/java`).
+    #[test]
+    fn the_java_ghidras_setup_brings_is_the_java_runtime() {
+        let java = if cfg!(windows) { "java.exe" } else { "java" };
+        // Linux and Windows keep the JDK's own top folder; macOS's pin strips it down to `Home`.
+        for top in ["jdk-21.0.12.1+1", "Home"] {
+            let store = tempfile::tempdir().unwrap();
+            let exe = store.path().join("jdk").join(top).join("bin").join(java);
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            std::fs::write(&exe, "").unwrap();
+            assert_eq!(locate_configured("java", &NoOverrides, store.path()), Some(exe.clone()), "{top}");
+            // The same Java Ghidra is pointed at.
+            assert_eq!(ghidra::get::java_home(None, store.path()).map(|h| h.join("bin").join(java)), Some(exe));
+        }
     }
 
     /// Ghidra's zip unpacks into `<store>/ghidra/ghidra_<version>_PUBLIC/`, with the launcher in

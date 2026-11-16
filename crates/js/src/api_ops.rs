@@ -107,6 +107,19 @@ pub fn read_document(text: &str, allow_shorthand: bool) -> Option<Document> {
         let mut saw_anything = false;
         let mut parens = 0usize;
         while let Some(&(i, c)) = chars.peek() {
+            // Ignored tokens may separate any header tokens, including the name.
+            if c == '#' {
+                for (_, d) in chars.by_ref() {
+                    if d == '\n' || d == '\r' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if c.is_whitespace() || c == ',' || c == '\u{feff}' {
+                chars.next();
+                continue;
+            }
             if c == '{' && parens == 0 {
                 break;
             }
@@ -239,13 +252,30 @@ pub fn may_be_document(text: &str) -> bool {
 /// in it comes back as `None`, because only part of its name is known; `holes` are the marks a
 /// partly literal URL uses for that text (`{…}`).
 pub fn url_api(url: &str) -> Option<UrlApi> {
-    let without_scheme = url.split_once("://").map_or(url, |(_, r)| r.split_once('/').map_or("", |(_, p)| p));
-    let is_relative_or_absolute = url.contains("://") || url.starts_with('/');
-    if !is_relative_or_absolute {
-        return None;
+    // A scheme comes before any `/`, `?` or `#`: in `/graphql?next=https://x.test` the `://`
+    // is in the query. The host then ends at the first `/`, `?` or `#`, so a slash in the query
+    // or fragment (`https://x.test?next=/graphql`) is not the path. Run-time text in holes
+    // (`{document.querySelector(#api).value}`) ends nothing.
+    let from_path = match scheme_end(url) {
+        Some(i) => {
+            let rest = url.get(i + 3..).unwrap_or("");
+            match outside_holes(rest, b"/?#") {
+                Some(j) if rest.as_bytes().get(j) == Some(&b'/') => rest.get(j + 1..).unwrap_or(""),
+                _ => "",
+            }
+        }
+        None if url.starts_with('/') => url,
+        None => return None,
+    };
+    let path = from_path.get(..outside_holes(from_path, b"?#").unwrap_or(from_path.len())).unwrap_or(from_path);
+    // A slash inside a hole (`{pick(/trpc/user.list)}`) is not a segment boundary.
+    let mut segs: Vec<&str> = Vec::new();
+    let mut rest = path;
+    while let Some(i) = outside_holes(rest, b"/") {
+        segs.extend(rest.get(..i).filter(|s| !s.is_empty()));
+        rest = rest.get(i + 1..).unwrap_or("");
     }
-    let path = without_scheme.split(['?', '#']).next().unwrap_or_default();
-    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    segs.extend(Some(rest).filter(|s| !s.is_empty()));
     if let Some(i) = segs.iter().position(|s| *s == "trpc") {
         let rest: Vec<&str> = segs.iter().skip(i + 1).copied().collect();
         return Some(match rest.as_slice() {
@@ -256,6 +286,36 @@ pub fn url_api(url: &str) -> Option<UrlApi> {
         });
     }
     (segs.last().is_some_and(|s| *s == "graphql" || *s == "gql")).then_some(UrlApi::Graphql)
+}
+
+/// Where a URL's scheme separator `://` starts: the first one outside holes, and only before any
+/// `/`, `?` or `#` outside holes. `None` for a relative URL.
+fn scheme_end(url: &str) -> Option<usize> {
+    let mut from = 0;
+    loop {
+        let i = from + outside_holes(url.get(from..)?, b":/?#")?;
+        if url.as_bytes().get(i) != Some(&b':') {
+            return None;
+        }
+        if url.get(i..).is_some_and(|r| r.starts_with("://")) {
+            return Some(i);
+        }
+        from = i + 1;
+    }
+}
+
+/// The first of `stops` in `s` that is not inside a `{…}` hole.
+fn outside_holes(s: &str, stops: &[u8]) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, &b) in s.as_bytes().iter().enumerate() {
+        match b {
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && stops.contains(&b) => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// What [`url_api`] found.

@@ -118,7 +118,9 @@ const ACTIONS: &[Action] = &[
     a("remove_backend_key",  "forget an API key saved in the app",             Cli("ai key <name> --forget")),
     a("pick_model",          "list the models an AI can use",                  Cli("ai model <name>")),
     a("set_model",           "change the model an AI uses",                    Cli("ai model <name> <model>")),
-    a("set_effort",          "change how hard a Claude AI thinks",             Cli("ai effort <name> <level>")),
+    a("set_requests_per_minute", "set an API backend's request rate",            Cli("ai request-rate <name> <requests-per-minute>")),
+    a("set_tool_list",       "choose an API builder's tool list",              Cli("ai tools <name> <auto|lean|full>")),
+    a("set_effort",          "change how hard an AI thinks",                   Cli("ai effort <name> <level>")),
     a("pick_agent_model",    "list an agent's visible models and thinking depths", Tool(&["ai_models_list"])),
     a("reload_agent_model",  "reload model-specific thinking choices",         Tool(&["ai_models_list"])),
     a("set_agent_model",     "choose an agent's model and thinking depth",     Tool(&["ai_model_set"])),
@@ -148,6 +150,7 @@ const ACTIONS: &[Action] = &[
 /// `CraftApp` methods that aren't person-facing actions: callbacks, polling, drawing, helpers.
 #[rustfmt::skip]
 const PLUMBING: &[(&str, &str)] = &[
+    ("show_update_outcome_on_start", "native startup queues the previous helper result for the first window frame; no document action"),
     ("load_agent_model_catalog", "worker dispatch shared by the model picker and its reload action"),
     ("check_backend_keys", "a worker that fills the saved-key status rows"),
     ("stuck_banner", "draws what the lock watchdog found; `sync::problems` and its log are the headless side"),
@@ -157,7 +160,7 @@ const PLUMBING: &[(&str, &str)] = &[
     ("waiting_question", "finds the question an answer is for"),
     ("acted", "shows a button tool's result (toast, open the preview)"),
     ("engines_found", "a job's result"), ("engine_got", "a job's result"), ("ghidra_got", "a job's result"),
-    ("ghidra_ready", "a query"), ("ghidra_missing", "a query"),
+    ("ghidra_ready", "a query"), ("ghidra_found", "a query"), ("ghidra_missing", "a query"),
     ("load_prefs", "startup"), ("after_first_frames", "startup"), ("install_menu_bar", "startup; its items run palette commands"), ("log", "the log panel"), ("toast", "a message"),
     ("check_pictures", "a picture-size preflight"), ("picture_check_finished", "a preflight's result"),
     ("keep_attachments", "part of pictures_checked"),

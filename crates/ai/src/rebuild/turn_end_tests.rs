@@ -3,7 +3,7 @@
 use super::*;
 
 fn turn_done() -> AgentEvent {
-    AgentEvent::TurnDone { backend: "test".into(), input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false }
+    AgentEvent::TurnDone { backend: "test".into(), input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false, tokens_unknown: false }
 }
 
 fn worker(ws: &Workspace) -> (Worker, Receiver<RunEvent>) {

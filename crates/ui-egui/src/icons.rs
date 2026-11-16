@@ -53,8 +53,14 @@ pub fn show(ui: &mut egui::Ui, name: &str, size: f32, tint: Color32) -> Response
     resp
 }
 
-/// Square icon button: transparent until hovered; `selected` gets the accent treatment.
-pub fn button(ui: &mut egui::Ui, name: &str, box_size: f32, selected: bool, tooltip: &str) -> Response {
+/// Square icon button at a control size: transparent until hovered; `selected` gets the accent
+/// treatment.
+pub fn button(ui: &mut egui::Ui, name: &str, size: crate::theme::ControlSize, selected: bool, tooltip: &str) -> Response {
+    button_box(ui, name, size.height(), selected, tooltip)
+}
+
+/// [`button`] in a box of any size, for the title bar, whose sizes follow the window's chrome.
+pub fn button_box(ui: &mut egui::Ui, name: &str, box_size: f32, selected: bool, tooltip: &str) -> Response {
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(box_size), Sense::click());
     if selected {

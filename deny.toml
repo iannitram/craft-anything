@@ -54,3 +54,5 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# Shared native updater, pinned in the UI crate manifest.
+allow-git = ["https://github.com/storytold/craft-libs"]

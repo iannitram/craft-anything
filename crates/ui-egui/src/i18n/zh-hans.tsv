@@ -1,5 +1,6 @@
 # zh-hans: original Chinese UI translations. Licensed MIT OR Apache-2.0.
 # UTF-8: English source<TAB>translation. Keep placeholders and escapes intact.
+Default (its own settings)	默认（其自身设置）
 OpenCode default	OpenCode 默认设置
 Model default	模型默认设置
 Thinking depth	思考深度
@@ -1366,6 +1367,7 @@ your files there are the app, edited in place	该位置的文件就是应用，�
 {name} builds what you make; answers come from {brain}.	由 {name} 负责构建，{brain} 负责回答。
 {name} can't be attached: a message takes pictures up to 20 MB.	无法附加 {name}:消息中的图片最大为 20 MB。
 {name} can't be attached: it isn't a PNG, JPEG, GIF or WebP picture.	无法附加 {name}:它不是 PNG、JPEG、GIF 或 WebP 图片。
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name} 无法被限制为只读，因此不会向它提问。请改用 Claude Code，或使用带 API 密钥的 AI 提问。
 {name} is ready	{name} 已就绪
 {name} is ready.	{name} 已就绪。
 {name} isn't available yet in this build.	此版本尚未提供{name}。
@@ -1467,3 +1469,27 @@ Connecting to {name}… {seconds} s	正在连接 {name}… {seconds} 秒
 Stopped adding {name}.	已停止添加 {name}。
 It isn't there any more, so {program} runs in its place.	它已不在那里，因此改用 {program}。
 Use it	使用它
+
+# Native update checks and verified installation.
+ArtCraft Launcher manages this app's version. Change its version there.	ArtCraft Launcher 管理此应用的版本。请在那里更改版本。
+Check again	再次检查
+Check for Updates	检查更新
+Check for Updates…	检查更新…
+Checking for updates…	正在检查更新…
+Couldn't check for updates: {error}	无法检查更新：{error}
+Downloading and verifying the update…	正在下载并验证更新…
+No installer is available for this platform.	此平台没有可用的安装程序。
+Releases	发行版本
+Save your work and stop running tasks before installing an update.	安装更新前，请保存工作并停止正在运行的任务。
+The update failed: {error}	更新失败：{error}
+The update worker stopped unexpectedly. Try checking again.	更新工作线程意外停止。请重新检查。
+This installation is managed externally. Update it with its package manager or open Releases.	此安装由外部管理。请使用软件包管理器更新，或打开“发行版本”。
+Update and restart	更新并重启
+Update ready. Restarting…	更新已就绪。正在重启…
+Updated to {version}.	已更新至 {version}。
+Use Releases or your package manager to update this installation.	请通过“发行版本”或软件包管理器更新此安装。
+You're up to date.	已是最新版本。
+{version} is available.	{version} 已可用。
+Forget a website sign-in	忘记网站登录
+Sign in to a website	登录网站
+Some shared files could not be hard-linked and were copied instead ({size}).	部分共享文件无法建立硬链接，已改为复制（{size}）。

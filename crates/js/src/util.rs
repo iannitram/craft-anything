@@ -9,11 +9,18 @@ pub struct LineIndex {
 }
 
 impl LineIndex {
+    /// Index JavaScript line terminators, treating CRLF as one ending.
     pub fn new(src: &str) -> Self {
         let mut starts = vec![0u32];
-        for (i, b) in src.bytes().enumerate() {
-            if b == b'\n' {
-                starts.push(u32::try_from(i + 1).unwrap_or(u32::MAX));
+        let mut chars = src.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            let mut end = i + c.len_utf8();
+            if c == '\r' && chars.peek().is_some_and(|(_, next)| *next == '\n') {
+                chars.next();
+                end += 1;
+            }
+            if matches!(c, '\r' | '\n' | '\u{2028}' | '\u{2029}') {
+                starts.push(u32::try_from(end).unwrap_or(u32::MAX));
             }
         }
         LineIndex { starts }

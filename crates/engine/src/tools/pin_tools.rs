@@ -183,7 +183,7 @@ pub(crate) fn runs(ctx: &mut Ctx<'_>) -> Arc<Runs> {
 /// Start what `app` holds through the run list, logging to `log`, and describe what happened. A
 /// program that quit straight away with an error is an error carrying its last output.
 pub(crate) fn start(ctx: &mut Ctx<'_>, app: &Path, log: &Path, another: bool, label: &str) -> Result<Value, ToolError> {
-    let Some((program, args)) = crate::outputs::launch(app, godot(ctx).as_deref()) else {
+    let Some((program, args)) = crate::outputs::launch_now(app, godot(ctx).as_deref()) else {
         return Err(ToolError::new(ErrorCode::NotFound, "There's nothing to start: no built program here.")
             .with_remediation("Finish a build first (rebuild), or open the folder to look."));
     };

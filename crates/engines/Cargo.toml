@@ -29,9 +29,15 @@ toml = { workspace = true }
 # default. Safe API; no unsafe in our code.
 wasmtime = { version = "49", optional = true, default-features = false, features = ["std", "runtime", "cranelift", "component-model", "wat"] }
 
+[target.'cfg(windows)'.dependencies]
+# Reads the person's manual proxy for engine downloads (the version already in the lockfile).
+winreg = "0.55"
+
 [features]
 wasm-plugins = ["dep:wasmtime"]
 
 [dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile = "3"
 craft-anything-testkit = { workspace = true }

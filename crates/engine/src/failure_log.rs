@@ -77,7 +77,7 @@ fn render(r: &Report, date: &str, time: &str) -> String {
 /// Write a log into `dir`, creating it, and return its path. Removes the oldest beyond [`KEEP`].
 pub fn write(dir: &Path, report: &Report) -> Result<PathBuf, ToolError> {
     std::fs::create_dir_all(dir).map_err(|e| ToolError::new(ErrorCode::FileError, format!("Couldn't create the log folder {}: {e}", dir.display())))?;
-    let (_, date, time) = craft_anything_engine::journal::now_utc();
+    let (_, date, time) = crate::journal::now_utc();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let name = format!("agent-{date}-{}-{}-{n}.log", time.replace(':', ""), std::process::id());
     let path = dir.join(name);

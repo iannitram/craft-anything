@@ -7,7 +7,7 @@ ArtCraft's mark blue `#4e7bfb`. It is not open source: see `LICENSE.txt`.
 The interface follows getartcraft.com too (`theme.rs`): its warm near-black and paper
 backgrounds and ink, its deep accent `#1659c4` (`theme::BRAND`) for filled controls so white text
 on them passes WCAG AA, its bright accent `#2d81ff` for hover and its light accent `#74aaff` for
-blue text on dark surfaces. Headings and text are DM Sans.
+blue text on dark surfaces. Headings and text are Figtree.
 
 ## Geometry
 

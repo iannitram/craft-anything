@@ -101,6 +101,14 @@ impl CraftApp {
             ("project_pin_create", Ok(v)) => {
                 let name = v["pin"]["name"].as_str().unwrap_or_default();
                 self.toast(trf("Pinned: {name}. Open it from the sidebar any time.", &[("name", name)]), false);
+                if let Some(copied) = v["pin"]["copied_shared_bytes"].as_u64()
+                    && copied > 0
+                {
+                    // Not only a drive: a file can refuse a link for its own reasons (its link
+                    // limit, permissions), so the message says what is known, not the cause.
+                    let size = craft_anything_engine::evidence::human_bytes(copied);
+                    self.toast(trf("Some shared files could not be hard-linked and were copied instead ({size}).", &[("size", &size)]), false);
+                }
                 self.state.pins_collapsed = false;
                 self.refresh_pins();
             }
@@ -144,7 +152,7 @@ pub fn section(app: &mut CraftApp, ui: &mut Ui, fold: bool) {
     let collapsed = app.state.pins_collapsed;
     let arrow = |ui: &mut Ui| {
         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(18.0), egui::Sense::click());
-        icons::paint(ui, rect, if collapsed { "chevron-right" } else { "chevron-down" }, 14.0, t.icon);
+        icons::paint(ui, rect, if collapsed { "chevron-right" } else { "chevron-down" }, theme::icon::SM, t.icon);
         resp
     };
     // Folded, the arrow stays where the heading was, so nothing moves.
@@ -152,7 +160,7 @@ pub fn section(app: &mut CraftApp, ui: &mut Ui, fold: bool) {
         crate::sidebar::centred_row(ui, 18.0, arrow)
     } else {
         ui.horizontal(|ui| {
-            ui.add_space(12.0);
+            ui.add_space(theme::space::MD);
             widgets::caption(ui, "Pinned");
             arrow(ui)
         })
@@ -163,7 +171,7 @@ pub fn section(app: &mut CraftApp, ui: &mut Ui, fold: bool) {
     if r.clicked() {
         app.state.pins_collapsed = !collapsed;
     }
-    ui.add_space(4.0);
+    ui.add_space(theme::space::XS);
     if collapsed {
         crate::sidebar::section_gap(ui, fold, 14.0);
         return;
@@ -195,36 +203,36 @@ pub fn section(app: &mut CraftApp, ui: &mut Ui, fold: bool) {
 /// The right-click menu on a pin.
 fn menu(app: &mut CraftApp, ui: &mut Ui, row: &PinRow) {
     if row.running {
-        if ui.button(tr("Open another copy")).on_hover_text(tr("Copies share the files it saves beside itself.")).clicked() {
+        if widgets::menu_item(ui, false, tr("Open another copy")).on_hover_text(tr("Copies share the files it saves beside itself.")).clicked() {
             app.open_pin(row, true);
             ui.close();
         }
-        if ui.button(tr("Close it")).clicked() {
+        if widgets::menu_item(ui, false, tr("Close it")).clicked() {
             app.stop_pin(row);
             ui.close();
         }
-    } else if ui.button(tr("Open")).clicked() {
+    } else if widgets::menu_item(ui, false, tr("Open")).clicked() {
         app.open_pin(row, false);
         ui.close();
     }
     // The project page's words for the same action.
-    if ui.button(tr("Open folder")).clicked() {
+    if widgets::menu_item(ui, false, tr("Open folder")).clicked() {
         app.act("project_open_folder", json!({"project": row.project, "pin": row.pin.id}), tr("Open the folder"));
         ui.close();
     }
-    if ui.button(tr("Go to the project")).clicked() {
+    if widgets::menu_item(ui, false, tr("Go to the project")).clicked() {
         if let Some(ws) = app.projects.iter().find(|w| w.root == row.project).cloned() {
             app.open_workspace(ws);
         }
         ui.close();
     }
-    if ui.button(tr("Rename…")).clicked() {
+    if widgets::menu_item(ui, false, tr("Rename…")).clicked() {
         app.state.rename_input = row.pin.name.clone();
         app.state.modal = Some(Modal::PinRename(row.project.clone(), row.pin.id));
         ui.close();
     }
     ui.separator();
-    if ui.add_enabled(!row.running, egui::Button::new(tr("Remove…"))).on_disabled_hover_text(tr("Close it first.")).clicked() {
+    if ui.add_enabled_ui(!row.running, |ui| widgets::menu_item(ui, false, tr("Remove…"))).inner.on_disabled_hover_text(tr("Close it first.")).clicked() {
         app.state.modal = Some(Modal::PinDelete(row.project.clone(), row.pin.id));
         ui.close();
     }
@@ -240,9 +248,9 @@ pub fn pin_modal(app: &mut CraftApp, ui: &mut Ui, close: &mut bool) {
     let t = Tokens::get(ui.ctx());
     ui.set_width(560.0);
     ui.label(theme::heading(tr("Pin this build"), theme::SECTION));
-    ui.add_space(4.0);
+    ui.add_space(theme::space::XS);
     ui.add(egui::Label::new(RichText::new(tr("Keep it in the sidebar to open any time, whatever later builds change.")).color(t.text_dim)).wrap());
-    ui.add_space(12.0);
+    ui.add_space(theme::space::MD);
     let size = Vec2::new(268.0, 150.0);
     let mode = app.state.pin_draft.mode;
     ui.horizontal(|ui| {
@@ -269,7 +277,7 @@ pub fn pin_modal(app: &mut CraftApp, ui: &mut Ui, close: &mut bool) {
             app.state.pin_draft.mode = PinMode::Light;
         }
     });
-    ui.add_space(8.0);
+    ui.add_space(theme::space::SM);
     let (note, color) = match &app.state.pin_draft.size {
         None => (tr("Working out how much space a copy takes…"), t.text_faint),
         Some(Err(e)) => (e.clone(), t.danger),
@@ -283,8 +291,8 @@ pub fn pin_modal(app: &mut CraftApp, ui: &mut Ui, close: &mut bool) {
             }
         }
     };
-    ui.add(egui::Label::new(RichText::new(note).color(color).size(theme::SMALL)).wrap());
-    ui.add_space(10.0);
+    ui.add(egui::Label::new(RichText::new(note).color(color).size(theme::SMALL).line_height(Some(theme::leading(theme::SMALL)))).wrap());
+    ui.add_space(theme::space::MD);
     widgets::caption(ui, "Name (optional)");
     let r = ui.add(
         egui::TextEdit::singleline(&mut app.state.pin_draft.name)
@@ -293,7 +301,7 @@ pub fn pin_modal(app: &mut CraftApp, ui: &mut Ui, close: &mut bool) {
             .frame(widgets::text_field_frame(&t)),
     );
     widgets::named(r, "Pin name");
-    ui.add_space(12.0);
+    ui.add_space(theme::space::MD);
     // A build with nothing to start can't be pinned; the estimate says so first.
     let ok = matches!(app.state.pin_draft.size, Some(Ok(_)));
     ui.horizontal(|ui| {
@@ -312,7 +320,7 @@ pub fn pin_modal(app: &mut CraftApp, ui: &mut Ui, close: &mut bool) {
 pub fn rename_modal(app: &mut CraftApp, ui: &mut Ui, project: &Path, id: u32, close: &mut bool) {
     let t = Tokens::get(ui.ctx());
     ui.label(theme::heading(tr("Rename the pin"), theme::SECTION));
-    ui.add_space(8.0);
+    ui.add_space(theme::space::SM);
     let r = ui.add(egui::TextEdit::singleline(&mut app.state.rename_input).desired_width(f32::INFINITY).frame(widgets::text_field_frame(&t)));
     widgets::named(r.clone(), "Pin name");
     if !r.has_focus() && !r.lost_focus() {
@@ -320,7 +328,7 @@ pub fn rename_modal(app: &mut CraftApp, ui: &mut Ui, project: &Path, id: u32, cl
     }
     let ok = !app.state.rename_input.trim().is_empty();
     let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-    ui.add_space(12.0);
+    ui.add_space(theme::space::MD);
     ui.horizontal(|ui| {
         if (widgets::primary_icon(ui, None, "Rename", ok).clicked() || enter) && ok {
             let name = app.state.rename_input.trim().to_string();
@@ -340,7 +348,7 @@ pub fn delete_modal(app: &mut CraftApp, ui: &mut Ui, project: &Path, id: u32, cl
         return;
     };
     ui.label(theme::heading(trf("Remove {name}?", &[("name", &row.pin.name)]), theme::SECTION));
-    ui.add_space(8.0);
+    ui.add_space(theme::space::SM);
     // A copy may hold what the program saved; say so, since it can't be brought back.
     let what = if row.pin.mode.keeps_copy() {
         tr("Its copy is deleted, with anything it saved there. The project itself stays as it is.")
@@ -349,12 +357,12 @@ pub fn delete_modal(app: &mut CraftApp, ui: &mut Ui, project: &Path, id: u32, cl
     };
     ui.add(egui::Label::new(RichText::new(what).color(t.text_dim)).wrap());
     if row.pin.mode.keeps_copy() {
-        ui.add_space(4.0);
+        ui.add_space(theme::space::XS);
         ui.label(RichText::new(tr("This can't be undone.")).color(t.danger).size(theme::SMALL));
     }
-    ui.add_space(12.0);
+    ui.add_space(theme::space::MD);
     ui.horizontal(|ui| {
-        if widgets::secondary(ui, Some("trash-2"), "Remove it").clicked() {
+        if widgets::danger(ui, Some("trash-2"), "Remove it").clicked() {
             app.act("project_pin_delete", json!({"project": project, "pin": id, "confirm": true}), tr("Remove a pin"));
             *close = true;
         }

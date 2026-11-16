@@ -115,7 +115,7 @@ pub fn install(
         }
     };
 
-    let dest = store_dir.join(engine_id);
+    let dest = store_dir.join(engine.store_folder());
     let _ = std::fs::remove_dir_all(&dest);
     if let Err(e) = std::fs::rename(&incoming, &dest) {
         let _ = std::fs::remove_dir_all(&incoming);
@@ -231,15 +231,89 @@ pub fn download_to(
     if !url.starts_with("https://") {
         return Err(ToolError::invalid("engine downloads must use https"));
     }
-    let agent = ureq::Agent::config_builder()
+    download_with_agent(url, sink, max_bytes, cancel, progress, &download_config().build().new_agent())
+}
+
+fn download_config() -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
+    ureq::Agent::config_builder()
+        .https_only(true)
         .http_status_as_error(false)
         .user_agent("CraftAnything-dev")
         .timeout_connect(Some(Duration::from_secs(20)))
         .timeout_recv_response(Some(Duration::from_secs(60)))
         .timeout_recv_body(Some(Duration::from_secs(60 * 20)))
-        .build()
-        .new_agent();
+        .proxy(ureq::Proxy::try_from_env().or_else(system_proxy))
+}
+
+/// The person's manual proxy in Windows' settings, for when no proxy variable is set: a VPN that
+/// sets only that left Godot and Ghidra downloads timing out (#1827). ureq can read it too, but
+/// only through a feature that would change every client in the app, the AI ones included.
+#[cfg(windows)]
+fn system_proxy() -> Option<ureq::Proxy> {
+    let key = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings").ok()?;
+    if key.get_value::<u32, _>("ProxyEnable").ok()? != 1 {
+        return None;
+    }
+    let server: String = key.get_value("ProxyServer").ok()?;
+    // A NO_PROXY the person set replaces Windows' own exceptions, as it does for the variables.
+    let bypass = std::env::var("NO_PROXY")
+        .or_else(|_| std::env::var("no_proxy"))
+        .map(|v| v.replace(',', ";"))
+        .or_else(|_| key.get_value::<String, _>("ProxyOverride"))
+        .unwrap_or_default();
+    manual_proxy(&server, &bypass)
+}
+
+#[cfg(not(windows))]
+fn system_proxy() -> Option<ureq::Proxy> {
+    None
+}
+
+/// A proxy from Windows' manual settings: `host:port`, or a list like `http=h:p;https=h:p`, of
+/// which the HTTPS entry is used, else the HTTP one. Anything else (credentials, SOCKS only, no
+/// port) is no proxy. This computer and the `;`-separated `bypass` entries go direct.
+#[cfg(any(windows, test))]
+fn manual_proxy(server: &str, bypass: &str) -> Option<ureq::Proxy> {
+    let entries: Vec<&str> = server.split(';').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let addr = if entries.iter().any(|e| e.contains('=')) {
+        let find = |kind: &str| entries.iter().find_map(|e| e.split_once('=').filter(|(k, _)| k.trim().eq_ignore_ascii_case(kind)).map(|(_, v)| v.trim()));
+        find("https").or_else(|| find("http"))?
+    } else {
+        entries.first()?
+    };
+    let addr = addr.strip_prefix("http://").unwrap_or(addr).trim_end_matches('/');
+    let (host, port) = addr.rsplit_once(':')?;
+    let bad_host = host.is_empty() || host.contains(['@', '/', '=']) || (host.contains(':') && !host.starts_with('['));
+    if bad_host {
+        return None;
+    }
+    let mut proxy = ureq::Proxy::builder(ureq::ProxyProtocol::Http).host(host).port(port.parse().ok()?);
+    let local = ["localhost", "127.0.0.1", "[::1]"];
+    // shortcut: ureq takes one `*` at the start or the end; a rule like `*github*` or
+    // `10.*.0.1` is skipped, so those hosts go through the proxy. Engine downloads come from public
+    // hosts, so it matters only if one is listed that way; match whole patterns then.
+    let expressible = |e: &&str| !e.trim_start_matches('*').trim_end_matches('*').contains('*') && !(e.len() > 1 && e.starts_with('*') && e.ends_with('*'));
+    let rules = bypass.split(';').map(str::trim).filter(|e| !e.is_empty() && *e != "<local>").filter(expressible);
+    for entry in local.into_iter().chain(rules) {
+        proxy = proxy.no_proxy(entry);
+    }
+    proxy.build().ok()
+}
+
+fn download_with_agent(
+    url: &str,
+    sink: &mut dyn Write,
+    max_bytes: u64,
+    cancel: Option<&Cancel>,
+    progress: &dyn Fn(u64, Option<u64>),
+    agent: &ureq::Agent,
+) -> Result<u64, ToolError> {
     let resp = agent.get(url).call().map_err(|e| {
+        if matches!(e, ureq::Error::RequireHttpsOnly(_)) {
+            // This error contains the redirect URI, which can carry a signed query or credentials.
+            return ToolError::new(ErrorCode::EngineMissing, "The engine download redirected to HTTP and was refused.")
+                .with_remediation("The download source must keep every redirect on HTTPS.");
+        }
         let code = if matches!(e, ureq::Error::Timeout(_)) { ErrorCode::TimedOut } else { ErrorCode::EngineMissing };
         ToolError::new(code, format!("Couldn't download {url}: {e}")).with_remediation("Check your internet connection and try again.")
     })?;
@@ -812,3 +886,7 @@ mod tests {
         out
     }
 }
+
+#[cfg(test)]
+#[path = "install_download_tests.rs"]
+mod download_tests;

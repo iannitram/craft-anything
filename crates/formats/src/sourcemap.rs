@@ -51,6 +51,9 @@ pub struct SourceInventory {
     pub sources: Vec<String>,
     /// More names existed than the limits or available allocations could retain.
     pub truncated: bool,
+    /// Index-map sections that pointed at an external map nobody read, so the sources they
+    /// would add are unknown (not absent).
+    pub external_sections: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -98,6 +101,9 @@ pub struct SourceMap {
     pub segments: usize,
     /// Indexed maps: (line offset, column offset, map).
     pub sections: Vec<(u32, u32, SourceMap)>,
+    /// Index-map sections that point at an external map (`url`), which isn't fetched here: the
+    /// sources that map would add are unknown, not absent.
+    pub external_sections: usize,
 }
 
 /// A position in an original source.
@@ -186,7 +192,12 @@ impl SourceMap {
         let mut sources = Vec::new();
         let mut bytes_left = limits.max_bytes;
         let truncated = !self.collect_sources(limits.max_sources, &mut bytes_left, &mut sources);
-        SourceInventory { sources, truncated }
+        SourceInventory { sources, truncated, external_sections: self.external_sections_total() }
+    }
+
+    /// This map's external sections plus those of every map it holds.
+    fn external_sections_total(&self) -> usize {
+        self.sections.iter().fold(self.external_sections, |n, (_, _, map)| n.saturating_add(map.external_sections_total()))
     }
 
     /// Append this map and its sections using one shared entry and byte budget.
@@ -219,6 +230,20 @@ impl SourceMap {
 
 /// Parse a source map.
 pub fn parse(json: &[u8], limits: Limits) -> Result<SourceMap, SourceMapError> {
+    read(json, limits, true)
+}
+
+/// Read a map's sources, their content, names and ignore list without decoding its mappings or
+/// checking its section offsets, so a map [`parse`] refuses for those
+/// ([`SourceMapError::BadMappings`] or [`SourceMapError::BadSections`]) can still list its sources.
+/// The map has no lines or segments. A map whose mappings, as far as they decode, name a source
+/// past the end of its `sources` list is still refused, since the list is known to be short, and so are a section
+/// that has neither a map nor a URL, or both, and a `sections` value that isn't an array.
+pub fn parse_sources(json: &[u8], limits: Limits) -> Result<SourceMap, SourceMapError> {
+    read(json, limits, false)
+}
+
+fn read(json: &[u8], limits: Limits, mappings: bool) -> Result<SourceMap, SourceMapError> {
     if json.len() > limits.max_bytes {
         return Err(SourceMapError::TooLarge(json.len(), limits.max_bytes));
     }
@@ -234,10 +259,18 @@ pub fn parse(json: &[u8], limits: Limits) -> Result<SourceMap, SourceMapError> {
     };
     let mut budget = limits.max_segments;
     let mut line_budget = limits.max_lines;
-    from_raw(raw, 0, limits, &mut budget, &mut line_budget)
+    from_raw(raw, 0, limits, &mut budget, &mut line_budget, mappings)
 }
 
-fn from_raw(raw: Option<RawMap>, depth: usize, limits: Limits, budget: &mut usize, line_budget: &mut usize) -> Result<SourceMap, SourceMapError> {
+/// `mappings`: decode the mappings and check section offsets, as [`parse`] does.
+fn from_raw(
+    raw: Option<RawMap>,
+    depth: usize,
+    limits: Limits,
+    budget: &mut usize,
+    line_budget: &mut usize,
+    mappings: bool,
+) -> Result<SourceMap, SourceMapError> {
     if depth > limits.max_depth {
         return Err(SourceMapError::TooDeep(limits.max_depth));
     }
@@ -258,24 +291,32 @@ fn from_raw(raw: Option<RawMap>, depth: usize, limits: Limits, budget: &mut usiz
         for section in sections {
             let offset = |n: Option<u64>| n.and_then(|n| u32::try_from(n).ok()).ok_or(SourceMapError::BadSections);
             let (line, col) = section.offset.unwrap_or_default();
-            let line = offset(line)?;
-            let col = offset(col)?;
-            if map.sections.last().is_some_and(|(l, c, _)| (*l, *c) > (line, col)) {
+            let (line, col) = if mappings { (offset(line)?, offset(col)?) } else { (offset(line).unwrap_or(0), offset(col).unwrap_or(0)) };
+            if mappings && map.sections.last().is_some_and(|(l, c, _)| (*l, *c) > (line, col)) {
                 return Err(SourceMapError::BadSections);
             }
-            let sub = match (section.map, section.url) {
-                (Some(m), None) => from_raw(m.map(|m| *m), depth + 1, limits, budget, line_budget)?,
+            let (sub, external) = match (section.map, section.url) {
+                (Some(m), None) => (from_raw(m.map(|m| *m), depth + 1, limits, budget, line_budget, mappings)?, false),
                 // External maps are never fetched here. Retain their start so a lookup
-                // cannot leak through to the previous inline map.
-                (None, Some(true)) => SourceMap::default(),
+                // cannot leak through to the previous inline map, and count it so the
+                // sources it would add are reported unknown rather than absent.
+                (None, Some(true)) => (SourceMap::default(), true),
                 _ => return Err(SourceMapError::BadSections),
             };
+            if external {
+                map.external_sections = map.external_sections.saturating_add(1);
+            }
             map.segments = map.segments.saturating_add(sub.segments);
             map.sections.push((line, col, sub));
         }
         return Ok(map);
     }
-    decode_mappings(raw.mappings.as_deref().unwrap_or_default(), &mut map, budget, line_budget, limits.max_lines)?;
+    let m = raw.mappings.as_deref().unwrap_or_default();
+    if mappings {
+        decode_mappings(m, &mut map, budget, line_budget, limits.max_lines)?;
+    } else if let Some(count) = past_sources(m, map.sources.len()) {
+        return Err(SourceMapError::BadMappings(count));
+    }
     Ok(map)
 }
 
@@ -732,14 +773,42 @@ fn decode_mappings(m: &str, map: &mut SourceMap, budget: &mut usize, line_budget
     Ok(())
 }
 
+/// The segment, counted as [`decode_mappings`] does, that names a source past the end of a list
+/// of `sources`. Mappings that can't be decoded end the search: past them nothing is known.
+fn past_sources(m: &str, sources: usize) -> Option<usize> {
+    let bytes = m.as_bytes();
+    let (mut pos, mut src, mut count) = (0usize, 0i64, 0usize);
+    let at_end = |pos: usize| matches!(bytes.get(pos), None | Some(b',') | Some(b';'));
+    while pos < bytes.len() {
+        if matches!(bytes[pos], b',' | b';') {
+            pos += 1;
+            continue;
+        }
+        count += 1;
+        vlq(bytes, &mut pos)?;
+        if at_end(pos) {
+            continue;
+        }
+        src += vlq(bytes, &mut pos)?;
+        // A negative index is wrong too, but the deltas after it still decode.
+        if usize::try_from(src).is_ok_and(|src| src >= sources) {
+            return Some(count);
+        }
+        while !at_end(pos) {
+            vlq(bytes, &mut pos)?;
+        }
+    }
+    None
+}
+
 /// Find the `sourceMappingURL` comment near the end of a script.
 pub fn find_source_mapping_url(js: &str) -> Option<String> {
     for line in js.lines().rev().take(64) {
         let t = line.trim();
-        for prefix in ["//# sourceMappingURL=", "//@ sourceMappingURL=", "/*# sourceMappingURL="] {
-            if let Some(rest) = t.strip_prefix(prefix) {
+        for prefix in ["//#", "//@", "/*#"] {
+            if let Some(rest) = t.strip_prefix(prefix).and_then(|comment| comment.trim_start().strip_prefix("sourceMappingURL=")) {
                 let url = if prefix.starts_with("/*") { rest.strip_suffix("*/").unwrap_or(rest).trim() } else { rest.trim() };
-                if !url.is_empty() {
+                if !url.is_empty() && !url.chars().any(char::is_whitespace) {
                     return Some(url.to_string());
                 }
             }

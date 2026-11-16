@@ -6,7 +6,7 @@ use crate::state::Screen;
 use crate::theme::{self, Tokens};
 use crate::{CraftApp, Pick, Route, icons, schema_form, widgets};
 use craft_anything_engine::{Consent, Mode};
-use egui::{Margin, RichText, Vec2};
+use egui::{RichText, Vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppCommand {
@@ -116,11 +116,11 @@ pub fn show(app: &mut CraftApp, ctx: &egui::Context) {
             .stroke(egui::Stroke::new(1.0, t.card_border))
             .corner_radius(t.r_lg())
             .shadow(ui.visuals().window_shadow)
-            .inner_margin(Margin::same(10))
+            .inner_margin(theme::pad::PANEL)
             .show(ui, |ui| {
                 ui.set_width(width);
                 ui.horizontal(|ui| {
-                    icons::show(ui, "search", 18.0, t.text_faint);
+                    icons::show(ui, "search", theme::icon::LG, t.text_faint);
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut app.state.palette.query)
                             .hint_text(tr("Type a command or tool…"))
@@ -128,13 +128,14 @@ pub fn show(app: &mut CraftApp, ctx: &egui::Context) {
                             .desired_width(f32::INFINITY)
                             .font(egui::FontId::proportional(theme::BODY)),
                     );
+                    widgets::frameless_field(&r);
                     r.request_focus();
                     if r.changed() {
                         app.state.palette.selected = 0;
                         follow = true;
                     }
                 });
-                ui.add_space(6.0);
+                ui.add_space(theme::space::SM);
                 ui.separator();
                 egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                     if ranked.is_empty() {
@@ -174,7 +175,7 @@ pub fn show(app: &mut CraftApp, ctx: &egui::Context) {
                         }
                     }
                 });
-                ui.add_space(4.0);
+                ui.add_space(theme::space::XS);
                 ui.label(RichText::new(tr("↑↓ to move · Enter to run · Esc to close")).color(t.text_faint).size(theme::TINY));
             });
     });
@@ -266,16 +267,16 @@ fn form(app: &mut CraftApp, ctx: &egui::Context, tool: &str) {
             ui.label(RichText::new(spec.id).font(theme::mono(theme::CAPTION)).color(t.text_faint));
             if spec.effects.needs_consent() {
                 ui.horizontal(|ui| {
-                    icons::show(ui, "shield", 14.0, t.warning);
+                    icons::show(ui, "shield", theme::icon::SM, t.warning);
                     ui.label(RichText::new(tr("This runs code from the target or changes a device. Clicking Run is your OK.")).color(t.warning));
                 });
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::space::SM);
             schema_form::show(ui, &fields, &mut app.state.palette.form);
             if let Some(e) = &app.state.palette.form_error {
                 ui.colored_label(t.danger, e);
             }
-            ui.add_space(10.0);
+            ui.add_space(theme::space::MD);
             ui.horizontal(|ui| {
                 if widgets::primary_icon(ui, Some("play"), "Run", true).clicked() {
                     run = true;

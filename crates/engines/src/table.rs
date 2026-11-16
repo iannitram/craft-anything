@@ -56,7 +56,8 @@ pub enum Install {
     /// [`crate::install::install`] downloads, verifies and unpacks one of these pins.
     Pinned(&'static [Pin]),
     /// A dedicated setup flow uses these pins (Ghidra and the Java it runs on); `how` says where.
-    Guided { pins: &'static [Pin], how: &'static str },
+    /// `folder` is where that flow unpacks it in the engine store, which is where it's found.
+    Guided { pins: &'static [Pin], how: &'static str, folder: &'static str },
 }
 
 /// Where a standard install folder starts.
@@ -118,6 +119,15 @@ impl ExternalEngine {
     /// The executable names to look for on this computer.
     pub fn host_exes(&self) -> &'static [&'static str] {
         if cfg!(windows) { self.exes_windows } else { self.exes }
+    }
+
+    /// Its folder in the engine store: named after its id, unless a guided setup unpacks it
+    /// elsewhere (the Java Ghidra's setup brings goes in `jdk`).
+    pub fn store_folder(&self) -> &'static str {
+        match self.install {
+            Install::Guided { folder, .. } => folder,
+            Install::Manual | Install::Pinned(_) => self.id,
+        }
     }
 
     /// The pins for this engine, whether a generic or a guided install uses them.
@@ -410,7 +420,7 @@ pub const ENGINES: &[ExternalEngine] = &[
         known_paths: GHIDRA_PATHS,
         known_roots: GHIDRA_ROOTS,
         path_setting: false,
-        install: Install::Guided { pins: GHIDRA_PINS, how: GHIDRA_SETUP },
+        install: Install::Guided { pins: GHIDRA_PINS, how: GHIDRA_SETUP, folder: crate::ghidra::get::ID },
     },
     ExternalEngine {
         id: "adb",
@@ -485,7 +495,7 @@ pub const ENGINES: &[ExternalEngine] = &[
         known_paths: NO_PATHS,
         known_roots: NO_ROOTS,
         path_setting: true,
-        install: Install::Guided { pins: JAVA_PINS, how: GHIDRA_SETUP },
+        install: Install::Guided { pins: JAVA_PINS, how: GHIDRA_SETUP, folder: crate::ghidra::get::JAVA_FOLDER },
     },
     manual("tshark", "Wireshark (tshark)", "Reading packet captures (a second opinion)", &["tshark"], &["tshark.exe"]),
     manual("objdump", "objdump (GNU binutils or LLVM)", "Disassembly (a second opinion)", &["objdump", "llvm-objdump"], &["objdump.exe", "llvm-objdump.exe"]),
@@ -532,6 +542,17 @@ mod tests {
         }
         // Ghidra's folder is its own setting; every other engine has a path override.
         assert!(ENGINES.iter().all(|e| e.path_setting == (e.id != "ghidra")));
+    }
+
+    /// An install replaces its engine's store folder whole, so two engines sharing one (an engine
+    /// named `jdk`, say, beside the Java in `jdk`) would delete each other's files.
+    #[test]
+    fn each_engine_has_its_own_store_folder() {
+        let mut seen = HashSet::new();
+        for e in ENGINES {
+            assert!(seen.insert(e.store_folder()), "{} shares the store folder {}", e.id, e.store_folder());
+        }
+        assert_eq!(crate::engine("java").map(ExternalEngine::store_folder), Some(crate::ghidra::get::JAVA_FOLDER));
     }
 
     #[test]

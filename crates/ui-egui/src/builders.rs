@@ -40,22 +40,19 @@ pub fn agent_model_picker(ui: &mut Ui, picker: &mut AgentModelPicker) -> bool {
     }
     let default = if picker.context.backend.config.model == "opencode" { tr("OpenCode default") } else { tr("Model default") };
     let selected = picker.model.as_deref().unwrap_or(&default);
-    let response = egui::ComboBox::from_id_salt(("agent-model", &picker.context.backend.config.name))
-        .icon(widgets::combo_icon)
-        .selected_text(selected)
-        .show_ui(ui, |ui| {
-            if ui.selectable_label(picker.model.is_none(), &default).clicked() {
-                picker.model = None;
+    let response = widgets::dropdown(("agent-model", &picker.context.backend.config.name)).selected_text(selected).show_ui(ui, |ui| {
+        if widgets::menu_item(ui, picker.model.is_none(), &default).clicked() {
+            picker.model = None;
+            picker.thinking = None;
+        }
+        for model in models {
+            let label = if model.name == model.id { model.name.clone() } else { format!("{} · {}", model.name, model.id) };
+            if widgets::menu_item(ui, picker.model.as_ref() == Some(&model.id), label).clicked() && picker.model.as_ref() != Some(&model.id) {
+                picker.model = Some(model.id.clone());
                 picker.thinking = None;
             }
-            for model in models {
-                let label = if model.name == model.id { model.name.clone() } else { format!("{} · {}", model.name, model.id) };
-                if ui.selectable_label(picker.model.as_ref() == Some(&model.id), label).clicked() && picker.model.as_ref() != Some(&model.id) {
-                    picker.model = Some(model.id.clone());
-                    picker.thinking = None;
-                }
-            }
-        });
+        }
+    });
     widgets::named(response.response, if picker.context.backend.config.model == "opencode" { "OpenCode model" } else { "Model" });
     let model = models.iter().find(|m| picker.model.as_ref() == Some(&m.id));
     let missing = picker.model.is_some() && model.is_none();
@@ -67,15 +64,14 @@ pub fn agent_model_picker(ui: &mut Ui, picker: &mut AgentModelPicker) -> bool {
     let depths = model.map(|m| m.thinking.as_slice()).unwrap_or_default();
     ui.label(tr("Thinking depth"));
     let default_depth = tr("Model default");
-    let response = egui::ComboBox::from_id_salt(("agent-thinking", &picker.context.backend.config.name))
-        .icon(widgets::combo_icon)
+    let response = widgets::dropdown(("agent-thinking", &picker.context.backend.config.name))
         .selected_text(picker.thinking.map(|d| d.title()).unwrap_or(&default_depth))
         .show_ui(ui, |ui| {
-            if ui.selectable_label(picker.thinking.is_none(), &default_depth).clicked() {
+            if widgets::menu_item(ui, picker.thinking.is_none(), &default_depth).clicked() {
                 picker.thinking = None;
             }
             for depth in depths {
-                if ui.selectable_label(picker.thinking == Some(*depth), depth.title()).clicked() {
+                if widgets::menu_item(ui, picker.thinking == Some(*depth), depth.title()).clicked() {
                     picker.thinking = Some(*depth);
                 }
             }
@@ -288,13 +284,31 @@ impl CraftApp {
         });
     }
 
-    /// How hard a Claude AI thinks from now on.
-    pub fn set_effort(&mut self, name: &str, effort: craft_anything_ai::Effort) {
+    /// How hard an AI thinks from now on (`None`: its usual level).
+    pub fn set_effort(&mut self, name: &str, effort: Option<craft_anything_ai::Effort>) {
         let (hub, name) = (self.hub.clone(), name.to_string());
         self.jobs.spawn(tr("Change how hard an AI thinks"), false, move |_| {
-            hub.set_effort(&name, Some(effort)).map_err(|e| e.message)?;
+            hub.set_effort(&name, effort).map_err(|e| e.message)?;
             Ok(crate::backends(&hub))
         });
+    }
+
+    /// Space an API backend's requests out at the configured rate.
+    pub fn set_requests_per_minute(&mut self, name: &str, rate: u32) -> u64 {
+        let (hub, name) = (self.hub.clone(), name.to_string());
+        self.jobs.spawn(tr("Set request rate"), false, move |_| {
+            hub.set_requests_per_minute(&name, rate).map_err(|e| e.message)?;
+            Ok(crate::backends(&hub))
+        })
+    }
+
+    /// The tools future builders on an API backend are offered. Returns the job, so Settings can wait for it.
+    pub fn set_tool_list(&mut self, name: &str, list: craft_anything_ai::ToolList) -> u64 {
+        let (hub, name) = (self.hub.clone(), name.to_string());
+        self.jobs.spawn(tr("Change a builder's tools"), false, move |_| {
+            hub.set_tool_list(&name, list).map_err(|e| e.message)?;
+            Ok(crate::backends(&hub))
+        })
     }
 
     /// Connect the server in Settings → AI's address form. Its key goes to the keychain; the form
@@ -355,7 +369,7 @@ impl CraftApp {
 pub fn built_by(app: &mut CraftApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let Some(default) = app.default_builder() else {
-        icons::show(ui, "triangle-alert", 16.0, t.warning);
+        icons::show(ui, "triangle-alert", theme::icon::MD, t.warning);
         ui.label(RichText::new(tr("Building needs a coding agent such as Claude Code, or an AI with an API key.")).size(theme::BODY).color(t.text_dim));
         if widgets::link(ui, "Set one up").clicked() {
             app.need_builder(false);
@@ -374,13 +388,13 @@ pub fn built_by(app: &mut CraftApp, ui: &mut Ui) {
     let shown = app.state.make.ai.clone().unwrap_or_else(|| automatic.clone());
     ui.label(RichText::new(tr("Built by")).size(theme::BODY).color(t.text_dim));
     let mut pick = None;
-    let r = egui::ComboBox::from_id_salt("built-by").icon(widgets::combo_icon).selected_text(shown).width(220.0).show_ui(ui, |ui| {
-        if ui.selectable_label(app.state.make.ai.is_none(), automatic).on_hover_text(tr("Whatever Settings → AI builds with.")).clicked() {
+    let r = widgets::dropdown("built-by").selected_text(shown).width(220.0).show_ui(ui, |ui| {
+        if widgets::menu_item(ui, app.state.make.ai.is_none(), automatic).on_hover_text(tr("Whatever Settings → AI builds with.")).clicked() {
             pick = Some(None);
         }
         for c in &choices {
             let note = if c.found { format!("{} · {}", c.detail, tr("found on this computer; set up when you start")) } else { c.detail.clone() };
-            if ui.selectable_label(app.state.make.ai.as_ref() == Some(&c.name), &c.name).on_hover_text(note).clicked() {
+            if widgets::menu_item(ui, app.state.make.ai.as_ref() == Some(&c.name), &c.name).on_hover_text(note).clicked() {
                 pick = Some(Some(c.name.clone()));
             }
         }
@@ -399,7 +413,7 @@ pub fn need_builder_modal(app: &mut CraftApp, ui: &mut Ui, start: bool, close: &
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(48.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, t.radius, t.accent_soft);
-        icons::paint(ui, rect, "bot", 24.0, t.accent_ink);
+        icons::paint(ui, rect, "bot", theme::icon::XL, t.accent_ink);
         ui.vertical(|ui| {
             ui.label(theme::heading(tr("Set up a builder"), theme::CARD));
             ui.add(
@@ -413,7 +427,7 @@ pub fn need_builder_modal(app: &mut CraftApp, ui: &mut Ui, start: bool, close: &
             );
         });
     });
-    ui.add_space(14.0);
+    ui.add_space(theme::space::LG);
     let found: Vec<BackendConfig> = app.found_agents().cloned().collect();
     if app.detecting {
         ui.horizontal(|ui| {
@@ -442,7 +456,7 @@ pub fn need_builder_modal(app: &mut CraftApp, ui: &mut Ui, start: bool, close: &
         widgets::panel(&t).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                icons::show(ui, "bot", 18.0, t.accent);
+                icons::show(ui, "bot", theme::icon::LG, t.accent);
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&b.name).font(theme::semibold(theme::SMALL)));
                     ui.label(RichText::new(tr("Found on this computer")).color(t.text_faint).size(theme::CAPTION));
@@ -461,9 +475,9 @@ pub fn need_builder_modal(app: &mut CraftApp, ui: &mut Ui, start: bool, close: &
                 });
             });
         });
-        ui.add_space(6.0);
+        ui.add_space(theme::space::SM);
     }
-    ui.add_space(10.0);
+    ui.add_space(theme::space::MD);
     ui.horizontal(|ui| {
         if !app.detecting && widgets::secondary(ui, Some("radar"), "Look again").on_hover_text(tr("After installing one, look for it again.")).clicked() {
             app.detect_backends();

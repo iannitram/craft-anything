@@ -436,8 +436,10 @@ pub fn compare_inventories(l: &Inventory, r: &Inventory, max_rows: usize) -> Val
         }
     }
     let total = added.len() + removed.len() + changed.len() + moved.len();
+    let rows_capped = [added.len(), removed.len(), changed.len(), moved.len()].iter().any(|n| *n > max_rows);
     json!({
         "identical": total == 0 && l.content_id() == r.content_id(),
+        "rows_capped": rows_capped,
         "left": {"root": l.root, "content_id": l.content_id(), "files": lm.len()},
         "right": {"root": r.root, "content_id": r.content_id(), "files": rm.len()},
         "counts": {"added": added.len(), "removed": removed.len(), "changed": changed.len(), "moved": moved.len(), "unchanged": unchanged},
@@ -501,6 +503,25 @@ mod tests {
         b.add_file("new.js", b"4", 0).unwrap();
         let d = compare_inventories(&a.finish(), &b.finish(), 100);
         assert_eq!(d["counts"], json!({"added": 1, "removed": 0, "changed": 1, "moved": 1, "unchanged": 1}));
+    }
+
+    /// Counts stay complete while the row lists are cut; `rows_capped` says which happened.
+    #[test]
+    fn a_capped_comparison_says_rows_were_cut() {
+        let mut a = Inventorier::new("a", "directory", InvLimits::default(), &|| false);
+        a.add_file("x.js", b"1", 0).unwrap();
+        a.add_file("y.js", b"2", 0).unwrap();
+        let mut b = Inventorier::new("b", "directory", InvLimits::default(), &|| false);
+        b.add_file("x.js", b"11", 0).unwrap();
+        b.add_file("y.js", b"22", 0).unwrap();
+        let (a, b) = (a.finish(), b.finish());
+        let capped = compare_inventories(&a, &b, 1);
+        assert_eq!(capped["counts"]["changed"], 2);
+        assert_eq!(capped["changed"].as_array().map(Vec::len), Some(1));
+        assert_eq!(capped["rows_capped"], true);
+        let all = compare_inventories(&a, &b, 100);
+        assert_eq!(all["rows_capped"], false);
+        assert_eq!(all["changed"].as_array().map(Vec::len), Some(2));
     }
 
     /// #281: the same files listed in another order are the same content tree.

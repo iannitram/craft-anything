@@ -2,6 +2,8 @@
 //! budget saved with `project-loop-set` ends it on that limit. The stand-in builder is a `claude` on
 //! PATH that answers like Claude Code's stream and reports the tokens its turn used; it then lingers,
 //! as Claude Code can, so the CLI sees the usage and stops the run before the run ends on its own.
+//! A new project is built with Rust, and a build stops before its first turn when `cargo` isn't on
+//! PATH, so a stand-in `cargo` is there too.
 //! Each test gives the binary its own config, home and `PATH`, so the person's settings and the agents
 //! installed on the machine don't decide the result.
 #![cfg(unix)]
@@ -45,6 +47,15 @@ sleep 30
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+/// A stand-in `cargo`, so the build's check for its stack's program finds one. The loop's budget
+/// stops the run during the builder's turn, before anything would run it.
+fn fake_cargo(bin: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let program = bin.join("cargo");
+    std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
 /// `rebuild --loop` starts the project's saved loop, and the token budget saved with `project-loop-set`
 /// ends it on that limit. A loop ended by its limit ends well, so the command succeeds.
 #[test]
@@ -54,6 +65,7 @@ fn rebuild_loop_starts_and_ends_on_its_saved_token_budget() {
     let bin = tempfile::tempdir().unwrap();
     let projects = tempfile::tempdir().unwrap();
     fake_builder(bin.path());
+    fake_cargo(bin.path());
     let ws = Workspace::create(projects.path(), "Notes", "A notes app", TargetRef::None).unwrap();
     let root = ws.root.display().to_string();
 

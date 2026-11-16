@@ -176,7 +176,17 @@ mod tests {
     /// The arguments for one message, and the server they name.
     fn args(options: &BackendOptions, question: bool) -> (Vec<String>, McpCommand) {
         let mcp = mcp();
-        let cx = ArgsCx { options, prompt: "make a game", preamble: "PRE ", mcp: &mcp, resume: None, builder: !question, reads_checked: false, question };
+        let cx = ArgsCx {
+            options,
+            prompt: "make a game",
+            preamble: "PRE ",
+            mcp: &mcp,
+            resume: None,
+            builder: !question,
+            reads_checked: false,
+            question,
+            message_file: None,
+        };
         (DeepSeekHarness.args(&cx), mcp.clone())
     }
 

@@ -9,11 +9,19 @@ fn set<'a>(it: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
     it.map(String::from).collect()
 }
 
+/// Most rows each comparison list returns; `*_total` and `rows_capped` stay complete.
+const MAX_COMPARE_ROWS: usize = 2000;
+
 fn diff(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Value {
+    let added: Vec<&String> = right.difference(left).collect();
+    let removed: Vec<&String> = left.difference(right).collect();
     json!({
-        "added": right.difference(left).take(2000).collect::<Vec<_>>(),
-        "removed": left.difference(right).take(2000).collect::<Vec<_>>(),
+        "added": added.iter().copied().take(MAX_COMPARE_ROWS).collect::<Vec<_>>(),
+        "removed": removed.iter().copied().take(MAX_COMPARE_ROWS).collect::<Vec<_>>(),
+        "added_total": added.len(),
+        "removed_total": removed.len(),
         "unchanged": left.intersection(right).count(),
+        "rows_capped": added.len() > MAX_COMPARE_ROWS || removed.len() > MAX_COMPARE_ROWS,
     })
 }
 
@@ -123,7 +131,9 @@ fn match_modules<'a>(l: &'a [ModuleSummary], r: &'a [ModuleSummary]) -> Value {
         removed.push(m.path.clone());
     }
     let added: Vec<&String> = r.iter().enumerate().filter(|(i, _)| !used.contains(i)).map(|(_, x)| &x.path).collect();
-    json!({"unchanged": unchanged, "changed": changed, "moved": moved, "renamed": renamed, "added": added, "removed": removed})
+    let rows_capped =
+        changed.iter().any(|c| c["functions"]["rows_capped"].as_bool().unwrap_or(false) || c["exports"]["rows_capped"].as_bool().unwrap_or(false));
+    json!({"unchanged": unchanged, "changed": changed, "moved": moved, "renamed": renamed, "added": added, "removed": removed, "rows_capped": rows_capped})
 }
 
 fn export_diff(a: &ModuleSummary, b: &ModuleSummary) -> Value {
@@ -147,6 +157,7 @@ fn match_bundle_modules(l: &AppGraph, r: &AppGraph) -> Value {
     let mut used = BTreeSet::new();
     let mut tiers: BTreeMap<&str, usize> = BTreeMap::new();
     let mut changed = Vec::new();
+    let mut changed_total = 0usize;
     let mut removed = Vec::new();
     for (lp, b) in &lm {
         let tier = [
@@ -160,15 +171,30 @@ fn match_bundle_modules(l: &AppGraph, r: &AppGraph) -> Value {
             Some((t, i)) => {
                 used.insert(i);
                 *tiers.entry(t).or_default() += 1;
-                if t == "id" && changed.len() < 2000 {
-                    changed.push(json!({"id": b.id, "file": lp}));
+                if t == "id" {
+                    changed_total += 1;
+                    if changed.len() < MAX_COMPARE_ROWS {
+                        changed.push(json!({"id": b.id, "file": lp}));
+                    }
                 }
             }
             None => removed.push(json!({"id": b.id, "file": lp})),
         }
     }
-    let added: Vec<Value> = rm.iter().enumerate().filter(|(i, _)| !used.contains(i)).map(|(_, (p, b))| json!({"id": b.id, "file": p})).take(2000).collect();
-    json!({"left": lm.len(), "right": rm.len(), "matched_by": tiers, "changed": changed, "added": added, "removed": removed})
+    let added: Vec<Value> = rm.iter().enumerate().filter(|(i, _)| !used.contains(i)).map(|(_, (p, b))| json!({"id": b.id, "file": p})).collect();
+    let added_total = added.len();
+    let added = added.into_iter().take(MAX_COMPARE_ROWS).collect::<Vec<_>>();
+    json!({
+        "left": lm.len(),
+        "right": rm.len(),
+        "matched_by": tiers,
+        "changed": changed,
+        "changed_total": changed_total,
+        "added": added,
+        "added_total": added_total,
+        "removed": removed,
+        "rows_capped": changed_total > changed.len() || added_total > added.len(),
+    })
 }
 
 fn str_field<'a>(v: &'a [Value], key: &'a str) -> impl Iterator<Item = &'a str> {
@@ -215,8 +241,10 @@ pub fn compare_versions(l: &AppGraph, r: &AppGraph) -> Value {
         .filter_map(|(n, v)| rv.get(n).filter(|w| *w != v).map(|w| json!({"name": n, "from": v, "to": w})))
         .chain(rv.keys().filter(|n| !lv.contains_key(*n)).map(|n| json!({"name": n, "added": true})))
         .chain(lv.keys().filter(|n| !rv.contains_key(*n)).map(|n| json!({"name": n, "removed": true})))
-        .take(2000)
         .collect();
+    let vendors_total = vendor_changes.len();
+    let vendors = vendor_changes.into_iter().take(MAX_COMPARE_ROWS).collect::<Vec<_>>();
+    let vendors_capped = vendors_total > vendors.len();
     let windows = |g: &AppGraph| {
         // An unassigned constructor has no binding, and local bindings can repeat in different
         // functions. Keep each occurrence instead of overwriting all but the last one. The order
@@ -270,21 +298,37 @@ pub fn compare_versions(l: &AppGraph, r: &AppGraph) -> Value {
             })
         })
         .collect();
+    let modules = match_modules(&l.modules, &r.modules);
+    let bundle_modules = match_bundle_modules(l, r);
+    let ipc_channels = diff(&channels(l), &channels(r));
+    let ipc_handlers = diff(&handlers(l), &handlers(r));
+    let bridge_members = diff(&members(l), &members(r));
+    let endpoints = diff(&endpoints(l), &endpoints(r));
+    let urls = diff(&urls(l), &urls(r));
+    let routes = diff(&routes(l), &routes(r));
+    let native_modules = diff(&natives(l), &natives(r));
+    let rows_capped = [&modules, &ipc_channels, &ipc_handlers, &bridge_members, &endpoints, &urls, &routes, &native_modules, &bundle_modules]
+        .iter()
+        .any(|d| d["rows_capped"].as_bool().unwrap_or(false))
+        || vendors_capped;
     json!({
         "left": {"graph_id": l.graph_id, "label": l.label, "version": pkg(l, "version"), "name": pkg(l, "name")},
         "right": {"graph_id": r.graph_id, "label": r.label, "version": pkg(r, "version"), "name": pkg(r, "name")},
         "identical_graph": l.graph_id == r.graph_id,
-        "modules": match_modules(&l.modules, &r.modules),
-        "bundle_modules": match_bundle_modules(l, r),
-        "ipc_channels": diff(&channels(l), &channels(r)),
-        "ipc_handlers": diff(&handlers(l), &handlers(r)),
-        "bridge_members": diff(&members(l), &members(r)),
-        "endpoints": diff(&endpoints(l), &endpoints(r)),
-        "urls": diff(&urls(l), &urls(r)),
-        "routes": diff(&routes(l), &routes(r)),
-        "native_modules": diff(&natives(l), &natives(r)),
-        "vendors": vendor_changes,
+        "modules": modules,
+        "bundle_modules": bundle_modules,
+        "ipc_channels": ipc_channels,
+        "ipc_handlers": ipc_handlers,
+        "bridge_members": bridge_members,
+        "endpoints": endpoints,
+        "urls": urls,
+        "routes": routes,
+        "native_modules": native_modules,
+        "vendors": vendors,
+        "vendors_total": vendors_total,
+        "vendors_capped": vendors_capped,
         "windows": {"changed": window_changes, "left": lw.len(), "right": rw.len()},
+        "rows_capped": rows_capped,
     })
 }
 
@@ -293,6 +337,7 @@ pub fn compare_export_outlines(l: &AppGraph, r: &AppGraph) -> Value {
     let mut rows = Vec::new();
     let mut used = BTreeSet::new();
     let mut changed = 0usize;
+    let mut rows_capped = false;
     for m in l.modules.iter().filter(|m| m.kind == "script") {
         let idx = r
             .modules
@@ -303,6 +348,7 @@ pub fn compare_export_outlines(l: &AppGraph, r: &AppGraph) -> Value {
             Some((i, x)) => {
                 used.insert(i);
                 let d = export_diff(m, x);
+                rows_capped |= d["rows_capped"].as_bool().unwrap_or(false);
                 let same =
                     d["added"].as_array().is_some_and(Vec::is_empty) && d["removed"].as_array().is_some_and(Vec::is_empty) && d.get("module_exports").is_none();
                 if !same {
@@ -318,7 +364,7 @@ pub fn compare_export_outlines(l: &AppGraph, r: &AppGraph) -> Value {
             rows.push(json!({"left": null, "right": x.path, "added": true, "right_outline": x.exports}));
         }
     }
-    json!({"modules": rows, "changed": changed})
+    json!({"modules": rows, "changed": changed, "rows_capped": rows_capped})
 }
 
 #[cfg(test)]
@@ -368,6 +414,119 @@ mod tests {
         let same = compare_versions(&a, &a);
         assert_eq!(same["identical_graph"], true);
         assert_eq!(same["modules"]["unchanged"], 4);
+    }
+
+    /// Caps inside a changed module's function and export diffs reach the module and version totals.
+    #[test]
+    fn module_nested_caps_reach_the_comparison() {
+        let module = |sha: &str, prefix: &str| AppGraph {
+            modules: vec![ModuleSummary {
+                path: "main.js".into(),
+                kind: "script".into(),
+                sha256: sha.into(),
+                functions: (0..2001).map(|i| format!("{prefix}f{i}")).collect(),
+                exports: craft_anything_js::ExportShape { cjs: (0..2001).map(|i| format!("{prefix}e{i}")).collect(), ..Default::default() },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let d = compare_versions(&module("a", "l"), &module("b", "r"));
+        assert_eq!(d["modules"]["rows_capped"], true);
+        assert_eq!(d["rows_capped"], true);
+    }
+
+    /// A capped list keeps its complete total and says rows were cut.
+    #[test]
+    fn diff_caps_rows_but_reports_totals() {
+        let left: BTreeSet<String> = (0..10).map(|i| format!("l{i}")).collect();
+        let right: BTreeSet<String> = (0..2001).map(|i| format!("r{i}")).collect();
+        let d = diff(&left, &right);
+        assert_eq!(d["added"].as_array().unwrap().len(), 2000);
+        assert_eq!(d["added_total"], 2001);
+        assert_eq!(d["removed_total"], 10);
+        assert_eq!(d["rows_capped"], true);
+        let mut one = BTreeSet::new();
+        one.insert("x".to_string());
+        let small = diff(&BTreeSet::new(), &one);
+        assert_eq!(small["rows_capped"], false);
+        assert_eq!(small["added_total"], 1);
+    }
+
+    fn bundle_graph(prefix: &str, n: usize) -> AppGraph {
+        let bundle_modules = (0..n)
+            .map(|i| crate::js_app::BundleModuleSummary {
+                id: format!("id{i}"),
+                format: "esm".into(),
+                sha256: format!("{prefix}s{i}"),
+                fingerprint: format!("{prefix}f{i}"),
+                deps: Vec::new(),
+                line: 0,
+                start: 0,
+                end: 0,
+                strings: Vec::new(),
+                functions: Vec::new(),
+            })
+            .collect();
+        AppGraph {
+            modules: vec![ModuleSummary { path: "dist/bundle.js".into(), kind: "script".into(), bundle_modules, ..Default::default() }],
+            ..Default::default()
+        }
+    }
+
+    /// Bundle-module added and changed rows are capped, and both report their full totals.
+    #[test]
+    fn bundle_module_caps_report_totals() {
+        let added = match_bundle_modules(&bundle_graph("s", 0), &bundle_graph("s", 2001));
+        assert_eq!(added["added"].as_array().unwrap().len(), 2000);
+        assert_eq!(added["added_total"], 2001);
+        assert_eq!(added["rows_capped"], true);
+        let changed = match_bundle_modules(&bundle_graph("old", 2001), &bundle_graph("new", 2001));
+        assert_eq!(changed["changed"].as_array().unwrap().len(), 2000);
+        assert_eq!(changed["changed_total"], 2001);
+        assert_eq!(changed["rows_capped"], true);
+        let same = match_bundle_modules(&bundle_graph("a", 1), &bundle_graph("a", 1));
+        assert_eq!(same["rows_capped"], false);
+    }
+
+    /// A capped IPC channel list marks the whole comparison.
+    #[test]
+    fn version_comparison_marks_capped_channels() {
+        let channels =
+            format!("const {{ ipcMain }} = require('electron');\n{}", (0..2001).map(|i| format!("ipcMain.handle('c{i}', () => {{}});\n")).collect::<String>());
+        let package = r#"{"name":"channels","main":"main.js"}"#.to_string();
+        let left = graph_of(vec![("package.json", package.clone()), ("main.js", String::new())]);
+        let right = graph_of(vec![("package.json", package), ("main.js", channels)]);
+        let d = compare_versions(&left, &right);
+        assert_eq!(d["ipc_channels"]["added"].as_array().unwrap().len(), 2000);
+        assert_eq!(d["ipc_channels"]["added_total"], 2001);
+        assert_eq!(d["rows_capped"], true);
+        assert_eq!(d["bundle_modules"]["rows_capped"], false);
+    }
+
+    /// Vendor changes are capped and say so beside their total.
+    #[test]
+    fn vendor_changes_are_marked_capped() {
+        let left = AppGraph { vendors: (0..2001).map(|i| json!({"name": format!("v{i}"), "version": "1.0.0"})).collect(), ..Default::default() };
+        let d = compare_versions(&left, &AppGraph::default());
+        assert_eq!(d["vendors"].as_array().unwrap().len(), 2000);
+        assert_eq!(d["vendors_total"], 2001);
+        assert_eq!(d["vendors_capped"], true);
+        assert_eq!(d["rows_capped"], true);
+    }
+
+    /// A module's capped export diff marks the export comparison.
+    #[test]
+    fn export_comparison_marks_capped_diffs() {
+        let package = r#"{"name":"exports","main":"main.js"}"#.to_string();
+        let exports = (0..2001).map(|i| format!("e{i}: {i}")).collect::<Vec<_>>().join(", ");
+        let left = graph_of(vec![("package.json", package.clone()), ("main.js", "module.exports = { base: 1 };\n".into())]);
+        let right = graph_of(vec![("package.json", package), ("main.js", format!("module.exports = {{ base: 1, {exports} }};\n"))]);
+        let d = compare_export_outlines(&left, &right);
+        assert_eq!(d["rows_capped"], true);
+        let row = d["modules"].as_array().unwrap().iter().find(|r| r["right"] == "main.js").unwrap();
+        assert_eq!(row["diff"]["added"].as_array().unwrap().len(), 2000);
+        assert_eq!(row["diff"]["added_total"], 2001);
+        assert_eq!(row["diff"]["rows_capped"], true);
     }
 
     fn window_graph(bindings: &[&str], preferences: &[bool], prefix: &str) -> AppGraph {

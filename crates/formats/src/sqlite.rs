@@ -1730,7 +1730,7 @@ fn take_identifier(seg: &str) -> (String, &str) {
             (seg.get(1..).unwrap_or("").to_string(), "")
         }
         Some(_) => {
-            let endp = seg.find([' ', '\t', '\n', '(', ',']).unwrap_or(seg.len());
+            let endp = seg.find([' ', '\t', '\n', '\r', '\u{c}', '(', ',']).unwrap_or(seg.len());
             // A comment may follow the name with no space between: `id/*key*/` or `id--key`.
             let endp = ["--", "/*"].into_iter().filter_map(|mark| seg.get(..endp)?.find(mark)).fold(endp, usize::min);
             (seg.get(..endp).unwrap_or("").to_string(), seg.get(endp..).unwrap_or(""))

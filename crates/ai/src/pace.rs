@@ -45,6 +45,10 @@ impl ChatModel for Paced {
     fn model(&self) -> String {
         self.inner.model()
     }
+
+    fn context_window(&self) -> Option<crate::window::Window> {
+        self.inner.context_window()
+    }
 }
 
 #[cfg(test)]
@@ -62,6 +66,10 @@ mod tests {
         fn model(&self) -> String {
             "m".into()
         }
+
+        fn context_window(&self) -> Option<crate::window::Window> {
+            Some(crate::window::Window { tokens: 32_768, source: "test" })
+        }
     }
 
     fn ask(backend: &str, gap: Duration, stop: &Stop) {
@@ -69,6 +77,12 @@ mod tests {
         assert_eq!(paced.model(), "m");
         let req = TurnRequest { system: "", messages: &[], tools: &[], effort: Effort::Low, max_tokens: 1 };
         assert_eq!(paced.turn(&req, &mut |_| {}, stop).unwrap_err().message, "asked", "the request is still sent");
+    }
+
+    #[test]
+    fn the_servers_window_is_still_read_through_the_pacing() {
+        let paced = Paced { inner: Box::new(Refuses), backend: "window".into(), gap: Duration::from_secs(60) };
+        assert_eq!(paced.context_window().map(|w| w.tokens), Some(32_768));
     }
 
     #[test]

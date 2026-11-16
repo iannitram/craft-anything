@@ -3,8 +3,10 @@
 //! and coverage, and platform projections of artifact inventories. Pure computation over
 //! evidence (or over a path, analysed on the spot).
 
-use super::artifact_tools::{WalkOptions, abs_path, env, inventory_path, is_path_input, recorded_inventory, resolve_evidence_input, walk_dir};
-use super::js_tools::load_graph;
+use super::artifact_tools::{
+    WalkOptions, abs_path, env, inventory_path, is_path_input, recorded_inventory, resolve_evidence_input, skipped_gitignores_limitation, walk_dir,
+};
+use super::js_tools::{load_graph, load_graph_with_limitations};
 use crate::tool::{Ctx, Effects, Requires, ToolOutput, ToolSpec, Toolset, parse_params, schema_of};
 use craft_anything_analysis::js_inventory::{InvLimits, Inventory};
 use craft_anything_analysis::js_ledger::{Binding, Review, build_ledger, evaluate_coverage};
@@ -127,6 +129,11 @@ fn with_links(mut b: EvidenceBuilder, ids: impl IntoIterator<Item = Option<Strin
         b = b.link(id);
     }
     b
+}
+
+/// A side's analysis limitations, labelled so a pair's reader knows which side they belong to.
+fn side_limitations(side: &str, lims: Vec<Limitation>) -> Vec<Limitation> {
+    lims.into_iter().map(|l| Limitation::new(l.code, format!("{side}: {}", l.message))).collect()
 }
 
 fn app_subject(label: &str) -> Subject {
@@ -321,10 +328,11 @@ pub struct PairParams {
 
 fn app_graphs_compare(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
     let p: PairParams = parse_params(params)?;
-    let (l, lid) = load_graph(ctx, &p.left)?;
+    let (l, lid, llims) = load_graph_with_limitations(ctx, &p.left)?;
     ctx.cancel.check()?;
-    let (r, rid) = load_graph(ctx, &p.right)?;
+    let (r, rid, rlims) = load_graph_with_limitations(ctx, &p.right)?;
     let d = js_compare::compare_versions(&l, &r);
+    let rows_capped = d["rows_capped"].as_bool().unwrap_or(false);
     let summary = format!(
         "{} {} → {}: {} module(s) changed, {} added, {} removed; IPC channels +{} −{}; endpoints +{} −{}.",
         l.label,
@@ -333,12 +341,12 @@ fn app_graphs_compare(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, To
         d["modules"]["changed"].as_array().map_or(0, Vec::len),
         d["modules"]["added"].as_array().map_or(0, Vec::len),
         d["modules"]["removed"].as_array().map_or(0, Vec::len),
-        d["ipc_channels"]["added"].as_array().map_or(0, Vec::len),
-        d["ipc_channels"]["removed"].as_array().map_or(0, Vec::len),
-        d["endpoints"]["added"].as_array().map_or(0, Vec::len),
-        d["endpoints"]["removed"].as_array().map_or(0, Vec::len),
+        d["ipc_channels"]["added_total"].as_u64().unwrap_or(0),
+        d["ipc_channels"]["removed_total"].as_u64().unwrap_or(0),
+        d["endpoints"]["added_total"].as_u64().unwrap_or(0),
+        d["endpoints"]["removed_total"].as_u64().unwrap_or(0),
     );
-    let b = EvidenceBuilder::new(
+    let mut b = EvidenceBuilder::new(
         "app_graphs_compare",
         Subject { kind: "js-app-pair".into(), sha256: None, name: Some(format!("{} vs {}", l.label, r.label)) },
         env(ctx),
@@ -350,17 +358,28 @@ fn app_graphs_compare(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, To
     .limitation(Limitation::new(
         "tiered_matching",
         "Modules match by path, then identical content, then the same name apart from a bundler's build hash (one on each side; `was` gives the old name), then identical structure; a heavily rewritten module shows as removed + added.",
-    ));
+    ))
+    .limitations(side_limitations("left", llims))
+    .limitations(side_limitations("right", rlims));
+    if rows_capped {
+        b = b
+            .limitation(Limitation::new(
+                "rows_capped",
+                "One or more comparison lists stop at 2,000 rows; the totals beside each list and the summary count every change.",
+            ))
+            .coverage(Coverage { status: CoverageStatus::Partial, ..Default::default() });
+    }
     Ok(ToolOutput::evidence(with_links(b, [lid, rid]).build()?))
 }
 
 fn js_exports_compare(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
     let p: PairParams = parse_params(params)?;
-    let (l, lid) = load_graph(ctx, &p.left)?;
-    let (r, rid) = load_graph(ctx, &p.right)?;
+    let (l, lid, llims) = load_graph_with_limitations(ctx, &p.left)?;
+    let (r, rid, rlims) = load_graph_with_limitations(ctx, &p.right)?;
     let d = js_compare::compare_export_outlines(&l, &r);
+    let rows_capped = d["rows_capped"].as_bool().unwrap_or(false);
     let summary = format!("{} module(s) compared; {} changed their exports.", d["modules"].as_array().map_or(0, Vec::len), d["changed"]);
-    let b = EvidenceBuilder::new(
+    let mut b = EvidenceBuilder::new(
         "js_exports_compare",
         Subject { kind: "js-app-pair".into(), sha256: None, name: Some(format!("{} vs {}", l.label, r.label)) },
         env(ctx),
@@ -369,7 +388,14 @@ fn js_exports_compare(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, To
     .result(d)
     .summary(summary)
     .confidence(Confidence::Derived)
-    .limitation(Limitation::new("names_only", "Export names and module.exports kind are compared, not function signatures or types."));
+    .limitation(Limitation::new("names_only", "Export names and module.exports kind are compared, not function signatures or types."))
+    .limitations(side_limitations("left", llims))
+    .limitations(side_limitations("right", rlims));
+    if rows_capped {
+        b = b
+            .limitation(Limitation::new("rows_capped", "A module's export diff stops at 2,000 added or removed rows; the totals beside it are complete."))
+            .coverage(Coverage { status: CoverageStatus::Partial, ..Default::default() });
+    }
     Ok(ToolOutput::evidence(with_links(b, [lid, rid]).build()?))
 }
 
@@ -407,7 +433,7 @@ fn default_src_total() -> u64 {
     512 * 1024 * 1024
 }
 
-fn source_graph_from_path(ctx: &Ctx<'_>, p: &ImportSourceParams) -> Result<SourceGraph, ToolError> {
+fn source_graph_from_path(ctx: &Ctx<'_>, p: &ImportSourceParams) -> Result<(SourceGraph, Vec<(String, String)>), ToolError> {
     let root = abs_path(&p.path, "path")?;
     if !root.is_dir() {
         return Err(ToolError::invalid(format!("{} is not a folder", root.display())));
@@ -436,13 +462,14 @@ fn source_graph_from_path(ctx: &Ctx<'_>, p: &ImportSourceParams) -> Result<Sourc
     }
     let label = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let cancel = ctx.cancel.clone();
-    build_source_graph(&label, &files, w.ignored, w.truncated || over, &craft_anything_js::Limits::default(), &move || cancel.is_cancelled())
-        .map_err(|_| ToolError::cancelled())
+    let graph = build_source_graph(&label, &files, w.ignored, w.truncated || over, &craft_anything_js::Limits::default(), &move || cancel.is_cancelled())
+        .map_err(|_| ToolError::cancelled())?;
+    Ok((graph, w.skipped_gitignores))
 }
 
 fn app_source_import(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
     let p: ImportSourceParams = parse_params(params)?;
-    let g = source_graph_from_path(ctx, &p)?;
+    let (g, skipped_gitignores) = source_graph_from_path(ctx, &p)?;
     let scripts = g.files.iter().filter(|f| f.parse_mode.is_some()).count();
     let summary = format!("{}: {} file(s), {} script(s) analysed, {} ignored.", g.label, g.files.len(), scripts, g.ignored);
     let mut b = EvidenceBuilder::new(
@@ -464,6 +491,9 @@ fn app_source_import(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Too
     .location(Location::new("path", p.path.clone()));
     if g.truncated {
         b = b.limitation(Limitation::new("truncated", "Some files were skipped by the size or count limits."));
+    }
+    if let Some(l) = skipped_gitignores_limitation(&skipped_gitignores) {
+        b = b.limitation(l);
     }
     b = b.limitation(Limitation::new(
         "reference_claim",
@@ -487,9 +517,11 @@ fn default_rows() -> usize {
     2000
 }
 
+/// Compare a reference source tree with a shipped bundle, carrying a source map's unread external
+/// sections and the row cap into the evidence as uncertainty rather than absent sources.
 fn compare_source_to_bundle_tool(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
     let p: SourceBundleParams = parse_params(params)?;
-    let (src, sid) = if let Some(path) = is_path_input(&p.source) {
+    let (src, sid, skipped_gitignores) = if let Some(path) = is_path_input(&p.source) {
         let ip = ImportSourceParams {
             path: path.into(),
             respect_gitignore: true,
@@ -498,21 +530,26 @@ fn compare_source_to_bundle_tool(ctx: &mut Ctx<'_>, params: Value) -> Result<Too
             max_file_bytes: default_src_file_bytes(),
             max_total_bytes: default_src_total(),
         };
-        (source_graph_from_path(ctx, &ip)?, None)
+        let (g, skipped) = source_graph_from_path(ctx, &ip)?;
+        (g, None, skipped)
     } else {
         let ev = resolve_evidence_input(ctx, &p.source, &["app_source_import"])?;
         let g: SourceGraph =
             serde_json::from_value(ev.result.clone()).map_err(|e| ToolError::invalid(format!("evidence {} has no source graph: {e}", ev.id)))?;
-        (g, Some(ev.id))
+        (g, Some(ev.id), Vec::new())
     };
     let (app, aid) = load_graph(ctx, &p.application)?;
-    let d = diff_source_and_bundle(&src, &app, p.max_rows.clamp(1, 100_000));
+    let max_rows = p.max_rows.clamp(1, 100_000);
+    let d = diff_source_and_bundle(&src, &app, max_rows);
     let s = &d["summary"];
     let summary = format!(
-        "{} of {} source script(s) matched shipped code; {} unmatched; {} uncertain; {} bundle unit(s) with no observed source match.",
-        s["matched"], s["source_scripts"], s["unmatched_sources"], s["uncertain_sources"], s["bundle_units_without_source"]
+        "{} of {} source script(s) examined; {} matched; {} unmatched; {} uncertain; {} bundle unit(s) with no observed source match.",
+        s["scripts_examined"], s["source_scripts"], s["matched"], s["unmatched_sources"], s["uncertain_sources"], s["bundle_units_without_source"]
     );
+    let rows_capped = d["rows_capped"].as_bool().unwrap_or(false);
     let inventory_truncated = d["source_map_inventory_truncated"].as_bool().unwrap_or(false);
+    let map_external = d["source_map_external_sections"].as_bool().unwrap_or(false);
+    let map_unreadable = d["source_map_unreadable"].as_bool().unwrap_or(false);
     let mut b = EvidenceBuilder::new(
         "js_source_bundle_compare",
         Subject { kind: "source-bundle-pair".into(), sha256: None, name: Some(format!("{} vs {}", src.label, app.label)) },
@@ -533,6 +570,35 @@ fn compare_source_to_bundle_tool(ctx: &mut Ctx<'_>, params: Value) -> Result<Too
                 "Some source-map paths were omitted by inventory or source-map limits; sources without an observed match are uncertain, not confirmed absent.",
             ))
             .coverage(Coverage { status: CoverageStatus::Partial, ..Default::default() });
+    }
+    if map_external {
+        b = b
+            .limitation(Limitation::new(
+                "source_map_external_sections",
+                "A source map points at an external map that wasn't read; sources without an observed match are uncertain, not confirmed absent.",
+            ))
+            .coverage(Coverage { status: CoverageStatus::Partial, ..Default::default() });
+    }
+    if map_unreadable {
+        b = b
+            .limitation(Limitation::new(
+                "source_map_unreadable",
+                "A source map was malformed or not loaded; sources without an observed match are uncertain, not confirmed absent.",
+            ))
+            .coverage(Coverage { status: CoverageStatus::Partial, ..Default::default() });
+    }
+    if rows_capped {
+        b = b
+            .limitation(Limitation::new(
+                "rows_capped",
+                format!(
+                    "At most {max_rows} source scripts are compared and at most {max_rows} rows are listed; the match counts cover the examined scripts, and bundle units without an observed source are counted in full."
+                ),
+            ))
+            .coverage(Coverage { status: CoverageStatus::Partial, ..Default::default() });
+    }
+    if let Some(l) = skipped_gitignores_limitation(&skipped_gitignores) {
+        b = b.limitation(l);
     }
     Ok(ToolOutput::evidence(with_links(b, [sid, aid]).build()?))
 }
@@ -872,6 +938,126 @@ mod tests {
         assert_eq!(c["confidence"], "inferred");
     }
 
+    /// A `.gitignore` too large to read whole is skipped, and the evidence says so: its rules no
+    /// longer hide files. The same applies to a nested one.
+    #[test]
+    fn oversized_gitignores_are_skipped_and_disclosed() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        fx::write_files(
+            &src,
+            &[
+                ("src/api.js", "exports.a = 1;\n".to_string()),
+                ("generated/skip.js", "nope".to_string()),
+                ("sub/secret.js", "nope".to_string()),
+                (".gitignore", "generated/\n".to_string()),
+                ("sub/.gitignore", "secret.js\n".to_string()),
+            ],
+        )
+        .unwrap();
+        for rel in [".gitignore", "sub/.gitignore"] {
+            let f = std::fs::OpenOptions::new().write(true).open(src.join(rel)).unwrap();
+            f.set_len(8 * 1024 * 1024).unwrap();
+        }
+        let e = Engine::new(crate::testing::session());
+        let s = call(&e, "app_source_import", json!({"path": src})).unwrap();
+        let paths: Vec<&str> = s["result"]["files"].as_array().unwrap().iter().filter_map(|f| f["path"].as_str()).collect();
+        assert!(paths.contains(&"generated/skip.js"), "{paths:?}");
+        assert!(paths.contains(&"sub/secret.js"), "{paths:?}");
+        let limitations = s["limitations"].as_array().unwrap();
+        let message = limitations.iter().find(|l| l["code"] == "gitignore_skipped").and_then(|l| l["message"].as_str()).unwrap_or("");
+        assert!(message.starts_with("2 .gitignore"), "{message}");
+        assert!(message.contains("sub/.gitignore"), "{message}");
+    }
+
+    /// A `.gitignore` that isn't a regular file can't block the walk; it is skipped and disclosed.
+    #[test]
+    fn a_non_regular_gitignore_is_disclosed() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        fx::write_files(&src, &[("src/api.js", String::new())]).unwrap();
+        std::fs::create_dir(src.join(".gitignore")).unwrap();
+        let e = Engine::new(crate::testing::session());
+        let s = call(&e, "app_source_import", json!({"path": src})).unwrap();
+        let limitations = s["limitations"].as_array().unwrap();
+        assert!(
+            limitations.iter().any(|l| l["code"] == "gitignore_skipped" && l["message"].as_str().is_some_and(|m| m.contains("not a regular file"))),
+            "{limitations:?}"
+        );
+    }
+
+    /// A `.gitignore` that isn't UTF-8 is skipped and disclosed instead of vanishing.
+    #[test]
+    fn a_non_utf8_gitignore_is_disclosed() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        fx::write_files(&src, &[("src/api.js", String::new())]).unwrap();
+        std::fs::write(src.join(".gitignore"), [0xff, 0xfe]).unwrap();
+        let e = Engine::new(crate::testing::session());
+        let s = call(&e, "app_source_import", json!({"path": src})).unwrap();
+        let limitations = s["limitations"].as_array().unwrap();
+        assert!(
+            limitations.iter().any(|l| l["code"] == "gitignore_skipped" && l["message"].as_str().is_some_and(|m| m.contains("not UTF-8"))),
+            "{limitations:?}"
+        );
+    }
+
+    /// A `.gitignore` that is a symlink to a regular file still applies: the cap must not reject
+    /// ordinary symlinked ignore files.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_gitignore_still_applies() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        fx::write_files(&src, &[("src/api.js", String::new()), ("generated/skip.js", "nope".to_string()), ("ignore.rules", "generated/\n".to_string())])
+            .unwrap();
+        std::os::unix::fs::symlink("ignore.rules", src.join(".gitignore")).unwrap();
+        let e = Engine::new(crate::testing::session());
+        let s = call(&e, "app_source_import", json!({"path": src})).unwrap();
+        let paths: Vec<&str> = s["result"]["files"].as_array().unwrap().iter().filter_map(|f| f["path"].as_str()).collect();
+        assert!(!paths.contains(&"generated/skip.js"), "{paths:?}");
+        assert!(!s["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "gitignore_skipped"), "{s}");
+    }
+
+    /// A comparison that examines one of two scripts says so, marks the rows capped, and carries
+    /// partial coverage with the limitation.
+    #[test]
+    fn source_comparison_discloses_capped_rows_and_examined_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("reference");
+        fx::write_files(&src, &[("src/a.js", "const a = 1;\n".to_string()), ("src/b.js", "const b = 2;\n".to_string())]).unwrap();
+        let dist = dir.path().join("dist");
+        fx::write_files(&dist, &[("main.js", "const main = 3;\n".to_string())]).unwrap();
+        let e = Engine::new(crate::testing::session());
+        let comparison = call(&e, "js_source_bundle_compare", json!({"source": src, "application": dist, "max_rows": 1})).unwrap();
+        assert_eq!(comparison["result"]["summary"]["scripts_examined"], 1, "{}", comparison["result"]);
+        assert_eq!(comparison["result"]["summary"]["source_scripts"], 2);
+        assert_eq!(comparison["result"]["summary"]["bundle_units_without_source"], 1);
+        assert_eq!(comparison["result"]["rows_capped"], true);
+        let limitations = comparison["limitations"].as_array().unwrap();
+        assert!(limitations.iter().any(|l| l["code"] == "rows_capped"), "{limitations:?}");
+        assert_eq!(comparison["coverage"]["status"], "partial");
+        let summary = comparison["summary"].as_str().unwrap();
+        assert!(summary.contains("1 of 2 source script(s) examined"), "{summary}");
+    }
+
+    #[test]
+    fn source_comparison_discloses_an_unreadable_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("reference");
+        fx::write_files(&src, &[("src/kept.js", String::new())]).unwrap();
+        let dist = dir.path().join("dist");
+        fx::write_files(&dist, &[("main.js", "//# sourceMappingURL=main.js.map\n".to_string()), ("main.js.map", "{\"version\":2}".to_string())]).unwrap();
+        let e = Engine::new(crate::testing::session());
+        let source = call(&e, "app_source_import", json!({"path": src})).unwrap();
+        let comparison = call(&e, "js_source_bundle_compare", json!({"source": retained(&source), "application": dist})).unwrap();
+        assert_eq!(comparison["result"]["source_map_unreadable"], true);
+        assert_eq!(comparison["result"]["unmatched_sources"], json!([]));
+        assert_eq!(comparison["result"]["uncertain_sources"], json!([{"source": "src/kept.js", "reason": "source_map_unreadable"}]));
+        assert!(comparison["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "source_map_unreadable"));
+        assert_eq!(comparison["coverage"]["status"], "partial");
+    }
+
     #[test]
     fn source_comparison_discloses_incomplete_map_inventories() {
         for truncated in [false, true] {
@@ -923,6 +1109,43 @@ mod tests {
         }
     }
 
+    /// A comparison with a map whose external section was never read names that section in its
+    /// limitation and reports an otherwise unmatched source as uncertain.
+    #[test]
+    fn source_comparison_discloses_unread_external_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("reference");
+        fx::write_files(&src, &[("src/kept.js", String::new()), ("src/vendor.js", String::new())]).unwrap();
+        let dist = dir.path().join("dist");
+        fx::write_files(
+            &dist,
+            &[
+                ("main.js", "//# sourceMappingURL=main.js.map\n".to_string()),
+                (
+                    "main.js.map",
+                    json!({
+                        "version": 3,
+                        "sections": [
+                            {"offset": {"line": 0, "column": 0}, "map": {"version": 3, "sourceRoot": "src", "sources": ["kept.js"], "mappings": ""}},
+                            {"offset": {"line": 10, "column": 0}, "url": "vendor.js.map"}
+                        ]
+                    })
+                    .to_string(),
+                ),
+            ],
+        )
+        .unwrap();
+        let e = Engine::new(crate::testing::session());
+        let source = call(&e, "app_source_import", json!({"path": src})).unwrap();
+        let comparison = call(&e, "js_source_bundle_compare", json!({"source": retained(&source), "application": dist})).unwrap();
+        assert_eq!(comparison["result"]["summary"]["matched"], 1, "{}", comparison["result"]);
+        assert_eq!(comparison["result"]["source_map_external_sections"], true);
+        assert_eq!(comparison["result"]["unmatched_sources"], json!([]));
+        assert_eq!(comparison["result"]["uncertain_sources"], json!([{"source": "src/vendor.js", "reason": "source_map_external_sections"}]));
+        assert!(comparison["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "source_map_external_sections"));
+        assert_eq!(comparison["coverage"]["status"], "partial");
+    }
+
     #[test]
     fn projections_from_paths_and_evidence() {
         let dir = tempfile::tempdir().unwrap();
@@ -947,5 +1170,124 @@ mod tests {
         assert_eq!(q["links"][0], inv["id"]);
         let h = call(&e, "harmony_app_graph_build", json!({"path": apk})).unwrap();
         assert_eq!(h["confidence"], "inferred");
+    }
+
+    /// A malformed source map on either side stays visible in both comparisons, for path inputs and
+    /// for saved `js_app_map` evidence.
+    #[test]
+    fn comparisons_keep_each_sides_analysis_limitations() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = r#"{"name":"maps","main":"main.js"}"#;
+        let write = |root: &std::path::Path| {
+            fx::write_files(
+                root,
+                &[
+                    ("package.json", package.to_string()),
+                    ("main.js", "const x = 1;\n//# sourceMappingURL=main.js.map\n".to_string()),
+                    ("main.js.map", "not a source map".to_string()),
+                ],
+            )
+            .unwrap()
+        };
+        let left = write(&dir.path().join("left"));
+        let right = write(&dir.path().join("right"));
+        let e = Engine::new(crate::testing::session());
+        let assert_sides = |tool: &str, d: &Value| {
+            let lims = d["limitations"].as_array().unwrap();
+            for side in ["left:", "right:"] {
+                assert!(
+                    lims.iter().any(|l| l["code"] == "source_map_unreadable" && l["message"].as_str().unwrap().starts_with(side)),
+                    "{tool} keeps the {side} source-map limitation: {d}"
+                );
+            }
+        };
+        for tool in ["app_graphs_compare", "js_exports_compare"] {
+            let d = call(&e, tool, json!({"left": left.clone(), "right": right.clone()})).unwrap();
+            assert_sides(tool, &d);
+        }
+        let l = call(&e, "js_app_map", json!({"input_path": left})).unwrap();
+        let r = call(&e, "js_app_map", json!({"input_path": right})).unwrap();
+        for tool in ["app_graphs_compare", "js_exports_compare"] {
+            let d = call(&e, tool, json!({"left": retained(&l), "right": retained(&r)})).unwrap();
+            assert_sides(tool, &d);
+        }
+    }
+
+    /// A clean path pair gains no source-map limitation.
+    #[test]
+    fn clean_comparisons_have_no_analysis_limitations() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = r#"{"name":"clean","main":"main.js"}"#;
+        let write = |root: &std::path::Path| {
+            fx::write_files(root, &[("package.json", package.to_string()), ("main.js", "module.exports = { x: 1 };\n".to_string())]).unwrap()
+        };
+        let left = write(&dir.path().join("left"));
+        let right = write(&dir.path().join("right"));
+        let e = Engine::new(crate::testing::session());
+        for tool in ["app_graphs_compare", "js_exports_compare"] {
+            let path = call(&e, tool, json!({"left": left.clone(), "right": right.clone()})).unwrap();
+            assert!(!path["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "source_map_unreadable"), "{tool} path inputs: {path}");
+        }
+    }
+
+    /// A comparison whose channel list is cut reports complete totals and partial coverage.
+    #[test]
+    fn app_graph_comparison_discloses_capped_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = r#"{"name":"channels","main":"main.js"}"#.to_string();
+        let channels =
+            format!("const {{ ipcMain }} = require('electron');\n{}", (0..2001).map(|i| format!("ipcMain.handle('c{i}', () => {{}});\n")).collect::<String>());
+        let left = fx::write_files(&dir.path().join("left"), &[("package.json", package.clone()), ("main.js", String::new())]).unwrap();
+        let right = fx::write_files(&dir.path().join("right"), &[("package.json", package), ("main.js", channels)]).unwrap();
+        let e = Engine::new(crate::testing::session());
+        let d = call(&e, "app_graphs_compare", json!({"left": left, "right": right})).unwrap();
+        assert_eq!(d["result"]["ipc_channels"]["added_total"], 2001);
+        assert_eq!(d["result"]["ipc_channels"]["added"].as_array().unwrap().len(), 2000);
+        assert_eq!(d["result"]["rows_capped"], true);
+        assert!(d["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "rows_capped"), "{d}");
+        assert_eq!(d["coverage"]["status"], "partial");
+        let summary = d["summary"].as_str().unwrap();
+        assert!(summary.contains("IPC channels +2001 −0"), "{summary}");
+    }
+
+    /// Caps inside a changed module's function and export diffs mark the comparison too.
+    #[test]
+    fn app_graph_comparison_discloses_nested_module_caps() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = r#"{"name":"exports","main":"main.js"}"#.to_string();
+        let exports = |prefix: &str| (0..2001).map(|i| format!("{prefix}{i}: {i}")).collect::<Vec<_>>().join(", ");
+        let left =
+            fx::write_files(&dir.path().join("left"), &[("package.json", package.clone()), ("main.js", format!("module.exports = {{ {} }};\n", exports("l")))])
+                .unwrap();
+        let right =
+            fx::write_files(&dir.path().join("right"), &[("package.json", package), ("main.js", format!("module.exports = {{ {} }};\n", exports("r")))])
+                .unwrap();
+        let e = Engine::new(crate::testing::session());
+        let d = call(&e, "app_graphs_compare", json!({"left": left, "right": right})).unwrap();
+        assert_eq!(d["result"]["modules"]["rows_capped"], true, "{d}");
+        assert_eq!(d["result"]["rows_capped"], true, "{d}");
+        assert!(d["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "rows_capped"), "{d}");
+        assert_eq!(d["coverage"]["status"], "partial");
+    }
+
+    /// A capped export diff marks the export comparison and its coverage.
+    #[test]
+    fn export_comparison_discloses_capped_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = r#"{"name":"exports","main":"main.js"}"#.to_string();
+        let exports = (0..2001).map(|i| format!("e{i}: {i}")).collect::<Vec<_>>().join(", ");
+        let left = fx::write_files(&dir.path().join("left"), &[("package.json", package.clone()), ("main.js", "module.exports = { base: 1 };\n".to_string())])
+            .unwrap();
+        let right =
+            fx::write_files(&dir.path().join("right"), &[("package.json", package), ("main.js", format!("module.exports = {{ base: 1, {exports} }};\n"))])
+                .unwrap();
+        let e = Engine::new(crate::testing::session());
+        let d = call(&e, "js_exports_compare", json!({"left": left, "right": right})).unwrap();
+        assert_eq!(d["result"]["rows_capped"], true);
+        assert!(d["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "rows_capped"), "{d}");
+        assert_eq!(d["coverage"]["status"], "partial");
+        let row = d["result"]["modules"].as_array().unwrap().iter().find(|r| r["right"] == "main.js").unwrap();
+        assert_eq!(row["diff"]["added_total"], 2001);
+        assert_eq!(row["diff"]["added"].as_array().unwrap().len(), 2000);
     }
 }

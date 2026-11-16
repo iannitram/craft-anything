@@ -119,15 +119,29 @@ pub fn pe_with_certificate(pe: &[u8], cert_type: u16, payload: &[u8]) -> Vec<u8>
 }
 
 /// The file hash Authenticode signs, worked out here on its own so that a test of the reader
-/// doesn't compare it with itself: everything except the checksum, the security directory entry
-/// and the table.
+/// doesn't compare it with itself, for a file whose certificate table goes at its end: the
+/// headers up to `SizeOfHeaders` less the checksum and the security directory entry, each section
+/// in file order, then the file from the offset the count of hashed bytes reaches. Bytes between
+/// sections are left out.
 fn authenticode_sha256(padded_pe: &[u8]) -> [u8; 32] {
+    let at = |o: usize, n: usize| padded_pe[o..o + n].iter().rev().fold(0usize, |v, b| (v << 8) | usize::from(*b));
     let checksum = OPT + 64;
     let entry = DIRS + 4 * 8;
+    let headers = at(OPT + 60, 4);
+    let table = OPT + at(0x84 + 16, 2);
+    let mut sections: Vec<(usize, usize)> = (0..at(0x84 + 2, 2)).map(|i| (at(table + i * 40 + 20, 4), at(table + i * 40 + 16, 4))).collect();
+    sections.retain(|s| s.1 > 0);
+    sections.sort_by_key(|s| s.0);
     let mut v = Vec::new();
     v.extend_from_slice(&padded_pe[..checksum]);
     v.extend_from_slice(&padded_pe[checksum + 4..entry]);
-    v.extend_from_slice(&padded_pe[entry + 8..]);
+    v.extend_from_slice(&padded_pe[entry + 8..headers]);
+    let mut count = headers;
+    for (offset, size) in sections {
+        v.extend_from_slice(&padded_pe[offset..offset + size]);
+        count += size;
+    }
+    v.extend_from_slice(&padded_pe[count.min(padded_pe.len())..]);
     sha256(&v)
 }
 
@@ -168,14 +182,31 @@ pub fn authenticode_block(file_digest: &[u8; 32], cn: &str, o: &str, with_timest
     seq(&[der_oid("1.2.840.113549.1.7.2"), der(0xa0, &signed)])
 }
 
-/// [`pe_facts`] genuinely signed by "Craft Signer".
-pub fn signed_pe() -> Vec<u8> {
-    let mut pe = pe_facts();
+/// `pe`, padded to eight bytes and genuinely signed by "Craft Signer".
+pub fn sign_pe(mut pe: Vec<u8>) -> Vec<u8> {
     while pe.len() % 8 != 0 {
         pe.push(0);
     }
     let digest = authenticode_sha256(&pe);
     pe_with_certificate(&pe, 2, &authenticode_block(&digest, "Craft Signer", "Craft Org", true))
+}
+
+/// [`pe_facts`] genuinely signed by "Craft Signer".
+pub fn signed_pe() -> Vec<u8> {
+    sign_pe(pe_facts())
+}
+
+/// [`pe_facts`] with `gap` bytes of `fill` before its last section, `.facts`, which moves along:
+/// no section covers the bytes left between `.rsrc` and `.facts`.
+pub fn pe_facts_with_gap(gap: usize, fill: u8) -> Vec<u8> {
+    let pe = pe_facts();
+    let sh = OPT + 240 + 4 * 40;
+    let raw = u32::from_le_bytes(pe[sh + 20..sh + 24].try_into().unwrap()) as usize;
+    let mut out = pe[..raw].to_vec();
+    out.resize(raw + gap, fill);
+    out.extend_from_slice(&pe[raw..]);
+    out[sh + 20..sh + 24].copy_from_slice(&((raw + gap) as u32).to_le_bytes());
+    out
 }
 
 /// A little-endian ELF64 shared library exporting `alpha@LIB_1.0`, `beta@LIB_2.0` (weak data) and

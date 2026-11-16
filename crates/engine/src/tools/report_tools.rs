@@ -17,6 +17,9 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Most distinct limitations a report lists before it says how many more were omitted.
+const MAX_REPORTED_LIMITATIONS: usize = 30;
+
 pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
@@ -324,8 +327,11 @@ fn render_markdown(d: &ReportData<'_>) -> String {
     let lims = d.limitations();
     if !lims.is_empty() {
         s.push_str("- **Limitations:**\n");
-        for l in lims.iter().take(30) {
+        for l in lims.iter().take(MAX_REPORTED_LIMITATIONS) {
             s.push_str(&format!("  - {l}\n"));
+        }
+        if lims.len() > MAX_REPORTED_LIMITATIONS {
+            s.push_str(&format!("  - … and {} more limitation(s) omitted\n", lims.len() - MAX_REPORTED_LIMITATIONS));
         }
     }
     s.push('\n');
@@ -474,8 +480,11 @@ fn render_html(d: &ReportData<'_>) -> String {
     let lims = d.limitations();
     if !lims.is_empty() {
         s.push_str("<h3>Limitations</h3>\n<ul>\n");
-        for l in lims.iter().take(30) {
+        for l in lims.iter().take(MAX_REPORTED_LIMITATIONS) {
             s.push_str(&format!("<li>{}</li>\n", esc(l)));
+        }
+        if lims.len() > MAX_REPORTED_LIMITATIONS {
+            s.push_str(&format!("<li>… and {} more limitation(s) omitted</li>\n", lims.len() - MAX_REPORTED_LIMITATIONS));
         }
         s.push_str("</ul>\n");
     }
@@ -551,7 +560,7 @@ th { color: var(--muted); font-weight: 600; }\n\
 mod tests {
     use crate::project::{Project, Purpose};
     use crate::{CallOptions, Caller, Engine};
-    use craft_anything_evidence::{Confidence, Environment, EvidenceBuilder, Location, Subject};
+    use craft_anything_evidence::{Confidence, Environment, EvidenceBuilder, Limitation, Location, Subject};
     use serde_json::json;
 
     fn call(e: &Engine, id: &str, p: serde_json::Value) -> Result<serde_json::Value, craft_anything_evidence::ToolError> {
@@ -681,5 +690,29 @@ mod tests {
         let without = call(&e, "core_report_write", json!({"include_evidence": false})).unwrap();
         assert!(with["result"]["report"].as_str().unwrap().contains("## Evidence ledger"));
         assert!(!without["result"]["report"].as_str().unwrap().contains("## Evidence ledger"));
+    }
+
+    /// A report lists at most 30 limitations and says how many it omitted, in both formats.
+    #[test]
+    fn reports_disclose_limitations_omitted_after_thirty() {
+        let (e, _id1, _id2) = seeded_engine();
+        let subject = Subject { kind: "native".into(), sha256: Some("ef".repeat(32)), name: Some("limits.exe".into()) };
+        for i in 0..31 {
+            let ev = EvidenceBuilder::new("core_overview_show", subject.clone(), Environment::builtin(true))
+                .result(json!({"index": i}))
+                .summary(format!("evidence {i}"))
+                .confidence(Confidence::Observed)
+                .limitation(Limitation::new("test_cap", format!("limitation {i:02}")))
+                .build()
+                .unwrap();
+            e.session().record(ev).unwrap();
+        }
+        for (format, marker) in [("markdown", "  - … and 1 more limitation(s) omitted"), ("html", "<li>… and 1 more limitation(s) omitted</li>")] {
+            let r = call(&e, "core_report_write", json!({"format": format})).unwrap();
+            let text = r["result"]["report"].as_str().unwrap();
+            assert!(text.contains(marker), "{format}: {text}");
+            assert!(text.contains("limitation 29"), "{format}: last listed limitation missing");
+            assert!(!text.contains("limitation 30"), "{format}: omitted limitation was rendered");
+        }
     }
 }

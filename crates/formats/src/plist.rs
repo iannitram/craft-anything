@@ -439,322 +439,73 @@ impl Bin<'_> {
 // ---------------------------------------------------------------------------------------------
 // XML
 
-#[derive(Debug, Clone, PartialEq)]
-enum Tok {
-    Open(String),
-    Close(String),
-    Empty(String),
-    Text(String),
-}
-
-fn decode_entities(s: &str) -> String {
-    if !s.contains('&') {
-        return s.to_string();
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(p) = rest.find('&') {
-        out.push_str(rest.get(..p).unwrap_or(""));
-        let after = rest.get(p..).unwrap_or("");
-        let Some(end) = after.find(';').filter(|&e| e <= 12) else {
-            out.push('&');
-            rest = after.get(1..).unwrap_or("");
-            continue;
-        };
-        let ent = after.get(1..end).unwrap_or("");
-        let rep = match ent {
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "amp" => Some('&'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            e if e.starts_with("#x") || e.starts_with("#X") => {
-                let d = e.get(2..).unwrap_or("");
-                if d.bytes().all(|b| b.is_ascii_hexdigit()) { u32::from_str_radix(d, 16).ok().and_then(char::from_u32) } else { None }
-            }
-            e if e.starts_with('#') => {
-                let d = e.get(1..).unwrap_or("");
-                if d.bytes().all(|b| b.is_ascii_digit()) { d.parse::<u32>().ok().and_then(char::from_u32) } else { None }
-            }
-            _ => None,
-        };
-        match rep {
-            Some(c) => {
-                out.push(c);
-                rest = after.get(end + 1..).unwrap_or("");
-            }
-            None => {
-                out.push('&');
-                rest = after.get(1..).unwrap_or("");
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Skip a declaration without interpreting or fetching any entity. A DOCTYPE's
-/// internal subset can itself contain declarations, quoted delimiters, comments and PIs.
-fn after_declaration(mut rest: &str) -> Result<&str, FormatError> {
-    let mut quote = None;
-    let mut brackets = 0usize;
-    while let Some(ch) = rest.chars().next() {
-        if quote.is_none() {
-            if let Some(comment) = rest.strip_prefix("<!--") {
-                rest = comment.split_once("-->").ok_or_else(|| FormatError::Truncated("comment in declaration".into()))?.1;
-                continue;
-            }
-            if let Some(pi) = rest.strip_prefix("<?") {
-                rest = pi.split_once("?>").ok_or_else(|| FormatError::Truncated("processing instruction in declaration".into()))?.1;
-                continue;
-            }
-        }
-        rest = rest.get(ch.len_utf8()..).unwrap_or("");
-        match (quote, ch) {
-            (Some(q), c) if q == c => quote = None,
-            (None, '\'' | '"') => quote = Some(ch),
-            (None, '[') => brackets += 1,
-            (None, ']') => brackets = brackets.saturating_sub(1),
-            (None, '>') if brackets == 0 => return Ok(rest),
-            _ => {}
-        }
-    }
-    Err(FormatError::Truncated("declaration".into()))
-}
-
-fn tokenize(text: &str) -> Result<Vec<Tok>, FormatError> {
-    let mut toks = Vec::new();
-    let mut rest = text;
-    while !rest.is_empty() {
-        if toks.len() > MAX_NODES {
-            return Err(FormatError::TooLarge("too many XML tokens".into()));
-        }
-        match rest.find('<') {
-            None => {
-                if !rest.is_empty() {
-                    toks.push(Tok::Text(decode_entities(rest)));
-                }
-                break;
-            }
-            Some(p) => {
-                let t = rest.get(..p).unwrap_or("");
-                if !t.is_empty() {
-                    toks.push(Tok::Text(decode_entities(t)));
-                }
-                rest = rest.get(p..).unwrap_or("");
-            }
-        }
-        if let Some(r) = rest.strip_prefix("<!--") {
-            let e = r.find("-->").ok_or_else(|| FormatError::Truncated("comment".into()))?;
-            rest = r.get(e + 3..).unwrap_or("");
-            continue;
-        }
-        if let Some(r) = rest.strip_prefix("<![CDATA[") {
-            let e = r.find("]]>").ok_or_else(|| FormatError::Truncated("CDATA".into()))?;
-            toks.push(Tok::Text(r.get(..e).unwrap_or("").to_string()));
-            rest = r.get(e + 3..).unwrap_or("");
-            continue;
-        }
-        if let Some(r) = rest.strip_prefix("<?") {
-            let end = r.find("?>").ok_or_else(|| FormatError::Truncated("processing instruction".into()))?;
-            rest = r.get(end + 2..).unwrap_or("");
-            continue;
-        }
-        if let Some(declaration) = rest.strip_prefix("<!") {
-            rest = after_declaration(declaration)?;
-            continue;
-        }
-        let e = rest.find('>').ok_or_else(|| FormatError::Truncated("tag".into()))?;
-        let inner = rest.get(1..e).unwrap_or("").trim();
-        rest = rest.get(e + 1..).unwrap_or("");
-        if let Some(name) = inner.strip_prefix('/') {
-            toks.push(Tok::Close(name.trim().to_string()));
-        } else if let Some(body) = inner.strip_suffix('/') {
-            toks.push(Tok::Empty(body.split_whitespace().next().unwrap_or("").to_string()));
-        } else {
-            toks.push(Tok::Open(inner.split_whitespace().next().unwrap_or("").to_string()));
-        }
-    }
-    Ok(toks)
-}
-
-struct Xml {
-    toks: Vec<Tok>,
-    pos: usize,
-    nodes: usize,
-}
-
-impl Xml {
-    fn next(&mut self) -> Option<Tok> {
-        let t = self.toks.get(self.pos).cloned();
-        self.pos += 1;
-        t
-    }
-
-    fn peek(&self) -> Option<&Tok> {
-        self.toks.get(self.pos)
-    }
-
-    /// Text up to the closing tag `name`.
-    fn text_until(&mut self, name: &str) -> Result<String, FormatError> {
-        let mut s = String::new();
-        loop {
-            match self.next() {
-                Some(Tok::Text(t)) => s.push_str(&t),
-                Some(Tok::Close(n)) if n == name => return Ok(s),
-                Some(other) => return Err(FormatError::Malformed(format!("unexpected {other:?} inside <{name}>"))),
-                None => return Err(FormatError::Truncated(format!("<{name}> is not closed"))),
-            }
-        }
-    }
-
-    fn skip_space(&mut self) {
-        while matches!(self.peek(), Some(Tok::Text(t)) if t.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))) {
-            self.pos += 1;
-        }
-    }
-
-    fn value(&mut self, depth: usize) -> Result<Value, FormatError> {
-        self.nodes += 1;
-        if depth > MAX_DEPTH || self.nodes > MAX_NODES {
-            return Err(FormatError::TooLarge("plist nesting or size limit".into()));
-        }
-        self.skip_space();
-        match self.next() {
-            Some(Tok::Empty(n)) => Ok(match n.as_str() {
-                "true" => Value::Bool(true),
-                "false" => Value::Bool(false),
-                "dict" => Value::Dict(Vec::new()),
-                "array" => Value::Array(Vec::new()),
-                "string" => Value::String(String::new()),
-                "data" => Value::Data(Vec::new()),
-                other => return Err(FormatError::Malformed(format!("unexpected <{other}/>"))),
-            }),
-            Some(Tok::Open(n)) => match n.as_str() {
-                "string" => Ok(Value::String(self.text_until("string")?)),
-                "integer" => {
-                    let t = self.text_until("integer")?;
-                    let t = t.trim();
-                    let v = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-                        i128::from_str_radix(h, 16).ok()
-                    } else {
-                        t.parse::<i128>().ok()
-                    };
-                    v.map(Value::Integer).ok_or_else(|| FormatError::Malformed(format!("bad integer {t:?}")))
-                }
-                "real" => {
-                    let t = self.text_until("real")?;
-                    t.trim().parse::<f64>().map(Value::Real).map_err(|_| FormatError::Malformed(format!("bad real {t:?}")))
-                }
-                "date" => Ok(Value::Date(DateValue::Text(self.text_until("date")?.trim().to_string()))),
-                "data" => {
-                    let t = self.text_until("data")?;
-                    base64_decode(&t).map(Value::Data).ok_or_else(|| FormatError::Malformed("bad base64 in <data>".into()))
-                }
-                "true" | "false" => {
-                    if !self.text_until(&n)?.is_empty() {
-                        return Err(FormatError::Malformed(format!("<{n}> must be empty")));
-                    }
-                    Ok(Value::Bool(n == "true"))
-                }
-                "array" => {
-                    let mut out = Vec::new();
-                    loop {
-                        self.skip_space();
-                        if matches!(self.peek(), Some(Tok::Close(c)) if c == "array") {
-                            self.pos += 1;
-                            return Ok(Value::Array(out));
-                        }
-                        if self.peek().is_none() {
-                            return Err(FormatError::Truncated("<array> is not closed".into()));
-                        }
-                        out.push(self.value(depth + 1)?);
-                    }
-                }
-                "dict" => {
-                    let mut out = Vec::new();
-                    loop {
-                        self.skip_space();
-                        match self.next() {
-                            Some(Tok::Close(c)) if c == "dict" => return Ok(Value::Dict(out)),
-                            Some(Tok::Open(k)) if k == "key" => {
-                                let key = self.text_until("key")?;
-                                let v = self.value(depth + 1)?;
-                                out.push((key, v));
-                            }
-                            Some(Tok::Empty(k)) if k == "key" => {
-                                let v = self.value(depth + 1)?;
-                                out.push((String::new(), v));
-                            }
-                            Some(other) => return Err(FormatError::Malformed(format!("expected <key> in <dict>, found {other:?}"))),
-                            None => return Err(FormatError::Truncated("<dict> is not closed".into())),
-                        }
-                    }
-                }
-                other => Err(FormatError::Malformed(format!("unknown plist element <{other}>"))),
-            },
-            Some(other) => Err(FormatError::Malformed(format!("expected a value, found {other:?}"))),
-            None => Err(FormatError::Truncated("expected a value".into())),
-        }
-    }
-}
-
-/// Decode a UTF-16 XML property list after its byte-order mark into UTF-8 text.
-/// Surrogate pairs join normally; a lone surrogate fails as malformed rather
-/// than turning into replacement characters that tokenize into garbage element
-/// names.
-fn decode_utf16_xml(data: &[u8], big_endian: bool) -> Result<String, FormatError> {
-    if !data.len().is_multiple_of(2) {
-        return Err(FormatError::Truncated("UTF-16 code unit".into()));
-    }
-    let r = Reader::new(data);
-    let mut units = Vec::with_capacity(data.len() / 2);
-    let mut off = 0;
-    while let Some(unit) = if big_endian { r.u16_be(off) } else { r.u16_le(off) } {
-        units.push(unit);
-        off += 2;
-    }
-    String::from_utf16(&units).map_err(|_| FormatError::Malformed("invalid UTF-16 in XML plist".into()))
-}
-
-/// Parse an XML property list.
+/// Parse an XML property list with the shared reader. Binary parsing and the app's
+/// normalized JSON projection remain local; the shared tree is moved, not cloned.
 pub fn parse_xml(data: &[u8]) -> Result<Value, FormatError> {
-    // Apple's Core Foundation reader accepts XML plists in UTF-16 as well as
-    // UTF-8: it recognises both byte-order marks. `from_utf8_lossy` turns a
-    // UTF-16 byte stream into NUL-separated text, so the encoding is settled
-    // here, before tokenizing.
-    let text = match data {
-        [0xFF, 0xFE, rest @ ..] => decode_utf16_xml(rest, false)?,
-        [0xFE, 0xFF, rest @ ..] => decode_utf16_xml(rest, true)?,
-        _ => std::str::from_utf8(data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(data))
-            .map_err(|_| FormatError::Malformed("invalid UTF-8 in XML plist".into()))?
-            .to_owned(),
+    let limits = craft_plist::Limits {
+        max_input_bytes: data.len(),
+        max_objects: MAX_NODES,
+        max_nodes: MAX_NODES,
+        max_depth: MAX_DEPTH,
+        // UTF-16 to UTF-8 expansion fits three times the encoded input. The
+        // shared reader also charges decoded leaf/key text against this budget.
+        max_expanded_bytes: MAX_EXPANDED_BYTES.max(data.len().saturating_mul(3)),
     };
-    let toks = tokenize(&text)?;
-    let mut x = Xml { toks, pos: 0, nodes: 0 };
-    x.skip_space();
-    let wrapped = matches!(x.peek(), Some(Tok::Open(n)) if n == "plist");
-    if wrapped {
-        x.pos += 1;
-    }
-    let value = x.value(0)?;
-    x.skip_space();
-    if wrapped {
-        if !matches!(x.next(), Some(Tok::Close(n)) if n == "plist") {
-            return Err(FormatError::Malformed("expected </plist> after its value".into()));
+    // The old tokenizer could append at most two tokens after its MAX_NODES check.
+    craft_plist::parse_xml_with_token_limit(data, limits, craft_plist::XmlOptions::default(), MAX_NODES.saturating_add(2)).map(xml_value).map_err(|error| {
+        match error {
+            craft_plist::FormatError::Malformed(message) => FormatError::Malformed(message),
+            craft_plist::FormatError::Truncated(message) => FormatError::Truncated(message),
+            craft_plist::FormatError::Unsupported(message) => FormatError::Unsupported(message),
+            craft_plist::FormatError::TooLarge(message) => FormatError::TooLarge(message),
         }
-        x.skip_space();
+    })
+}
+
+// Recursion is bounded by the shared reader's MAX_DEPTH limit before conversion.
+fn xml_value(value: craft_plist::Value) -> Value {
+    use craft_plist::Value as Shared;
+    match value {
+        Shared::Dict(entries) => Value::Dict(entries.into_iter().map(|(key, value)| (key, xml_value(value))).collect()),
+        Shared::Array(values) => Value::Array(values.into_iter().map(xml_value).collect()),
+        Shared::String(text) => Value::String(text),
+        Shared::Integer(value) => Value::Integer(value),
+        Shared::Real(value) => Value::Real(value),
+        Shared::Bool(value) => Value::Bool(value),
+        Shared::Date(craft_plist::DateValue::Seconds(value)) => Value::Date(DateValue::Seconds(value)),
+        Shared::Date(craft_plist::DateValue::Text(value)) => Value::Date(DateValue::Text(value)),
+        Shared::Data(data) => Value::Data(data),
+        Shared::Uid(value) => Value::Uid(value),
+        Shared::Null => Value::Null,
     }
-    if x.peek().is_some() {
-        return Err(FormatError::Malformed("unexpected content after the plist value".into()));
-    }
-    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use craft_anything_testkit::apple as fx;
+
+    #[test]
+    fn shared_xml_keeps_order_dates_and_rejects_nonfinite_reals() {
+        let value = parse_xml(br#"<plist><dict><key>x</key><integer>1</integer><key>x</key><integer>2</integer><key>when</key><date> 2026-01-01T00:00:00Z </date></dict></plist>"#).unwrap();
+        let Value::Dict(entries) = value else { panic!("expected dictionary") };
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0], ("x".into(), Value::Integer(1)));
+        assert_eq!(entries[1], ("x".into(), Value::Integer(2)));
+        assert_eq!(entries[2].1, Value::Date(DateValue::Text("2026-01-01T00:00:00Z".into())));
+        for real in ["NaN", "inf", "-inf", "1e999"] {
+            let xml = format!("<plist><real>{real}</real></plist>");
+            assert!(matches!(parse_xml(xml.as_bytes()), Err(FormatError::Malformed(_))));
+        }
+    }
+
+    #[test]
+    fn shared_xml_preserves_app_depth_allowance() {
+        let xml = format!("{}<string>x</string>{}", "<array>".repeat(80), "</array>".repeat(80));
+        assert!(parse_xml(xml.as_bytes()).is_ok());
+        let deep = format!("{}<string>x</string>{}", "<array>".repeat(MAX_DEPTH + 1), "</array>".repeat(MAX_DEPTH + 1));
+        assert!(matches!(parse_xml(deep.as_bytes()), Err(FormatError::TooLarge(_))));
+    }
 
     #[test]
     fn xml_has_one_complete_root_with_only_markup_space_around_values() {

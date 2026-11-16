@@ -1458,12 +1458,18 @@ impl<'a> Scanner<'a> {
         let nsec = usize::from(self.r.u16_le(pe + 6)?);
         let opt_size = usize::from(self.r.u16_le(pe + 20)?);
         let opt = pe + 24;
+        if opt_size < 2 {
+            return None;
+        }
         let magic = self.r.u16_le(opt)?;
-        let dirs = match magic {
-            0x10b => opt + 96,
-            0x20b => opt + 112,
+        let (dirs, fixed) = match magic {
+            0x10b => (opt + 96, 96usize),
+            0x20b => (opt + 112, 112),
             _ => return None,
         };
+        if opt_size < fixed {
+            return None;
+        }
         let mut end = u64::from(self.r.u32_le(opt + 60).unwrap_or(0));
         let sec = opt.checked_add(opt_size)?;
         for k in 0..nsec.min(96) {
@@ -1472,8 +1478,10 @@ impl<'a> Scanner<'a> {
                 end = end.max(u64::from(ptr) + u64::from(raw));
             }
         }
-        // The certificate table's "address" is a file offset.
-        if let (Some(c), Some(cs)) = (self.r.u32_le(dirs + 4 * 8), self.r.u32_le(dirs + 4 * 8 + 4))
+        // The certificate table's "address" is a file offset. Only a directory inside the declared
+        // optional header can point at it.
+        if opt_size >= fixed + 5 * 8
+            && let (Some(c), Some(cs)) = (self.r.u32_le(dirs + 4 * 8), self.r.u32_le(dirs + 4 * 8 + 4))
             && c != 0
         {
             end = end.max(u64::from(c) + u64::from(cs));

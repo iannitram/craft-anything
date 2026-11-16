@@ -32,7 +32,7 @@ pub fn proof_card(ui: &mut Ui, e: &Evidence, dense: bool, open: bool) {
                 }
             });
         });
-        ui.add_space(4.0);
+        ui.add_space(theme::space::XS);
         if !e.summary.is_empty() {
             ui.label(RichText::new(&e.summary).size(if dense { theme::SMALL } else { theme::BODY }));
         }
@@ -56,7 +56,7 @@ fn details(ui: &mut Ui, e: &Evidence, t: &Tokens) {
                     Some(lbl) => format!("{lbl}  {}", l.value),
                     None => l.value.clone(),
                 };
-                egui::Frame::new().fill(t.raised).corner_radius(t.r_sm()).inner_margin(Margin::symmetric(8, 3)).show(ui, |ui| {
+                egui::Frame::new().fill(t.raised).corner_radius(t.r_sm()).inner_margin(theme::pad::CHIP).show(ui, |ui| {
                     ui.label(RichText::new(text).font(theme::mono(theme::CAPTION)).color(t.text)).on_hover_text(&l.kind);
                 });
             }
@@ -64,17 +64,17 @@ fn details(ui: &mut Ui, e: &Evidence, t: &Tokens) {
                 ui.label(RichText::new(format!("+{}", e.locations.len() - 40)).color(t.text_faint));
             }
         });
-        ui.add_space(6.0);
+        ui.add_space(theme::space::SM);
     }
     if !e.limitations.is_empty() {
         widgets::caption(ui, "What we couldn't check");
         for l in &e.limitations {
             ui.horizontal(|ui| {
-                icons::show(ui, "info", 13.0, t.warning);
+                icons::show(ui, "info", theme::icon::SM, t.warning);
                 ui.add(egui::Label::new(RichText::new(&l.message).color(t.text_dim)).wrap());
             });
         }
-        ui.add_space(6.0);
+        ui.add_space(theme::space::SM);
     }
     ui.horizontal_wrapped(|ui| {
         let cov = match e.coverage.status {
@@ -96,21 +96,21 @@ fn details(ui: &mut Ui, e: &Evidence, t: &Tokens) {
             ui.ctx().copy_text(e.id.clone());
         }
     });
-    ui.add_space(6.0);
+    ui.add_space(theme::space::SM);
     if let Some(code) = crate::workbench::code_text(&e.result) {
         widgets::caption(ui, "The code");
-        egui::Frame::new().fill(t.code_bg).corner_radius(t.r()).inner_margin(Margin::same(10)).show(ui, |ui| {
+        egui::Frame::new().fill(t.code_bg).corner_radius(t.r()).inner_margin(theme::pad::PANEL).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(truncate(code, 4000)).font(theme::mono(theme::CAPTION)).color(t.text));
         });
-        ui.add_space(6.0);
+        ui.add_space(theme::space::SM);
     }
     egui::CollapsingHeader::new(RichText::new(tr("The raw result")).color(t.text_dim).size(theme::CAPTION))
         .id_salt(("raw", &e.id))
         .default_open(false)
         .icon(widgets::disclosure_icon)
         .show(ui, |ui| {
-            egui::Frame::new().fill(t.code_bg).corner_radius(t.r()).inner_margin(Margin::same(8)).show(ui, |ui| {
+            egui::Frame::new().fill(t.code_bg).corner_radius(t.r()).inner_margin(theme::pad::TIGHT).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 json_tree(ui, "result", &e.result, 0);
             });
@@ -133,7 +133,7 @@ const MAX_DEPTH: usize = 24;
 /// A collapsible, capped JSON tree in monospace.
 pub fn json_tree(ui: &mut Ui, key: &str, v: &Value, depth: usize) {
     let t = Tokens::get(ui.ctx());
-    let key_text = RichText::new(key).font(theme::mono(12.0)).color(t.accent_ink);
+    let key_text = RichText::new(key).font(theme::mono(theme::CODE)).color(t.accent_ink);
     if depth > MAX_DEPTH {
         ui.label(RichText::new("…").color(t.text_faint));
         return;
@@ -169,15 +169,15 @@ pub fn json_tree(ui: &mut Ui, key: &str, v: &Value, depth: usize) {
         }
         leaf => {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(RichText::new(format!("{key}:")).font(theme::mono(12.0)).color(t.accent_ink));
+                ui.spacing_mut().item_spacing.x = theme::space::XS;
+                ui.label(RichText::new(format!("{key}:")).font(theme::mono(theme::CODE)).color(t.accent_ink));
                 let (text, col) = match leaf {
                     Value::String(s) => (format!("\"{}\"", truncate(s, 400)), t.text),
                     Value::Null => ("null".into(), t.text_faint),
                     Value::Bool(b) => (b.to_string(), theme::WORKED_OUT),
                     other => (other.to_string(), theme::SEEN_IT),
                 };
-                ui.add(egui::Label::new(RichText::new(text).font(theme::mono(12.0)).color(col)).wrap());
+                ui.add(egui::Label::new(RichText::new(text).font(theme::mono(theme::CODE)).color(col)).wrap());
             });
         }
     }
@@ -190,8 +190,8 @@ trait AppendText {
 impl AppendText for RichText {
     fn append_text(self, s: String, t: &Tokens) -> egui::WidgetText {
         let mut job = egui::text::LayoutJob::default();
-        job.append(self.text(), 0.0, egui::TextFormat { font_id: theme::mono(12.0), color: t.accent_ink, ..Default::default() });
-        job.append(&s, 0.0, egui::TextFormat { font_id: theme::mono(12.0), color: t.text_faint, ..Default::default() });
+        job.append(self.text(), 0.0, egui::TextFormat { font_id: theme::mono(theme::CODE), color: t.accent_ink, ..Default::default() });
+        job.append(&s, 0.0, egui::TextFormat { font_id: theme::mono(theme::CODE), color: t.text_faint, ..Default::default() });
         job.into()
     }
 }
@@ -207,7 +207,7 @@ pub fn ledger_row(ui: &mut Ui, e: &Evidence, selected: bool) -> bool {
     let resp = egui::Frame::new()
         .fill(if selected { t.accent_soft } else { t.card })
         .corner_radius(t.r_sm())
-        .inner_margin(Margin::symmetric(8, 6))
+        .inner_margin(theme::pad::FIELD_COMPACT)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -218,7 +218,12 @@ pub fn ledger_row(ui: &mut Ui, e: &Evidence, selected: bool) -> bool {
                     ui.label(RichText::new(tr(crate::theme::confidence_label(Some(e.confidence)))).size(theme::TINY).color(col));
                 });
             });
-            ui.add(egui::Label::new(RichText::new(truncate(&e.summary, 160)).size(theme::CAPTION).color(t.text_dim)).wrap());
+            ui.add(
+                egui::Label::new(
+                    RichText::new(truncate(&e.summary, 160)).size(theme::CAPTION).line_height(Some(theme::leading(theme::CAPTION))).color(t.text_dim),
+                )
+                .wrap(),
+            );
         })
         .response;
     let resp = resp.interact(egui::Sense::click());

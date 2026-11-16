@@ -1,5 +1,6 @@
 # cs: original Czech UI translations. Licensed MIT OR Apache-2.0.
 # UTF-8: English source<TAB>translation. Keep placeholders and escapes intact.
+Default (its own settings)	Výchozí (vlastní nastavení)
 OpenCode default	Výchozí v OpenCode
 Model default	Výchozí pro model
 Thinking depth	Hloubka uvažování
@@ -1366,6 +1367,7 @@ your files there are the app, edited in place	vaše soubory ve složce jsou apli
 {name} builds what you make; answers come from {brain}.	{name} sestavuje vaše výtvory; odpovědi poskytuje {brain}.
 {name} can't be attached: a message takes pictures up to 20 MB.	{name} nelze přiložit: zpráva přijímá obrázky do 20 MB.
 {name} can't be attached: it isn't a PNG, JPEG, GIF or WebP picture.	{name} nelze přiložit: není to obrázek PNG, JPEG, GIF ani WebP.
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name} nelze omezit jen na čtení, proto se mu otázky nekladou. Zeptejte se přes Claude Code nebo přes AI s klíčem API.
 {name} is ready	Připraveno: {name}
 {name} is ready.	Připraveno: {name}.
 {name} isn't available yet in this build.	V tomto sestavení zatím chybí: {name}.
@@ -1467,3 +1469,27 @@ Connecting to {name}… {seconds} s	Připojování k {name}… {seconds} s
 Stopped adding {name}.	Přidávání {name} bylo zastaveno.
 It isn't there any more, so {program} runs in its place.	Už tam není, proto se místo něj spouští {program}.
 Use it	Použít
+
+# Native update checks and verified installation.
+ArtCraft Launcher manages this app's version. Change its version there.	Verzi této aplikace spravuje ArtCraft Launcher. Změňte ji tam.
+Check again	Zkontrolovat znovu
+Check for Updates	Vyhledat aktualizace
+Check for Updates…	Vyhledat aktualizace…
+Checking for updates…	Vyhledávání aktualizací…
+Couldn't check for updates: {error}	Aktualizace se nepodařilo zkontrolovat: {error}
+Downloading and verifying the update…	Stahování a ověřování aktualizace…
+No installer is available for this platform.	Pro tuto platformu není dostupný instalátor.
+Releases	Vydání
+Save your work and stop running tasks before installing an update.	Před instalací aktualizace uložte práci a zastavte běžící úlohy.
+The update failed: {error}	Aktualizace selhala: {error}
+The update worker stopped unexpectedly. Try checking again.	Proces aktualizace se neočekávaně zastavil. Zkuste kontrolu znovu.
+This installation is managed externally. Update it with its package manager or open Releases.	Tuto instalaci spravuje externí nástroj. Aktualizujte ji správcem balíčků nebo otevřete vydání.
+Update and restart	Aktualizovat a restartovat
+Update ready. Restarting…	Aktualizace je připravena. Restartování…
+Updated to {version}.	Aktualizováno na {version}.
+Use Releases or your package manager to update this installation.	Aktualizujte tuto instalaci přes vydání nebo správce balíčků.
+You're up to date.	Máte nejnovější verzi.
+{version} is available.	Je dostupná verze {version}.
+Forget a website sign-in	Zapomenout přihlášení k webu
+Sign in to a website	Přihlásit se na web
+Some shared files could not be hard-linked and were copied instead ({size}).	Některé sdílené soubory nešlo pevně propojit a byly zkopírovány ({size}).

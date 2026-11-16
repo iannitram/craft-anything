@@ -7,7 +7,7 @@ use craft_anything_engines::assets::{Catalogue, Shape, about_usd};
 pub(super) const RULES: &str = "\
 Rules:
 - Their request comes first. When it says how to build (a language, framework, engine, library or platform), build with exactly that, even where these instructions name something else: the stack given here is only the default for what the request leaves open. Don't switch away from what they asked for to get past a failing build or check; fix the build instead.
-- Change files only inside app/. Everything else in the workspace is read-only evidence.
+- Change files only inside app/. Everything else in the workspace is read-only evidence, and Craft Anything's own records there (craft.json, feed.json, everything in inbox/) stop the build if anything else writes them: keep track of your progress in your checklist, never in a file of your own there.
 - Rebuild the layout, styling and behaviour yourself from the evidence. Don't copy logos, photos, brand names or long passages of text unless the person confirms they own the original or have permission (ask once with core_person_ask if it matters); otherwise use neutral placeholders: simple shapes or gradients for images, short sample copy for text.
 - Use the core_person_ask tool (craft-anything MCP server) only for choices that really change the result. Give 2-4 short choices. Never ask about technical details you can decide yourself.
 - Build what the person asked for. If part of it won't fit this version (for example online co-op, a whole game mode or another platform), ask with core_person_ask before leaving it out, with the smaller version as one of the choices; never drop it silently.
@@ -87,6 +87,17 @@ fn website_from_outside(sees: bool) -> String {
     )
 }
 
+/// Told when the capture kept the original's network traffic: the builder can turn it into a
+/// stand-in backend its own front end talks to, rather than calling an API that isn't there.
+fn standin_words(ws: &Workspace) -> String {
+    let has_recording =
+        std::fs::read_dir(ws.root.join("capture")).is_ok_and(|rd| rd.flatten().any(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("har"))));
+    if !has_recording {
+        return String::new();
+    }
+    " capture/ also holds a network recording (.har) of the original: web_standin_build reads it and writes a stand-in backend, and web_standin_start serves it on a free port, so your front end gets the recorded answers instead of calling an API that isn't there; web_standin_show lists the ones running and web_standin_stop ends one.".to_string()
+}
+
 /// Clean room: what the builder has of an app or a game. Nothing inside it was read.
 fn program_from_outside(sees: bool) -> String {
     let build_from = sight(
@@ -98,6 +109,9 @@ fn program_from_outside(sees: bool) -> String {
         "capture/README.md says what we could see from outside. Clean room: nothing inside the program, its files or its folder was read, and you must not open, list, read, run or decompile anything there either (the tools that look inside are off, and reading its files is refused). {build_from}"
     )
 }
+
+/// Explain saved-profile use without treating it as proof of authentication (#1178).
+pub(super) const SIGNED_IN_NOTE: &str = "The capture used the person's saved sign-in profile and no password page was detected. That does not prove the site accepted the session: a public page or passwordless sign-in step may still be signed out. Use the captured evidence and the person's request, not profile use alone, to decide which pages to rebuild. If the intended signed-in view is unclear, ask the person with core_person_ask before building; this also applies when you cannot see the pictures. Don't make a sign-in page the thing you build unless their request asks for one.";
 
 /// The first message to the builder: the request, the evidence, the kind's goal and stack steps,
 /// the shared rules, then the kind's own sections. `extra`: what the person also said.
@@ -127,16 +141,21 @@ pub(super) fn brief(kind: &dyn TargetKind, cx: &BriefCx, extra: Option<&str>) ->
             "capture/ holds what we recorded from the live site: README.md (start here: its colours, fonts, spacing, breakpoints and the layout at each width), capture.json (design tokens with colours in hex, spacing and content widths, the widths its CSS switches layout at (`breakpoints`), the layout measured at each width (`layouts`: page width, heading and text sizes, each section's padding, gap, content column and items per row), a layout outline with positions in CSS pixels, headings, links, form shapes, asset lists with its font files, and the visible text), screenshot-<width>.png for each width (desktop, tablet and phone; {shots}), noise-<width>.png where parts of the page change by themselves (white squares: carousels, videos, animations; {noise}), and page.html (the rendered HTML).\n\n\
              Match it exactly, not roughly: take colours, fonts, text sizes, padding, gaps, corner radii and content widths from capture.json as exact values (make them the project's theme tokens rather than a library's defaults), load the same font families, change the layout at the same breakpoints {matches} (sections stack, columns per row and the navigation switch where the original's do), and never let the page scroll sideways on a phone. Craft Anything measures your build the same way at every width and tells you each difference.
 
-             Deep mode: every craft-anything tool is yours, so learn how it works, not only how it looks, before you build. capture/how-it-works.md already has what its JavaScript is made of (modules, routes, the requests it makes, the libraries it uses) and ten seconds of what the start page did (requests, console, WebSocket messages). The original is open in Craft Anything's private browser (web_site_open opens another page of it); ask web_page_show (its structure, scripts, network requests and console), web_listeners_list on a control (what clicking it runs, and where that code is), web_coverage_measure while you use it (which code runs and which requests it makes) and web_walkthrough_record to click or type through a flow and record every step; web_scripts_save, js_app_map and js_sources_restore read its code as an app. Rebuild the behaviour you learn in your own code; never paste the original's code into app/.",
+             Deep mode: every craft-anything tool is yours, so learn how it works, not only how it looks, before you build. capture/how-it-works.md already has what its JavaScript is made of (modules, routes, the requests it makes, the libraries it uses) and ten seconds of what the start page did (requests, console, WebSocket messages). The original is open in Craft Anything's private browser (web_site_open opens another page of it); ask web_page_show (its structure, scripts, network requests and console), web_listeners_list on a control (what clicking it runs, and where that code is), web_coverage_measure while you use it (which code runs and which requests it makes) and web_walkthrough_record to click or type through a flow and record every step; web_scripts_save, js_app_map and js_sources_restore read its code as an app. Rebuild the behaviour you learn in your own code; never paste the original's code into app/.{standin}",
             shots = sight(sees, SHOTS_SIGHTED, SHOTS_BLIND),
             noise = sight(sees, NOISE_SIGHTED, NOISE_BLIND),
             matches = sight(sees, "so each width matches its screenshot and `layouts` entry", "so each width matches its `layouts` entry"),
+            standin = standin_words(ws),
         ),
         TargetRef::Local { .. } => format!(
             "capture/README.md holds a first static look at the program (nothing was run) and, for a game, a list of its own files: maps, textures, models, sounds and settings. Read its settings and scripts for the real numbers (speeds, health, weapons, modes, controls){style}; never change anything in that folder. Deep mode: every craft-anything tool is yours, so learn how the parts the person cares about work before you build: core_target_open and core_target_triage first, then native_functions_list, native_strings_find and native_function_pseudocode for a program's code, managed_assembly_show and managed_members_list for .NET, java_* and android_* for Java and Android apps, js_app_map, js_sources_restore and js_electron_* for an Electron app, and game_archives_list and the other game_* tools for a game's files.",
             style = sight(sees, " and open a few of its pictures with the Read tool to learn the style", ""),
         ),
         TargetRef::None => "There is no target to study.".into(),
+    };
+    let capture = match &m.target {
+        TargetRef::Website { .. } if super::kinds::website::captured_signed_in(ws) => format!("{capture}\n\n{SIGNED_IN_NOTE}"),
+        _ => capture,
     };
     let goal = if m.own_project() { "what their request asks of the project in this folder" } else { kind.goal() };
     let mut s = format!(
@@ -241,7 +260,7 @@ pub(super) fn extract_brief(folder: &Path) -> String {
         "You are the asset extractor inside Craft Anything. The person owns this game and has its developer's permission to use its files in a private rebuild on this computer. Take the game's own files out of its folder ({}) into app/Original/ so the builder can use them. You don't build the game.\n\
          - Call enable_toolset with \"formats\". game_archives_list finds the game's archives; game_pak_list, game_iostore_list, game_unity_list and game_unity_bundle_list show what's inside.\n\
          - game_pak_extract takes files out of an Unreal .pak and makes their folders: a `file` ending in `/` (for example Game/Content/UI/) takes that whole folder in one call into the folder `output`, keeping its layout; when it says files are left, call it again the same way to carry on.\n\
-         - Pictures: game_unreal_texture_export (with permission: true) or game_unity_asset_export, saved as PNG. Sounds and models: take them out with game_pak_extract as they are; convert them only with a converter you set up inside app/Original/tools/.\n\
+         - Pictures: game_unreal_texture_export (with permission: true) or game_unity_asset_export, saved as PNG. Unity sounds: game_unity_asset_export too, as a WAV or as the FMOD bank (.fsb) they're stored in. Other sounds and models: take them out with game_pak_extract as they are; convert them only with a converter you set up inside app/Original/tools/.\n\
          - Read the archives only with these tools; never write your own archive reader or parser. When a tool fails, read its error, fix the call and try again; if a tool can't do something, say so in your summary.\n\
          - Keep the game's folder layout under app/Original/ (for example app/Original/Content/UI/Logo.png). Take what a rebuild needs first: the player's view (arms and weapons), the main enemies, the level's materials and props, the interface and its fonts, and the sounds and music.\n\
          - Never decrypt, crack or bypass protection: an encrypted archive stays closed; say so and move on.\n\
@@ -308,7 +327,7 @@ pub(super) fn game_steps(deep: bool, ghidra: bool, has_target: bool, generated: 
             )
         };
         s.push_str(&format!(
-            "\n{lead}, from their own installed copy. Use the originals wherever they can be read: bring {bring} from the game folder into the project (converting formats as the engine needs), for the person's own use on this computer. Craft Anything's own tools read game archives, so use them first: call enable_toolset with \"formats\", then game_archives_list finds the game's archives, game_pak_list, game_iostore_list, game_unity_list and game_unity_bundle_list show what's inside, game_pak_extract takes files out of an Unreal .pak, and game_unreal_texture_export (with permission: true, since the person asked for the originals) and game_unity_asset_export save pictures as PNG. Set up another converter only for what these can't convert yet (such as models and sounds), and keep it inside the project folder. Never decrypt, crack or bypass encryption or copy protection: files inside encrypted archives (for example encrypted .pak, .utoc or .ucas files) stay closed. Recreate those as closely as you can from the pictures, the game's readable data and how it plays, in the same role, size, palette and feel, without reproducing logos or trademarks. List every original file you used in app/CREDITS.md with its source path, and start app/README.md with this line, as written: \"{PRIVATE_USE_NOTE}\" Craft Anything checks both after each build.",
+            "\n{lead}, from their own installed copy. Use the originals wherever they can be read: bring {bring} from the game folder into the project (converting formats as the engine needs), for the person's own use on this computer. Craft Anything's own tools read game archives, so use them first: call enable_toolset with \"formats\", then game_archives_list finds the game's archives, game_pak_list, game_iostore_list, game_unity_list and game_unity_bundle_list show what's inside, game_pak_extract takes files out of an Unreal .pak, and game_unreal_texture_export (with permission: true, since the person asked for the originals) and game_unity_asset_export save pictures as PNG (and Unity sounds, as a WAV or the FMOD bank they're stored in). Set up another converter only for what these can't convert yet (such as models and sounds), and keep it inside the project folder. Never decrypt, crack or bypass encryption or copy protection: files inside encrypted archives (for example encrypted .pak, .utoc or .ucas files) stay closed. Recreate those as closely as you can from the pictures, the game's readable data and how it plays, in the same role, size, palette and feel, without reproducing logos or trademarks. List every original file you used in app/CREDITS.md with its source path, and start app/README.md with this line, as written: \"{PRIVATE_USE_NOTE}\" Craft Anything checks both after each build.",
         ));
     }
     s

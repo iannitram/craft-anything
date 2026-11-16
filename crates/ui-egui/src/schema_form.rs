@@ -134,7 +134,7 @@ pub fn show(ui: &mut Ui, fields: &[Field], values: &mut BTreeMap<String, String>
         for f in fields {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&f.name).font(theme::mono(12.5)));
+                    ui.label(RichText::new(&f.name).font(theme::mono(theme::CODE)));
                     if f.required {
                         ui.label(RichText::new("*").color(t.accent));
                     }
@@ -150,22 +150,19 @@ pub fn show(ui: &mut Ui, fields: &[Field], values: &mut BTreeMap<String, String>
                         }
                     }
                     _ if !f.choices.is_empty() => {
-                        egui::ComboBox::from_id_salt(("choice", &f.name))
-                            .icon(widgets::combo_icon)
-                            .selected_text(if v.is_empty() { "—".to_string() } else { v.clone() })
-                            .show_ui(ui, |ui| {
-                                if !f.required {
-                                    ui.selectable_value(v, String::new(), "—");
-                                }
-                                for c in &f.choices {
-                                    ui.selectable_value(v, c.clone(), c);
-                                }
-                            });
+                        widgets::dropdown(("choice", &f.name)).selected_text(if v.is_empty() { "—".to_string() } else { v.clone() }).show_ui(ui, |ui| {
+                            if !f.required {
+                                widgets::menu_choice(ui, v, String::new(), "—");
+                            }
+                            for c in &f.choices {
+                                widgets::menu_choice(ui, v, c.clone(), c);
+                            }
+                        });
                     }
                     FieldKind::Json => {
                         ui.add(
                             egui::TextEdit::multiline(v)
-                                .font(theme::mono(12.0))
+                                .font(theme::mono(theme::CODE))
                                 .desired_rows(2)
                                 .desired_width(320.0)
                                 .hint_text("JSON")
@@ -187,7 +184,12 @@ pub fn show(ui: &mut Ui, fields: &[Field], values: &mut BTreeMap<String, String>
                     }
                 }
                 if !f.description.is_empty() {
-                    ui.add(egui::Label::new(RichText::new(&f.description).color(t.text_faint).size(theme::CAPTION)).wrap());
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&f.description).color(t.text_faint).size(theme::CAPTION).line_height(Some(theme::leading(theme::CAPTION))),
+                        )
+                        .wrap(),
+                    );
                 }
             });
             ui.end_row();

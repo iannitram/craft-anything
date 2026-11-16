@@ -17,7 +17,7 @@ pub mod pseudo;
 /// eBPF / Solana sBPF decoding and static analysis (clean room, self-contained).
 pub mod sbpf;
 
-pub use decode::{ArmConsts, Cond, Flow, Insn, Kind, MemOp, Mode, Op, canonical_reg, decode};
+pub use decode::{ArmConsts, Cond, Flow, Insn, Kind, MemOp, Mode, Op, Shift, canonical_reg, decode};
 pub use image::Image;
 pub use program::{Block, CallSite, Callee, Function, JumpTable, Limits, ProgString, Program, SlotInfo, Stats, Term, Xref, XrefKind, slot_label};
 

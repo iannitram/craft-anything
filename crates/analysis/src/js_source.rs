@@ -314,10 +314,15 @@ struct Unit<'a> {
     exports: BTreeSet<&'a str>,
 }
 
+/// Why a source without an observed match can't be called absent. The variant names are the
+/// `uncertain_sources` reasons serialized into evidence, so they keep their shared prefix.
+#[allow(clippy::enum_variant_names)]
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum SourceMatchUncertainty {
     SourceMapInventoryTruncated,
+    SourceMapExternalSections,
+    SourceMapUnreadable,
 }
 
 #[derive(Serialize)]
@@ -327,8 +332,13 @@ struct UncertainSource<'a> {
 }
 
 /// Match reference source files to the shipped bundle's files and bundle modules.
-/// An incomplete source-map inventory cannot establish that an otherwise unmatched source is absent.
-/// Such sources are reported separately in `uncertain_sources`; positive matches remain available.
+/// An incomplete source-map inventory (truncated, an unread external section, or a map that
+/// couldn't be read) cannot establish that an otherwise unmatched source is absent. Such sources
+/// are reported separately in `uncertain_sources`; positive matches remain available.
+///
+/// At most `max_rows` source scripts are examined and at most `max_rows` rows of each list are
+/// kept: `summary.scripts_examined` and `rows_capped` say when the counts cover only that window,
+/// while bundle units without an observed source are counted in full.
 pub fn diff_source_and_bundle(src: &SourceGraph, app: &AppGraph, max_rows: usize) -> Value {
     let mut units: Vec<Unit<'_>> = Vec::new();
     for m in app.modules.iter().filter(|m| m.kind == "script") {
@@ -355,6 +365,8 @@ pub fn diff_source_and_bundle(src: &SourceGraph, app: &AppGraph, max_rows: usize
     }
     // Source-map sources → generated script.
     let source_map_inventory_truncated = app.source_maps.iter().any(|sm| sm.sources_truncated);
+    let source_map_external = app.source_maps.iter().any(|sm| sm.external_sections > 0);
+    let source_map_unreadable = app.source_maps.iter().any(|sm| sm.unreadable);
     let mut mapped: Vec<(String, &str)> = Vec::new();
     for sm in &app.source_maps {
         for s in &sm.sources {
@@ -376,7 +388,10 @@ pub fn diff_source_and_bundle(src: &SourceGraph, app: &AppGraph, max_rows: usize
     let mut uncertain = Vec::new();
     let mut claimed: BTreeSet<usize> = BTreeSet::new();
     let mut by_quality: BTreeMap<&str, usize> = BTreeMap::new();
+    let source_scripts = src.files.iter().filter(|f| is_script(&f.path)).count();
+    let mut scripts_examined = 0usize;
     for f in src.files.iter().filter(|f| is_script(&f.path)).take(max_rows) {
+        scripts_examined += 1;
         let norm = norm_path(&f.path);
         let fs: BTreeSet<&str> = f.strings.iter().map(String::as_str).filter(|s| s.len() >= 4).collect();
         let ff: BTreeSet<&str> = f.functions.iter().map(String::as_str).collect();
@@ -442,22 +457,34 @@ pub fn diff_source_and_bundle(src: &SourceGraph, app: &AppGraph, max_rows: usize
                 None if source_map_inventory_truncated => {
                     uncertain.push(UncertainSource { source: &f.path, reason: SourceMatchUncertainty::SourceMapInventoryTruncated })
                 }
+                None if source_map_external => uncertain.push(UncertainSource { source: &f.path, reason: SourceMatchUncertainty::SourceMapExternalSections }),
+                None if source_map_unreadable => uncertain.push(UncertainSource { source: &f.path, reason: SourceMatchUncertainty::SourceMapUnreadable }),
                 None => unmatched.push(f.path.clone()),
             },
         }
     }
-    let unclaimed: Vec<Value> = units
-        .iter()
-        .enumerate()
-        .filter(|(i, u)| !claimed.contains(i) && !u.id.contains("node_modules"))
-        .map(|(_, u)| json!({"unit": u.id, "file": u.file, "kind": u.kind}))
-        .take(max_rows)
-        .collect();
+    // A unit without a source is counted in full even when only some rows are listed: the list is
+    // for reading, the count is evidence.
+    let mut bundle_units_without_source = 0usize;
+    let mut unclaimed: Vec<Value> = Vec::new();
+    for (i, u) in units.iter().enumerate() {
+        if claimed.contains(&i) || u.id.contains("node_modules") {
+            continue;
+        }
+        bundle_units_without_source += 1;
+        if unclaimed.len() < max_rows {
+            unclaimed.push(json!({"unit": u.id, "file": u.file, "kind": u.kind}));
+        }
+    }
+    let rows_capped = scripts_examined < source_scripts || bundle_units_without_source > unclaimed.len();
     json!({
         "source_graph_id": src.source_graph_id,
         "graph_id": app.graph_id,
         "source_map_inventory_truncated": source_map_inventory_truncated,
-        "summary": {"source_scripts": src.files.iter().filter(|f| is_script(&f.path)).count(), "bundle_units": units.len(), "matched": matches.len(), "unmatched_sources": unmatched.len(), "uncertain_sources": uncertain.len(), "bundle_units_without_source": unclaimed.len(), "by_quality": by_quality},
+        "source_map_external_sections": source_map_external,
+        "source_map_unreadable": source_map_unreadable,
+        "rows_capped": rows_capped,
+        "summary": {"source_scripts": source_scripts, "scripts_examined": scripts_examined, "bundle_units": units.len(), "matched": matches.len(), "unmatched_sources": unmatched.len(), "uncertain_sources": uncertain.len(), "bundle_units_without_source": bundle_units_without_source, "by_quality": by_quality},
         "matches": matches,
         "unmatched_sources": unmatched,
         "uncertain_sources": uncertain,

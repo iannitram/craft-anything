@@ -101,12 +101,24 @@ fn mock(responses: Vec<(u16, &'static str, String)>) -> (String, Arc<Mutex<Vec<S
     let seen = Arc::new(Mutex::new(Vec::new()));
     let s2 = seen.clone();
     std::thread::spawn(move || {
-        for (status, ctype, reply) in responses {
+        let mut responses = responses.into_iter().peekable();
+        while let Some((next_status, next_type, _)) = responses.peek() {
+            let lists_next = *next_status == 200 && *next_type == "application/json";
             let Ok((stream, _)) = l.accept() else { return };
             let mut r = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
             r.read_line(&mut line).unwrap();
             let path = line.split_whitespace().nth(1).unwrap_or_default().to_string();
+            // Scripted questions are model lists answered with a list. Any other question is a
+            // window probe (crate::window) the test didn't script: say nothing, as a server that
+            // doesn't report its window does, and keep the scripted answer for the request after.
+            if line.starts_with("GET ") && !(lists_next && path.ends_with("/models")) {
+                let mut w = stream;
+                write!(w, "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").unwrap();
+                w.flush().unwrap();
+                continue;
+            }
+            let Some((status, ctype, reply)) = responses.next() else { return };
             let mut headers = Vec::new();
             let mut len = 0usize;
             loop {
@@ -637,13 +649,31 @@ fn an_ais_model_is_changed() {
     let claude =
         BackendConfig { name: "Claude Code".into(), kind: BackendKind::AgentCli, model: "claude-code".into(), base_url: None, ssh_host: None, enabled: true };
     h.add_backend(claude, None).unwrap();
-    assert_eq!(h.model_choices("Claude Code").unwrap(), crate::anthropic::MODELS);
+    assert_eq!(
+        h.model_choices("Claude Code").unwrap(),
+        [crate::anthropic::CLAUDE_CODE_DEFAULT, "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
+    );
     assert!(h.set_model("Claude Code", "claude-sonnet-5-5").unwrap());
     let claude = h.options().get("Claude Code").and_then(|o| o.cli_model.clone());
     assert_eq!(claude.as_deref(), Some("claude-sonnet-5-5"), "the CLI is asked for it; the agent stays Claude Code");
     assert_eq!(h.backends().into_iter().find(|b| b.name == "Claude Code").unwrap().model, "claude-code");
+    // A custom model id the catalogue doesn't list, as a person's Claude Code settings may name.
+    assert!(h.set_model("Claude Code", "my-custom-model").unwrap());
+    assert_eq!(h.options().get("Claude Code").and_then(|o| o.cli_model.clone()).as_deref(), Some("my-custom-model"));
+    // "default" clears the choice: no --model is passed, so Claude Code uses its own settings.
+    assert!(h.set_model("Claude Code", crate::anthropic::CLAUDE_CODE_DEFAULT).unwrap());
+    assert_eq!(h.options().get("Claude Code").and_then(|o| o.cli_model.clone()), None);
     assert!(!h.set_model("Nobody", "m").unwrap());
     assert!(h.set_model("Box", " ").is_err());
+
+    // The Claude Code adapter is also registered as `claude`; the default must clear for that id
+    // too, or a run would pass `--model default` (#470 review).
+    let alias = BackendConfig { name: "Claude".into(), kind: BackendKind::AgentCli, model: "claude".into(), base_url: None, ssh_host: None, enabled: true };
+    h.add_backend(alias, None).unwrap();
+    assert!(h.set_model("Claude", "my-custom-model").unwrap());
+    assert_eq!(h.options().get("Claude").and_then(|o| o.cli_model.as_deref()), Some("my-custom-model"));
+    assert!(h.set_model("Claude", crate::anthropic::CLAUDE_CODE_DEFAULT).unwrap());
+    assert_eq!(h.options().get("Claude").and_then(|o| o.cli_model.clone()), None);
 }
 
 /// Every Claude effort level can be chosen for the Claude API and Claude Code, and only for them.
@@ -667,6 +697,42 @@ fn a_claude_ais_effort_is_changed() {
     assert_eq!(effort(&h, "Codex"), None, "an agent that doesn't take Claude's levels");
     assert!(h.set_effort("Codex", Some(Effort::Max)).is_err());
     assert!(!h.set_effort("Nobody", Some(Effort::Low)).unwrap());
+}
+
+/// #1813: an OpenAI-style API is sent a reasoning level only once the person chooses one, and
+/// only one of OpenAI's levels; OpenRouter gets it in its own field.
+#[test]
+fn an_openai_style_ais_effort_is_sent_only_once_chosen() {
+    use crate::model::{Msg, Stop, TurnRequest};
+    let reply = || (200, "text/event-stream", chat_sse(&[json!({"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]})]));
+    for (kind, field) in [(BackendKind::OpenaiCompatible, "/reasoning_effort"), (BackendKind::Openrouter, "/reasoning/effort")] {
+        let (h, _d) = hub();
+        let (url, seen) = mock(vec![reply(), reply()]);
+        let config = BackendConfig { name: "Box".into(), kind, model: "m".into(), base_url: Some(url), ssh_host: None, enabled: true };
+        h.add_backend(config, Some("k".into())).unwrap();
+        let ask = |h: &AiHub| {
+            let mut slot = h.build_model(&h.entry("Box").unwrap()).unwrap();
+            let messages = [Msg::user_text("hi")];
+            let request = TurnRequest { system: "S", messages: &messages, tools: &[], effort: prompt::choose_effort(slot.effort), max_tokens: 100 };
+            slot.model.turn(&request, &mut |_| {}, &Stop::default()).unwrap();
+        };
+        let effort = |h: &AiHub| crate::effort_in_use(&h.entry("Box").unwrap().config, h.options().get("Box"));
+        assert_eq!(effort(&h), None, "nothing is sent until it's chosen");
+        ask(&h);
+        assert!(h.set_effort("Box", Some(Effort::Max)).is_err(), "max isn't one of OpenAI's levels");
+        assert!(h.set_effort("Box", Some(Effort::Minimal)).unwrap());
+        assert_eq!(effort(&h), Some(Effort::Minimal));
+        ask(&h);
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].body.get("reasoning_effort").is_none() && seen[0].body.get("reasoning").is_none(), "{}", seen[0].body);
+        assert_eq!(seen[1].body.pointer(field), Some(&json!("minimal")), "{}", seen[1].body);
+        drop(seen);
+        assert!(h.set_effort("Box", None).unwrap());
+        assert_eq!(effort(&h), None);
+    }
+    // Gemini is offered only the levels every Gemini model takes.
+    let gemini = BackendConfig { name: "G".into(), kind: BackendKind::Gemini, model: "gemini-2.5-pro".into(), base_url: None, ssh_host: None, enabled: true };
+    assert_eq!(crate::effort_levels(&gemini), [Effort::Minimal, Effort::Low, Effort::Medium, Effort::High]);
 }
 
 #[test]
@@ -1123,6 +1189,53 @@ fn anthropic_refusal_and_http_errors() {
         ev.iter().any(|e| matches!(e, AgentEvent::Error { message, remediation: Some(r), .. } if message.contains("invalid x-api-key") && r.contains("key"))),
         "{ev:?}"
     );
+}
+
+/// A service, or a proxy in front of it, can repeat the key or words from the request in its
+/// error: in a JSON error's message, type or code, in a plain-text body, or in a stream's error
+/// event. None of it reaches the failure log, in the error, the service's code or the advice. The
+/// marker is written like an error code (lower-case letters and an underscore), so only a list of
+/// known codes keeps it out; a known code is still kept (R5.5).
+#[test]
+fn a_failure_log_leaves_out_what_the_service_repeats_of_the_key_and_the_request() {
+    let key = "sk-test-reflected-key";
+    let marker = "quokka_umbrella";
+    let reflected = format!("key {key} may not ask about the {marker}");
+    let stream_error = |kind: &str| {
+        sse(&[
+            json!({"type":"message_start","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5}}}),
+            json!({"type":"error","error":{"type":kind,"message":reflected}}),
+        ])
+    };
+    let (url, _seen) = mock(vec![
+        (401, "application/json", json!({"type":"error","error":{"type":marker,"message":reflected}}).to_string()),
+        (400, "application/json", json!({"error":{"code":marker,"message":reflected}}).to_string()),
+        (400, "text/plain", format!("Rejected by the proxy: {reflected}")),
+        (200, "text/event-stream", stream_error(marker)),
+        (200, "text/event-stream", stream_error("invalid_request_error")),
+    ]);
+    let (h, _d) = hub();
+    add(&h, "Claude", BackendKind::Anthropic, &url, Some(key));
+    let mut c = h.start(Some("Claude"), false).unwrap();
+    let unknown = "The service's error code: not a known one";
+    let expected: [&[&str]; 5] = [
+        &["Error: NoPermission", "HTTP status: 401", unknown, "Diagnosis: The API key was rejected"],
+        &["Error: BadInput", "HTTP status: 400", unknown],
+        &["Error: BadInput", "HTTP status: 400"],
+        &["Error: ProgramFailed", unknown, "Diagnosis: Try again"],
+        &["Error: ProgramFailed", "The service's error code: invalid_request_error"],
+    ];
+    for (n, parts) in expected.iter().enumerate() {
+        let ev = run(&mut c, &format!("a question about the {marker}, take {n}"));
+        let log = ev.iter().find_map(|e| if let AgentEvent::Error { log, .. } = e { log.clone() } else { None });
+        let text = std::fs::read_to_string(log.unwrap_or_else(|| panic!("no log for take {n}: {ev:?}"))).unwrap();
+        for hidden in [key, marker, "may not ask"] {
+            assert!(!text.contains(hidden), "take {n}, {hidden}: {text}");
+        }
+        for part in *parts {
+            assert!(text.contains(part), "take {n}, {part}: {text}");
+        }
+    }
 }
 
 #[test]
