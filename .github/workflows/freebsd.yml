@@ -11,8 +11,7 @@ name: FreeBSD
 on:
   push:
     branches: [release]
-  schedule:
-    - cron: "17 2 * * *"
+  # The nightly run (schedule, cron "17 2 * * *") is off in this fork; the upstream repository runs it.
   pull_request:
     paths:
       - .github/workflows/freebsd.yml
