@@ -1487,7 +1487,14 @@ impl Worker {
                 let why = if stop_ignored { "didn't stop when asked; the run stops without it" } else { "ended its turn without saying so" };
                 log::warn!("The builder {why}.");
                 // Said as the agent would have, so the feed ends its message and the clocks the turn.
-                let done = AgentEvent::TurnDone { backend: String::new(), input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false, tokens_unknown: false };
+                let done = AgentEvent::TurnDone {
+                    backend: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost_usd: None,
+                    cost_is_estimate: false,
+                    tokens_unknown: false,
+                };
                 self.emit(RunEvent::Agent(done));
                 self.relay_read_notes(ws);
                 self.stop.check()?;

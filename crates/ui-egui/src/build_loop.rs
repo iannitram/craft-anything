@@ -396,10 +396,11 @@ fn end_words(why: LoopEnd) -> String {
 /// Where a loop is, for the popover: "Run 3 of 10 · 1.2M tokens · until 7am".
 fn status_words(state: &LoopState) -> String {
     let run = state.runs.saturating_add(1).to_string();
-    let mut parts = vec![match state.settings.runs.get() {
+    let first = match state.settings.runs.get() {
         Some(n) => trf("Run {run} of {n}", &[("run", &run), ("n", &n.to_string())]),
         None => trf("Run {run}", &[("run", &run)]),
-    }];
+    };
+    let mut parts = vec![first];
     parts.push(match state.settings.tokens.get() {
         _ if state.tokens_unreported => tr("tokens not reported by this builder"),
         Some(b) => trf("{used} of {budget} tokens", &[("used", &tokens_words(state.tokens)), ("budget", &tokens_words(b))]),

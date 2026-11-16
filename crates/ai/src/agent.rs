@@ -1043,7 +1043,14 @@ impl ApiConversation {
                         // its last step, so a panic means it never did): whoever pumps this
                         // conversation (the build's run) waits for it, and Pause can't end that wait.
                         let backend = agent.chain.get(agent.current).map(|s| s.name.clone()).unwrap_or_default();
-                        let _ = etx.send(AgentEvent::TurnDone { backend, input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false, tokens_unknown: false });
+                        let _ = etx.send(AgentEvent::TurnDone {
+                            backend,
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            cost_usd: None,
+                            cost_is_estimate: false,
+                            tokens_unknown: false,
+                        });
                     }
                     busy2.store(false, Ordering::SeqCst);
                 }
@@ -1068,7 +1075,14 @@ impl ApiConversation {
                 log: None,
             });
             // The turn that was asked for ends here, or whoever waits for it waits for good.
-            self.queued.push(AgentEvent::TurnDone { backend: String::new(), input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false, tokens_unknown: false });
+            self.queued.push(AgentEvent::TurnDone {
+                backend: String::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: None,
+                cost_is_estimate: false,
+                tokens_unknown: false,
+            });
         }
     }
 }
@@ -1348,7 +1362,8 @@ pub(crate) mod tests {
             }
         }
         let host = Arc::new(FakeHost { calls: Mutex::default(), journal: Mutex::default() });
-        let slot = ModelSlot { name: "Fake".into(), model: Box::new(Panics), local: false, effort: None, max_turns: 10, context_tokens: 0, tools: Default::default() };
+        let slot =
+            ModelSlot { name: "Fake".into(), model: Box::new(Panics), local: false, effort: None, max_turns: 10, context_tokens: 0, tools: Default::default() };
         let mut c = ApiConversation::start(host, vec![slot], LoopConfig::default()).unwrap();
         c.send("Build it");
         let events = drain_until_done(&mut c, |_, _| {});
