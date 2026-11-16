@@ -347,13 +347,13 @@ pub enum Access {
     CleanRoomQuestion,
 }
 
-/// argv (after the program) for one prompt.
 /// A retried turn says "carry on" only when it really continues the saved session; a fresh
 /// session needs the original message.
 fn turn_text<'a>(retry: bool, resumes: bool, resume: Option<&str>, text: &'a str) -> &'a str {
     if retry && resumes && resume.is_some() { crate::failure::CONTINUE_TURN } else { text }
 }
 
+/// argv (after the program) for one prompt.
 pub fn build_args(
     adapter: &dyn AgentAdapter,
     opts: &BackendOptions,

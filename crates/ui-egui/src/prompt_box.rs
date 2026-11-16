@@ -276,7 +276,7 @@ pub fn show(ui: &mut Ui, text: &mut String, attachments: &[PathBuf], b: PromptBo
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Right to left: the settings button goes to the right of Send.
                     if let Some(lit) = b.settings {
-                        out.settings = Some(icons::button(ui, "settings", 32.0, lit, "Build loop settings"));
+                        out.settings = Some(icons::button(ui, "settings", theme::ControlSize::Medium, lit, "Build loop settings"));
                     }
                     if b.send {
                         let ready = !text.trim().is_empty();

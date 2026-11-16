@@ -960,7 +960,7 @@ impl AgentAdapter for Codex {
     }
 
     /// A question never resumes (Codex can't fork).
-    fn resumes_with(&self, options: &BackendOptions, question: bool) -> bool {
+    fn resumes_with(&self, _options: &BackendOptions, question: bool) -> bool {
         !question
     }
 
