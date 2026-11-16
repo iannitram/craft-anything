@@ -123,6 +123,9 @@ impl RunSet {
         }
         while self.queue.front().is_some_and(|(_, _, alone)| self.has_room(*alone)) {
             let Some((ws, opts, _)) = self.queue.pop_front() else { break };
+            // The project as it is now (its Builder may have been changed while it waited), the copy
+            // `RebuildRun::start` reads too.
+            let ws = Workspace::open(&ws.root).unwrap_or(ws);
             // The Builder may have been changed while it waited.
             let alone = must_work_alone(hub, &ws, &opts);
             if !self.has_room(alone) {
@@ -390,6 +393,32 @@ mod tests {
         fake.finish(&a.root);
         set.poll(&hub);
         assert!(!set.is_running(&c.root), "B is still working");
+        fake.finish(&b.root);
+        set.poll(&hub);
+        assert!(set.is_running(&c.root));
+        set.stop_all();
+    }
+
+    /// The queue reads the project when its turn comes: a Builder saved on it while it waited
+    /// decides whether it must work alone, as it decides what the run uses.
+    #[test]
+    fn a_queued_run_is_judged_by_the_project_on_disk() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = |n: &str| Workspace::create(d.path(), n, "A game", TargetRef::None).unwrap();
+        let (a, b, c) = (ws("A"), ws("B"), ws("C"));
+        let hub = two_backends();
+        let agent = RunOptions { backend: Some("Agent".into()), ..RunOptions::default() };
+        let fake = StandIns::new();
+        let mut set = RunSet::new(2).with_starter(fake.starter());
+        set.start(&hub, a.clone(), agent.clone()).unwrap();
+        set.start(&hub, b.clone(), agent).unwrap();
+        assert_eq!(set.start(&hub, c.clone(), RunOptions::default()).unwrap(), Started::Queued { position: 1 });
+        // The person picks another Builder for it while it waits.
+        Workspace::open(&c.root).unwrap().set_person(|m| m.builder = Some("Key".into())).unwrap();
+
+        fake.finish(&a.root);
+        set.poll(&hub);
+        assert!(!set.is_running(&c.root), "an API builder works alone, and B is still working");
         fake.finish(&b.root);
         set.poll(&hub);
         assert!(set.is_running(&c.root));

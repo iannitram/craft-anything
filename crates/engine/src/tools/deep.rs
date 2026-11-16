@@ -108,11 +108,11 @@ fn config(settings: &Settings, language_override: Option<String>) -> Option<(ghi
 
 /// Analyse a program with Ghidra ahead of time (Deep mode), so the builder's first decompile opens
 /// a saved analysis instead of waiting hours for one. Shares the analysis with any other process
-/// doing the same. `progress` gets a line now and then.
-pub fn prepare(settings: &Settings, bytes: &[u8], sha256: &str, progress: &(dyn Fn(&str) + Send + Sync)) -> Result<(), String> {
+/// doing the same. `progress` gets a line now and then; `stop` ends it early (its project is gone).
+pub fn prepare(settings: &Settings, bytes: &[u8], sha256: &str, progress: &(dyn Fn(&str) + Send + Sync), stop: &ghidra::Cancel<'_>) -> Result<(), String> {
     let (cfg, digest) = config(settings, None).ok_or_else(|| NOT_INSTALLED.to_string())?;
     ANALYSING.fetch_add(1, Ordering::SeqCst);
-    let closing = || CLOSING.load(Ordering::SeqCst);
+    let closing = || CLOSING.load(Ordering::SeqCst) || stop();
     let result = ghidra::analyse(&cfg, bytes, sha256, &digest, &closing, &|_, m: &str| progress(m)).map(|_| ()).map_err(|e| e.to_string());
     ANALYSING.fetch_sub(1, Ordering::SeqCst);
     result
@@ -164,7 +164,17 @@ pub fn pseudo_code(ctx: &mut Ctx<'_>, at: At, our_base: u64, params: serde_json:
         At::Ours(a) => rebase.to_engine(a),
         At::Engine(a) => a,
     };
-    match provider.decompile(entry) {
+    // Said while it waits: as the tool's progress, and in the project's inbox for the app's feed,
+    // which the progress doesn't reach when a coding agent runs this tool (#1714).
+    let progress = ctx.progress;
+    let activity = ctx.session.ext.get::<crate::inbox::InboxDir>().map(|d| crate::inbox::Activity::start(&d.0));
+    let waiting = |line: &str| {
+        progress(crate::tool::Progress { fraction: None, message: line.to_string() });
+        if let Some(a) = &activity {
+            a.say(line);
+        }
+    };
+    match provider.decompile(entry, &waiting) {
         Ok(Some(df)) => {
             let renames = user_renames(ctx, rebase);
             Ok(build_evidence(ctx, provider.as_ref(), df, rebase, &renames, params))
@@ -453,7 +463,7 @@ mod tests {
         fn image_base(&self) -> Option<u64> {
             Some(self.base)
         }
-        fn decompile(&self, entry: u64) -> Result<Option<DeepFunction>, ghidra::GhidraError> {
+        fn decompile(&self, entry: u64, _: &dyn Fn(&str)) -> Result<Option<DeepFunction>, ghidra::GhidraError> {
             self.asked.store(entry, Ordering::SeqCst);
             if entry < self.base {
                 return Err(ghidra::GhidraError::Bridge { code: "not_found".into(), message: "the address is not in executable memory".into() });
@@ -494,6 +504,55 @@ mod tests {
         assert_eq!(r["result"]["entry"], format!("{:#x}", l.code_va + 0x7a00));
     }
 
+    /// A deep engine that waits before answering, and what the project's inbox showed meanwhile.
+    struct Slow {
+        inbox: std::path::PathBuf,
+        seen: craft_anything_platform::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl DeepDecompiler for Slow {
+        fn engine(&self) -> &'static str {
+            "ghidra"
+        }
+        fn engine_version(&self) -> Option<String> {
+            Some("test".into())
+        }
+        fn image_base(&self) -> Option<u64> {
+            Some(tk::ELF_BASE)
+        }
+        fn decompile(&self, entry: u64, waiting: &dyn Fn(&str)) -> Result<Option<DeepFunction>, ghidra::GhidraError> {
+            waiting("Ghidra is decompiling this function (1 min so far; it gives up at 15 min)");
+            *self.seen.lock().unwrap() = crate::inbox::activity(&self.inbox);
+            Ok(Some(DeepFunction { entry, name: "main".into(), signature: None, pseudocode: Some("int main(void) { return 0; }".into()), created: false }))
+        }
+        fn list_functions(&self) -> Result<Vec<DeepFunction>, ghidra::GhidraError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// #1714: what a decompile says while it waits reaches the project's inbox, where the run that
+    /// shows the feed reads it, and is gone once the decompile is done.
+    #[test]
+    fn a_decompile_says_in_the_inbox_what_it_waits_on() {
+        let (elf, _) = tk::elf64(tk::ElfArch::X86_64, true);
+        let e = engine_with("prog", &elf);
+        let d = tempfile::tempdir().unwrap();
+        let slow = Arc::new(Slow { inbox: d.path().to_path_buf(), seen: craft_anything_platform::sync::Mutex::default() });
+        {
+            let mut s = e.session();
+            s.settings.deep_mode = true;
+            s.ext.insert(Arc::new(crate::inbox::InboxDir(d.path().to_path_buf())));
+            let provider: Arc<dyn DeepDecompiler> = slow.clone();
+            s.active_mut().unwrap().ext.insert(Arc::new(DeepSlot { provider: Ok(provider) }));
+        }
+        let r = call(&e, "native_function_pseudocode", json!({"function": "main"}));
+        assert_eq!(r["environment"]["engine"], "ghidra", "{r}");
+        let seen = slow.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(seen[0].1.starts_with("Ghidra is decompiling this function"), "{seen:?}");
+        assert!(crate::inbox::activity(d.path()).is_empty(), "the line goes when the decompile is done");
+    }
+
     /// A deep engine at our base that gives the same answer for every function: Ghidra's view of
     /// `main`, calling `helper` by its symbol.
     struct Symbols;
@@ -508,7 +567,7 @@ mod tests {
         fn image_base(&self) -> Option<u64> {
             Some(tk::ELF_BASE)
         }
-        fn decompile(&self, entry: u64) -> Result<Option<DeepFunction>, ghidra::GhidraError> {
+        fn decompile(&self, entry: u64, _: &dyn Fn(&str)) -> Result<Option<DeepFunction>, ghidra::GhidraError> {
             let pseudocode = Some(
                 "int main(void) {
   return helper(5) + helper_count + my_helper();
@@ -619,7 +678,7 @@ mod tests {
         fn image_base(&self) -> Option<u64> {
             Some(tk::ELF_BASE)
         }
-        fn decompile(&self, entry: u64) -> Result<Option<DeepFunction>, ghidra::GhidraError> {
+        fn decompile(&self, entry: u64, _: &dyn Fn(&str)) -> Result<Option<DeepFunction>, ghidra::GhidraError> {
             let pseudocode = Some("int sub_parse(void) { return 0; }".into());
             Ok(Some(DeepFunction { entry, name: "sub_parse".into(), signature: None, pseudocode, created: false }))
         }

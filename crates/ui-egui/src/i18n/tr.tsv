@@ -1,5 +1,6 @@
 # tr: Turkish UI translations. Licensed MIT OR Apache-2.0.
 # UTF-8: English source<TAB>translation. Keep placeholders and escapes intact.
+Default (its own settings)	Varsayılan (kendi ayarları)
 OpenCode default	OpenCode varsayılanı
 Model default	Model varsayılanı
 Thinking depth	Düşünme derinliği
@@ -1366,6 +1367,7 @@ your files there are the app, edited in place	oradaki dosyalarınız uygulamanı
 {name} builds what you make; answers come from {brain}.	Yaptıklarınızı {name} derler; yanıtlar {brain} kaynağından gelir.
 {name} can't be attached: a message takes pictures up to 20 MB.	{name} eklenemiyor: bir mesaj en fazla 20 MB resim alır.
 {name} can't be attached: it isn't a PNG, JPEG, GIF or WebP picture.	{name} eklenemiyor: PNG, JPEG, GIF veya WebP resmi değil.
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name} yalnızca okumayla sınırlanamıyor, bu yüzden ona soru sorulmuyor. Claude Code ile ya da API anahtarı olan bir yapay zekâ ile sorun.
 {name} is ready	{name} hazır
 {name} is ready.	{name} hazır.
 {name} isn't available yet in this build.	{name} bu derlemede henüz kullanılamıyor.
@@ -1467,3 +1469,27 @@ Connecting to {name}… {seconds} s	{name} sunucusuna bağlanılıyor… {second
 Stopped adding {name}.	{name} eklenmesi durduruldu.
 It isn't there any more, so {program} runs in its place.	Artık orada değil, bu yüzden yerine {program} çalışıyor.
 Use it	Bunu kullan
+
+# Native update checks and verified installation.
+ArtCraft Launcher manages this app's version. Change its version there.	Bu uygulamanın sürümünü ArtCraft Launcher yönetiyor. Sürümü oradan değiştirin.
+Check again	Yeniden denetle
+Check for Updates	Güncellemeleri denetle
+Check for Updates…	Güncellemeleri denetle…
+Checking for updates…	Güncellemeler denetleniyor…
+Couldn't check for updates: {error}	Güncellemeler denetlenemedi: {error}
+Downloading and verifying the update…	Güncelleme indiriliyor ve doğrulanıyor…
+No installer is available for this platform.	Bu platform için bir yükleyici yok.
+Releases	Sürümler
+Save your work and stop running tasks before installing an update.	Güncelleme yüklemeden önce çalışmanızı kaydedin ve çalışan görevleri durdurun.
+The update failed: {error}	Güncelleme başarısız oldu: {error}
+The update worker stopped unexpectedly. Try checking again.	Güncelleme işlemi beklenmedik şekilde durdu. Yeniden denetlemeyi deneyin.
+This installation is managed externally. Update it with its package manager or open Releases.	Bu kurulum harici olarak yönetiliyor. Paket yöneticisiyle güncelleyin veya Sürümler’i açın.
+Update and restart	Güncelle ve yeniden başlat
+Update ready. Restarting…	Güncelleme hazır. Yeniden başlatılıyor…
+Updated to {version}.	{version} sürümüne güncellendi.
+Use Releases or your package manager to update this installation.	Bu kurulumu güncellemek için Sürümler’i veya paket yöneticinizi kullanın.
+You're up to date.	En güncel sürümdesiniz.
+{version} is available.	{version} sürümü kullanılabilir.
+Forget a website sign-in	Bir web sitesinin oturumunu unut
+Sign in to a website	Bir web sitesinde oturum aç
+Some shared files could not be hard-linked and were copied instead ({size}).	Bazı paylaşılan dosyalar sabit bağlantıyla bağlanamadı ve kopyalandı ({size}).

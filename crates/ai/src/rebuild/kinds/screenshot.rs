@@ -304,7 +304,7 @@ pub(super) fn run_with(cx: &CheckCx, option: &str, file: &Path) -> Result<OwnRun
     let app = cx.ws.app_dir();
     let file = craft_anything_engine::workspace::absolute(file);
     let godot = cx.godot();
-    let Some((program, args)) = launch(&app, godot.as_deref()) else { return Ok(OwnRun::NoProgram) };
+    let Some((program, args)) = craft_anything_engine::outputs::launch_now(&app, godot.as_deref()) else { return Ok(OwnRun::NoProgram) };
     let program = craft_anything_engine::outputs::absolute_program(&program);
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| ToolError::io(dir.display(), e))?;

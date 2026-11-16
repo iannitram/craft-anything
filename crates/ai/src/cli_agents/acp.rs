@@ -382,9 +382,16 @@ impl AcpCore {
     }
 
     fn turn_done(&self) -> Out {
-        // This client has no attributable ACP usage totals. Leave the cost unknown instead of
-        // treating another provider's prices, or a session-wide total, as this turn's bill.
-        Out::Event(AgentEvent::TurnDone { backend: self.backend.clone(), input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false })
+        // ACP usage updates describe the current context, without a per-turn token split.
+        // Leave usage and cost unknown.
+        Out::Event(AgentEvent::TurnDone {
+            backend: self.backend.clone(),
+            input_tokens: 0,
+            output_tokens: 0,
+            tokens_unknown: true,
+            cost_usd: None,
+            cost_is_estimate: false,
+        })
     }
 
     fn response(&mut self, id: u64, msg: &Value) -> Vec<Out> {
@@ -944,6 +951,7 @@ impl AcpConversation {
                     backend: self.backend.clone(),
                     input_tokens: 0,
                     output_tokens: 0,
+                    tokens_unknown: true,
                     cost_usd: None,
                     cost_is_estimate: false,
                 });
@@ -1010,7 +1018,14 @@ impl Conversation for AcpConversation {
                 )),
                 log,
             });
-            events.push(AgentEvent::TurnDone { backend: self.backend.clone(), input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false });
+            events.push(AgentEvent::TurnDone {
+                backend: self.backend.clone(),
+                input_tokens: 0,
+                output_tokens: 0,
+                tokens_unknown: true,
+                cost_usd: None,
+                cost_is_estimate: false,
+            });
         }
         events
     }
@@ -1134,9 +1149,13 @@ mod tests {
             r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"fn main"}}]}}}"#,
         ));
         assert!(matches!(&ev[..], [AgentEvent::ToolFinished { ok: true, summary, tool, .. }] if summary == "fn main" && tool == "Read main.rs"));
+        let usage = c.line(
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"usage_update","used":850,"size":100000}}}"#,
+        );
+        assert!(events(usage).is_empty(), "context usage is not a per-turn token count");
         let end = c.line(r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}"#);
         assert!(end.contains(&Out::TurnEnded));
-        assert!(matches!(events(end)[..], [AgentEvent::TurnDone { .. }]));
+        assert!(matches!(events(end)[..], [AgentEvent::TurnDone { tokens_unknown: true, cost_usd: None, .. }]));
         // The next message goes straight out on the same session.
         assert_eq!(sent(&c.prompt("And then?"))[0]["params"]["sessionId"], "s-1");
     }

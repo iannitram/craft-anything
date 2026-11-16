@@ -221,12 +221,18 @@ pub fn scan_html(src: &str) -> HtmlFacts {
 /// blocks such as JSON or HTML templates aren't JavaScript (#285).
 fn javascript_type(t: Option<&str>) -> bool {
     let Some(t) = t else { return true };
-    let essence = t.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    let essence = t.trim_matches(|c: char| c.is_ascii_whitespace()).to_ascii_lowercase();
     essence.is_empty()
         || essence == "module"
         || matches!(essence.as_str(), "text/babel" | "text/jsx" | "text/jscript" | "text/livescript")
         || [
             "text/javascript",
+            "text/javascript1.0",
+            "text/javascript1.1",
+            "text/javascript1.2",
+            "text/javascript1.3",
+            "text/javascript1.4",
+            "text/javascript1.5",
             "application/javascript",
             "application/ecmascript",
             "text/ecmascript",
@@ -236,7 +242,7 @@ fn javascript_type(t: Option<&str>) -> bool {
             "text/x-ecmascript",
         ]
         .iter()
-        .any(|m| essence == *m || essence.strip_prefix(m).is_some_and(|v| v.starts_with('1')))
+        .any(|m| essence == *m)
 }
 
 #[cfg(test)]
@@ -267,7 +273,7 @@ mod tests {
             let f = scan_html(&format!(r#"<script type="{t}">{{"imports": {{}}}}</script><script type="{t}" src="data.json"></script>"#));
             assert!(f.scripts.is_empty(), "{t}: {:?}", f.scripts);
         }
-        for t in ["", "module", "text/javascript", "Application/JavaScript", "text/javascript; charset=utf-8", "text/babel"] {
+        for t in ["", "module", "text/javascript", "Application/JavaScript", "text/babel"] {
             assert_eq!(scan_html(&format!(r#"<script type="{t}">fetch("/real-api");</script>"#)).scripts.len(), 1, "{t}");
         }
     }

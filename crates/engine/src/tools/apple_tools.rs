@@ -295,8 +295,8 @@ fn bundle_info_plist(dir: &Path) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// A bundle's main executable.
-fn bundle_executable(dir: &Path) -> Option<PathBuf> {
+/// A bundle's main executable: the one its Info.plist names, else the one named like the bundle.
+pub fn bundle_executable(dir: &Path) -> Option<PathBuf> {
     let exe_name =
         bundle_info_plist(dir).and_then(|p| read_plist_file(&p)).and_then(|v| v.get("CFBundleExecutable").and_then(plist::Value::as_str).map(str::to_string));
     let stem = dir.file_stem().map(|s| s.to_string_lossy().into_owned());

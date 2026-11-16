@@ -146,9 +146,9 @@ pub fn card(ui: &mut Ui, a: &mut Asked, glossary: bool) {
         let mut toggle = false;
         ui.horizontal(|ui| {
             let name = if a.collapsed { "Show the answer" } else { "Hide the answer" };
-            toggle |= icons::button(ui, if a.collapsed { "chevron-right" } else { "chevron-down" }, 22.0, false, name).clicked();
+            toggle |= icons::button(ui, if a.collapsed { "chevron-right" } else { "chevron-down" }, theme::ControlSize::Small, false, name).clicked();
             let (icon, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-            icons::paint(ui, icon, "circle-help", 16.0, t.icon);
+            icons::paint(ui, icon, "circle-help", theme::icon::MD, t.icon);
             let line = egui::Label::new(RichText::new(&a.question).font(theme::semibold(theme::BODY))).sense(egui::Sense::click()).selectable(false);
             let line = if a.collapsed { line.truncate() } else { line.wrap() };
             toggle |= ui.add(line).on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
@@ -159,12 +159,12 @@ pub fn card(ui: &mut Ui, a: &mut Asked, glossary: bool) {
         if a.collapsed {
             return;
         }
-        ui.add_space(4.0);
+        ui.add_space(theme::space::XS);
         match &a.answer {
             None => widgets::thinking(ui),
             Some(Ok(ans)) => {
                 chat::rich_text(ui, &ans.text, glossary);
-                ui.add_space(4.0);
+                ui.add_space(theme::space::XS);
                 let from = if ans.from_session { tr("from the builder's own memory of the build") } else { tr("from the project's files") };
                 let cost = ans.cost_usd.map(|c| format!(" · ${c:.2}")).unwrap_or_default();
                 ui.label(

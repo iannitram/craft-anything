@@ -57,6 +57,7 @@ impl SharedConversation {
                                             backend: entry.config.name.clone(),
                                             input_tokens: 0,
                                             output_tokens: 0,
+                                            tokens_unknown: false,
                                             cost_usd: None,
                                             cost_is_estimate: false,
                                         });
@@ -113,6 +114,7 @@ impl SharedConversation {
                         backend: entry.config.name.clone(),
                         input_tokens: 0,
                         output_tokens: 0,
+                        tokens_unknown: false,
                         cost_usd: None,
                         cost_is_estimate: false,
                     });

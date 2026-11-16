@@ -1,5 +1,6 @@
 # ko: Korean UI translations. Licensed MIT OR Apache-2.0.
 # UTF-8: English source<TAB>Korean text. Keep placeholders and escapes intact.
+Default (its own settings)	기본값(자체 설정)
 OpenCode default	OpenCode 기본값
 Model default	모델 기본값
 Thinking depth	생각 깊이
@@ -1366,6 +1367,7 @@ your files there are the app, edited in place	그 파일이 곧 앱이며 그 �
 {name} builds what you make; answers come from {brain}.	만들기는 {name} 담당이고, 답은 {brain}에서 옵니다.
 {name} can't be attached: a message takes pictures up to 20 MB.	{name}을(를) 첨부할 수 없습니다: 메시지에는 20MB까지의 그림만 넣을 수 있습니다.
 {name} can't be attached: it isn't a PNG, JPEG, GIF or WebP picture.	{name}을(를) 첨부할 수 없습니다: PNG, JPEG, GIF, WebP 그림이 아닙니다.
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name}은(는) 읽기만 하도록 제한할 수 없어 질문을 받지 않습니다. Claude Code나 API 키가 있는 AI로 물어보세요.
 {name} is ready	{name} 준비 완료
 {name} is ready.	{name} 준비를 마쳤습니다.
 {name} isn't available yet in this build.	이 빌드에서는 아직 {name} 기능을 쓸 수 없습니다.
@@ -1467,3 +1469,27 @@ Connecting to {name}… {seconds} s	{name}에 연결하는 중… {seconds}초
 Stopped adding {name}.	{name} 추가를 멈췄습니다.
 It isn't there any more, so {program} runs in its place.	더 이상 그곳에 없어서 대신 {program}이(가) 실행됩니다.
 Use it	이것 사용
+
+# Native update checks and verified installation.
+ArtCraft Launcher manages this app's version. Change its version there.	ArtCraft Launcher가 이 앱의 버전을 관리합니다. 버전은 그곳에서 변경하세요.
+Check again	다시 확인
+Check for Updates	업데이트 확인
+Check for Updates…	업데이트 확인…
+Checking for updates…	업데이트 확인 중…
+Couldn't check for updates: {error}	업데이트를 확인하지 못했습니다: {error}
+Downloading and verifying the update…	업데이트 다운로드 및 검증 중…
+No installer is available for this platform.	이 플랫폼에 사용할 수 있는 설치 프로그램이 없습니다.
+Releases	릴리스
+Save your work and stop running tasks before installing an update.	업데이트를 설치하기 전에 작업을 저장하고 실행 중인 작업을 중지하세요.
+The update failed: {error}	업데이트 실패: {error}
+The update worker stopped unexpectedly. Try checking again.	업데이트 작업이 예기치 않게 중지되었습니다. 다시 확인해 보세요.
+This installation is managed externally. Update it with its package manager or open Releases.	이 설치는 외부에서 관리합니다. 패키지 관리자로 업데이트하거나 릴리스를 여세요.
+Update and restart	업데이트 후 다시 시작
+Update ready. Restarting…	업데이트 준비 완료. 다시 시작 중…
+Updated to {version}.	{version}(으)로 업데이트되었습니다.
+Use Releases or your package manager to update this installation.	릴리스 또는 패키지 관리자를 사용하여 이 설치를 업데이트하세요.
+You're up to date.	최신 버전입니다.
+{version} is available.	{version} 버전을 사용할 수 있습니다.
+Forget a website sign-in	웹사이트 로그인 정보 지우기
+Sign in to a website	웹사이트에 로그인
+Some shared files could not be hard-linked and were copied instead ({size}).	일부 공유 파일은 하드 링크할 수 없어 복사했습니다 ({size}).

@@ -324,7 +324,9 @@ mod tracker {
         dismissed: Vec<String>,
     }
 
-    /// Held only for short bookkeeping, never while taking another lock, so it can't deadlock.
+    /// Held only for short bookkeeping, never while taking another lock, so it can't deadlock. That
+    /// includes the logger: the app's logger writes to a file behind one of our own locks, which
+    /// comes back here, so nothing logs while this guard is held (see [`remember`]).
     fn registry() -> std::sync::MutexGuard<'static, Registry> {
         static REGISTRY: OnceLock<std::sync::Mutex<Registry>> = OnceLock::new();
         REGISTRY.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner)
@@ -380,15 +382,19 @@ mod tracker {
         None
     }
 
-    fn remember(r: &mut Registry, kind: ProblemKind, summary: String) {
+    /// Keep a new problem. Says whether it was new, and so should be logged: the caller logs it
+    /// once it has let go of the registry, because logging takes the logger's own lock, which comes
+    /// back to the registry and would wait on a registry this thread still holds.
+    #[must_use]
+    fn remember(r: &mut Registry, kind: ProblemKind, summary: String) -> bool {
         if r.dismissed.contains(&summary) || r.problems.iter().any(|p| p.summary == summary) {
-            return;
+            return false;
         }
-        log::error!("{summary}");
         r.problems.push(Problem { kind, summary, log: None });
         if r.problems.len() > KEEP_PROBLEMS {
             r.problems.remove(0);
         }
+        true
     }
 
     /// Should the waiting thread stop? Removes its wait when it should, in the same step as the
@@ -404,7 +410,11 @@ mod tracker {
             }
             r.waits.remove(&me);
             let text = format!("A deadlock was found and broken: {chain}.");
-            remember(&mut r, ProblemKind::Broken, text.clone());
+            let new = remember(&mut r, ProblemKind::Broken, text.clone());
+            drop(r);
+            if new {
+                log::error!("{text}");
+            }
             return Some(Verdict::Deadlock(text));
         }
         let waited = r.waits.get(&me)?.since.elapsed();
@@ -426,7 +436,11 @@ mod tracker {
             return None;
         }
         r.waits.remove(&me);
-        remember(&mut r, ProblemKind::Stuck, text.clone());
+        let new = remember(&mut r, ProblemKind::Stuck, text.clone());
+        drop(r);
+        if new {
+            log::error!("{text}");
+        }
         Some(if early { Verdict::Stuck(text) } else { Verdict::Deadlock(text) })
     }
 
@@ -441,7 +455,10 @@ mod tracker {
     }
 
     pub fn report(kind: ProblemKind, summary: String) {
-        remember(&mut registry(), kind, summary);
+        let new = remember(&mut registry(), kind, summary.clone());
+        if new {
+            log::error!("{summary}");
+        }
     }
 
     pub fn dismiss(summary: &str) {
@@ -469,8 +486,10 @@ mod tracker {
                 found.push((kind, format!("Thread '{}' at {} is waiting because {what}.", wait.thread_name, wait.at)));
             }
         }
-        for (kind, text) in found {
-            remember(&mut r, kind, text);
+        let new: Vec<String> = found.into_iter().filter(|(kind, text)| remember(&mut r, *kind, text.clone())).map(|(_, text)| text).collect();
+        drop(r);
+        for text in new {
+            log::error!("{text}");
         }
     }
 
@@ -629,5 +648,33 @@ mod tests {
         assert!(!problems().iter().any(|q| q.summary == p.summary));
         drop(g);
         assert_eq!(finished.recv_timeout(LIMIT).expect("it hung"), Ok(()));
+    }
+
+    #[test]
+    fn reporting_a_problem_while_the_logger_takes_a_lock_does_not_freeze_every_lock() {
+        // The app's logger writes to a file behind one of these locks, so logging a problem takes a
+        // lock. That must not happen while the registry is held: the registry would wait on itself,
+        // and every other lock in the app would wait behind it.
+        struct LockingLogger(Mutex<u32>);
+        impl log::Log for LockingLogger {
+            fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+                true
+            }
+            fn log(&self, _: &log::Record<'_>) {
+                *self.0.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+            }
+            fn flush(&self) {}
+        }
+        static LOGGER: LockingLogger = LockingLogger(Mutex::new(0));
+        let _ = log::set_logger(&LOGGER);
+        log::set_max_level(log::LevelFilter::Error);
+        let (done, finished) = channel();
+        std::thread::spawn(move || {
+            report(ProblemKind::SlowJob, "a long job is still running (logger lock test)".to_string());
+            let after = Mutex::new(0);
+            drop(after.lock());
+            let _ = done.send(());
+        });
+        finished.recv_timeout(LIMIT).expect("a problem report froze every lock");
     }
 }

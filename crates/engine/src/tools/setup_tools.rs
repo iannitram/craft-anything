@@ -505,8 +505,9 @@ pub fn with_setting(settings: &Settings, key: &str, value: Value) -> Result<Sett
     }
     let mut next: Settings = serde_json::from_value(doc)
         .map_err(|e| ToolError::invalid(format!("That value doesn't fit {key}: {e}")).with_remediation("Check the type in settings_show."))?;
-    // Not part of the saved settings, so the round trip above drops it: keep this session's.
+    // Not part of the saved settings, so the round trip above drops them: keep this session's.
     next.engines.only_configured = settings.engines.only_configured;
+    next.not_loaded.clone_from(&settings.not_loaded);
     Ok(next)
 }
 
@@ -536,6 +537,31 @@ mod tests {
         assert!(with_setting(&s, "version", json!(9)).is_err());
         assert!(with_setting(&s, "auto_mode.inner", json!(1)).is_err());
         assert!(with_setting(&s, "", json!(1)).is_err());
+    }
+
+    /// Changing a setting rebuilds the settings from their saved form, which has no room for why
+    /// config.toml wasn't loaded; dropping that would let defaults be saved over the unread file.
+    #[test]
+    fn a_setting_changed_on_settings_that_werent_loaded_is_not_saved_over_the_file() {
+        let mut s = crate::testing::session();
+        let config = s.config_dir().join("config.toml");
+        std::fs::create_dir(&config).unwrap(); // Something in config.toml's place that can't be read.
+        let test_session = s.settings.clone();
+        s.settings = Settings::load_from(&config);
+        assert!(s.settings.not_loaded.is_some());
+        (s.settings.deep_mode, s.settings.engines.only_configured) = (test_session.deep_mode, test_session.engines.only_configured);
+        assert_eq!(with_setting(&s.settings, "auto_mode", json!(false)).unwrap().not_loaded, s.settings.not_loaded);
+        let e = Engine::new(s);
+        let call = |id: &str, p: Value| e.call(id, p, CallOptions::new(Caller::Cli)).map(|o| o.to_json()["result"].clone());
+        for (tool, params) in
+            [("settings_set", json!({"key": "auto_mode", "value": false})), ("plugins_add", json!({"id": "docs", "url": "https://mcp.example.com/mcp"}))]
+        {
+            let err = call(tool, params).unwrap_err();
+            assert_eq!(err.code, craft_anything_evidence::ErrorCode::BadSettings, "{tool}: {err:?}");
+        }
+        assert!(config.is_dir(), "what was in config.toml's place is still there");
+        let session = e.session();
+        assert!(session.settings.auto_mode && session.settings.plugins == test_session.plugins, "a save that fails changes nothing in memory");
     }
 
     #[test]

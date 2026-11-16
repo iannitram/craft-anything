@@ -24,14 +24,18 @@ pub(super) fn game_root(picked: &Path) -> PathBuf {
     dir
 }
 
-/// What to study for a local target: the program itself (a launcher script points at it), and
-/// the folder whose maps, pictures and sounds show how it looks (for launchers, and for games
-/// when `game`).
+/// What to study for a local target: the program itself (a launcher script points at it, a macOS
+/// app bundle names it), and the folder whose maps, pictures and sounds show how it looks (for
+/// launchers, and for games when `game`).
 pub(super) fn locate(path: &Path, game: bool) -> (PathBuf, Option<PathBuf>) {
     if path.is_dir() {
         if game {
             let root = game_root(path);
             return (main_program(&root).unwrap_or_else(|| path.to_path_buf()), Some(root));
+        }
+        let bundle = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("app"));
+        if bundle && let Some(program) = craft_anything_engine::tools::apple_tools::bundle_executable(path) {
+            return (program, None);
         }
         return (path.to_path_buf(), None);
     }

@@ -1,5 +1,6 @@
 # th: Thai UI translations. Licensed MIT OR Apache-2.0.
 # UTF-8: English source<TAB>translation. Keep placeholders and escapes intact.
+Default (its own settings)	ค่าเริ่มต้น (การตั้งค่าของตัวเอง)
 OpenCode default	ค่าเริ่มต้นของ OpenCode
 Model default	ค่าเริ่มต้นของโมเดล
 Thinking depth	ระดับการคิด
@@ -1366,6 +1367,7 @@ your files there are the app, edited in place	ไฟล์ของคุณท�
 {name} builds what you make; answers come from {brain}.	{name} สร้างสิ่งที่คุณทำ คำตอบมาจาก {brain}
 {name} can't be attached: a message takes pictures up to 20 MB.	แนบ {name} ไม่ได้: ข้อความรับรูปสูงสุด 20 MB
 {name} can't be attached: it isn't a PNG, JPEG, GIF or WebP picture.	แนบ {name} ไม่ได้: ไม่ใช่รูป PNG, JPEG, GIF หรือ WebP
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name} จำกัดให้อ่านอย่างเดียวไม่ได้ จึงไม่ถูกถามคำถาม ถามด้วย Claude Code หรือ AI ที่มีคีย์ API แทน
 {name} is ready	{name} พร้อมแล้ว
 {name} is ready.	{name} พร้อมแล้ว
 {name} isn't available yet in this build.	{name} ยังใช้ไม่ได้ในบิลด์นี้
@@ -1467,3 +1469,27 @@ Connecting to {name}… {seconds} s	กำลังเชื่อมต่อ�
 Stopped adding {name}.	หยุดเพิ่ม {name} แล้ว
 It isn't there any more, so {program} runs in its place.	ไม่มีอยู่ที่นั่นแล้ว จึงใช้ {program} แทน
 Use it	ใช้อันนี้
+
+# Native update checks and verified installation.
+ArtCraft Launcher manages this app's version. Change its version there.	ArtCraft Launcher จัดการเวอร์ชันของแอปนี้ โปรดเปลี่ยนเวอร์ชันที่นั่น
+Check again	ตรวจสอบอีกครั้ง
+Check for Updates	ตรวจสอบการอัปเดต
+Check for Updates…	ตรวจสอบการอัปเดต…
+Checking for updates…	กำลังตรวจสอบการอัปเดต…
+Couldn't check for updates: {error}	ตรวจสอบการอัปเดตไม่ได้: {error}
+Downloading and verifying the update…	กำลังดาวน์โหลดและตรวจสอบการอัปเดต…
+No installer is available for this platform.	ไม่มีตัวติดตั้งสำหรับแพลตฟอร์มนี้
+Releases	รุ่นที่เผยแพร่
+Save your work and stop running tasks before installing an update.	บันทึกงานและหยุดงานที่กำลังทำงานก่อนติดตั้งการอัปเดต
+The update failed: {error}	การอัปเดตล้มเหลว: {error}
+The update worker stopped unexpectedly. Try checking again.	กระบวนการอัปเดตหยุดโดยไม่คาดคิด โปรดลองตรวจสอบอีกครั้ง
+This installation is managed externally. Update it with its package manager or open Releases.	การติดตั้งนี้จัดการจากภายนอก โปรดอัปเดตผ่านตัวจัดการแพ็กเกจหรือเปิดรุ่นที่เผยแพร่
+Update and restart	อัปเดตและเริ่มใหม่
+Update ready. Restarting…	การอัปเดตพร้อมแล้ว กำลังเริ่มใหม่…
+Updated to {version}.	อัปเดตเป็น {version} แล้ว
+Use Releases or your package manager to update this installation.	ใช้รุ่นที่เผยแพร่หรือตัวจัดการแพ็กเกจเพื่ออัปเดตการติดตั้งนี้
+You're up to date.	คุณใช้เวอร์ชันล่าสุดแล้ว
+{version} is available.	มี {version} พร้อมใช้งานแล้ว
+Forget a website sign-in	ลืมการลงชื่อเข้าใช้เว็บไซต์
+Sign in to a website	ลงชื่อเข้าใช้เว็บไซต์
+Some shared files could not be hard-linked and were copied instead ({size}).	ไฟล์ที่แชร์บางไฟล์สร้างฮาร์ดลิงก์ไม่ได้ จึงคัดลอกแทน ({size})

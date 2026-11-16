@@ -3,7 +3,7 @@
 
 use super::native_common::{DEFAULT_LIMIT, address_or_cursor, ev, hex, image, name_of, native, page, params_json, select_document, spec};
 use crate::tool::{Ctx, Effects, Requires, ToolOutput, ToolSpec, Toolset, parse_params, schema_of};
-use craft_anything_disasm::slot_label;
+use craft_anything_disasm::{Xref, slot_label};
 use craft_anything_evidence::{Confidence, Coverage, ErrorCode, Limitation, Location, ToolError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -526,35 +526,72 @@ fn native_functions_search(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutpu
     Ok(ToolOutput::evidence(e))
 }
 
+/// Most references listed for one matching string; `reference_count` stays complete within the analysis.
+const MAX_STRING_REFERENCES: usize = 32;
+
+/// The first references, the complete count, and whether the list was cut.
+fn string_references(refs: &[Xref], function_of: impl Fn(u64) -> Option<String>) -> (Vec<Value>, usize, bool) {
+    let users = refs.iter().take(MAX_STRING_REFERENCES).map(|x| json!({"from": hex(x.from), "function": function_of(x.from)})).collect();
+    (users, refs.len(), refs.len() > MAX_STRING_REFERENCES)
+}
+
+/// The display cap's limitation, which also says how far `reference_count` can be trusted.
+fn references_capped_limitation(capped: bool, analysis_capped: bool) -> Option<Limitation> {
+    capped.then(|| {
+        let completeness = if analysis_capped {
+            "the analysis xref limit was reached, so reference_count may be incomplete too."
+        } else {
+            "reference_count is complete within this analysis, which can miss references made at run time."
+        };
+        Limitation::new("references_capped", format!("Only the first {MAX_STRING_REFERENCES} references are listed per string; {completeness}"))
+    })
+}
+
+/// The analysis's own cross-reference limit, when it kept only the first cross-references.
+fn xref_limit_limitation(limitations: &[(String, String)]) -> Option<Limitation> {
+    limitations.iter().find(|(code, _)| code == "xref_limit").map(|(code, message)| Limitation::new(code.clone(), message.clone()))
+}
+
 fn native_strings_find(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
     let p: SearchParams = parse_params(params)?;
     select_document(ctx, &p.document)?;
     let m = Matcher::new(&p.pattern, p.mode, p.case_sensitive)?;
     let st = native(ctx)?;
     let mut rows = Vec::new();
+    let mut references_capped = false;
     for (i, s) in st.prog.strings.iter().enumerate() {
         if i % 4096 == 0 {
             ctx.cancel.check()?;
         }
         if m.is_match(&s.text) {
-            let users: Vec<Value> = st
-                .prog
-                .xrefs_to
-                .get(&s.addr)
-                .map(|v| {
-                    v.iter().take(32).map(|x| json!({"from": hex(x.from), "function": st.prog.function_containing(x.from).map(|f| f.name.clone())})).collect()
-                })
-                .unwrap_or_default();
-            rows.push(json!({"address": hex(s.addr), "text": s.text, "section": s.section, "references": users}));
+            let refs = st.prog.xrefs_to.get(&s.addr).map(Vec::as_slice).unwrap_or(&[]);
+            let (users, total, capped) = string_references(refs, |from| st.prog.function_containing(from).map(|f| f.name.clone()));
+            references_capped |= capped;
+            rows.push(json!({
+                "address": hex(s.addr),
+                "text": s.text,
+                "section": s.section,
+                "references": users,
+                "reference_count": total,
+                "references_capped": capped,
+            }));
         }
     }
     let (items, cov) = page(&rows, p.offset, p.limit);
-    let e = ev(ctx, "native_strings_find", params_json(&p))?
+    let mut b = ev(ctx, "native_strings_find", params_json(&p))?
         .result(json!({"matches": items, "total": rows.len()}))
         .summary(format!("{} strings match \"{}\".", rows.len(), p.pattern))
         .coverage(cov)
-        .limitation(Limitation::new("data_sections_only", "only strings stored in the file are searched (absence is not proof)"))
-        .build()?;
+        .limitation(Limitation::new("data_sections_only", "only strings stored in the file are searched (absence is not proof)"));
+    let xref_limit = xref_limit_limitation(&st.prog.limitations);
+    let analysis_capped = xref_limit.is_some();
+    if let Some(l) = xref_limit {
+        b = b.limitation(l);
+    }
+    if let Some(l) = references_capped_limitation(references_capped, analysis_capped) {
+        b = b.limitation(l);
+    }
+    let e = b.build()?;
     Ok(ToolOutput::evidence(e))
 }
 
@@ -668,7 +705,9 @@ fn native_inline_comment_read(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOu
 
 #[cfg(test)]
 mod tests {
-    use super::super::native_common::test_support::*;
+    use super::super::native_common::{NativeState, test_support::*};
+    use super::*;
+    use craft_anything_disasm::{Image, Limits, NoControl, Program, Xref, XrefKind};
     use craft_anything_testkit as tk;
     use serde_json::json;
 
@@ -704,6 +743,9 @@ mod tests {
         assert_eq!(hit["name"], "puts");
         let r = call(&e, "native_strings_find", json!({"pattern": "CRAFT"}));
         assert_eq!(r["result"]["total"], 1);
+        let hit = &r["result"]["matches"][0];
+        assert_eq!(hit["reference_count"].as_u64().unwrap() as usize, hit["references"].as_array().unwrap().len());
+        assert_eq!(hit["references_capped"], false);
         let r = call(&e, "native_strings_find", json!({"pattern": "CRAFT", "case_sensitive": true}));
         assert_eq!(r["result"]["total"], 0);
         assert_eq!(call_err(&e, "native_strings_find", json!({"pattern": "(", "mode": "regex"})).code, craft_anything_evidence::ErrorCode::BadInput);
@@ -723,6 +765,103 @@ mod tests {
         assert_eq!(r["result"]["documents"].as_array().unwrap().len(), 1);
         assert!(call_err(&e, "native_functions_list", json!({"bogus": 1})).message.contains("unknown field"));
         assert!(call_err(&e, "native_functions_list", json!({"document": "nope"})).remediation.is_some());
+    }
+
+    /// A string with more than 32 references keeps its full count and says the list was cut.
+    #[test]
+    fn string_references_report_the_full_count_when_capped() {
+        let refs: Vec<Xref> = (0..33).map(|i| Xref { from: 0x1000 + i, to: 0x400240, kind: XrefKind::Data }).collect();
+        let (users, total, capped) = string_references(&refs, |from| (from % 2 == 0).then(|| "main".to_string()));
+        assert_eq!(total, 33);
+        assert_eq!(users.len(), 32);
+        assert!(capped);
+        assert_eq!(users[0]["function"], "main");
+        assert!(users[1]["function"].is_null());
+        let (_, total, capped) = string_references(&refs[..32], |_| None);
+        assert_eq!(total, 32);
+        assert!(!capped);
+        let plain = references_capped_limitation(true, false).unwrap();
+        assert!(plain.message.contains("reference_count is complete within this analysis"), "{}", plain.message);
+        let limited = references_capped_limitation(true, true).unwrap();
+        assert!(limited.message.contains("analysis xref limit") && !limited.message.contains("complete within this analysis"), "{}", limited.message);
+        assert!(references_capped_limitation(false, false).is_none());
+        assert!(references_capped_limitation(false, true).is_none());
+        let lims = vec![("xref_limit".to_string(), "kept the first 10 cross-references".to_string())];
+        assert_eq!(xref_limit_limitation(&lims).unwrap().code, "xref_limit");
+        assert!(xref_limit_limitation(&[]).is_none());
+    }
+
+    /// An image whose entry function references the first string `refs` times and the second
+    /// once. Both strings are found by the same search, so its pages can be checked.
+    fn image_with_many_string_references(refs: usize) -> (Image, String, String) {
+        const BASE: u64 = 0x1000;
+        const FIRST: u64 = 0x2000;
+        const SECOND: u64 = 0x2040;
+        let first = "STATIC_REFERENCE_TARGET";
+        let second = "STATIC_REFERENCE_OTHER";
+        let mut bytes = vec![0u8; 0x1080];
+        let lea = |bytes: &mut [u8], at: u64, to: u64| {
+            let off = (at - BASE) as usize;
+            bytes[off..off + 3].copy_from_slice(&[0x48, 0x8d, 0x3d]);
+            bytes[off + 3..off + 7].copy_from_slice(&((to as i64 - (at + 7) as i64) as i32).to_le_bytes());
+        };
+        // The second string's only reference comes first, so it survives the analysis limit.
+        lea(&mut bytes, BASE, SECOND);
+        for i in 0..refs {
+            lea(&mut bytes, BASE + 7 * (i as u64 + 1), FIRST);
+        }
+        bytes[7 * (refs + 1)] = 0xc3;
+        bytes[FIRST as usize - BASE as usize..][..first.len()].copy_from_slice(first.as_bytes());
+        bytes[SECOND as usize - BASE as usize..][..second.len()].copy_from_slice(second.as_bytes());
+        (Image::raw(std::sync::Arc::from(bytes), craft_anything_formats::Arch::X86_64, BASE), first.to_string(), second.to_string())
+    }
+
+    /// The analysis xref limit and the 32-reference display cap both reach the tool's evidence on
+    /// both pages, and a reference outside every function keeps a null attribution.
+    #[test]
+    fn string_reference_limits_reach_the_evidence_across_pages() {
+        let (img, first, second) = image_with_many_string_references(40);
+        // 41 references, a 40-xref analysis limit: the first string loses its last reference to
+        // the limit, stays above the display cap, and the second string's one reference is kept.
+        let mut prog = Program::analyze(&img, &Limits { max_xrefs: 40, ..Limits::default() }, &NoControl).unwrap();
+        assert!(prog.limitations.iter().any(|(code, _)| code == "xref_limit"), "the fixture hits the analysis limit");
+        let second_addr = prog.strings.iter().find(|s| s.text == second).unwrap().addr;
+        prog.xrefs_to.get_mut(&second_addr).unwrap().push(Xref { from: 0x9000, to: second_addr, kind: XrefKind::Data });
+        // The tool's own analysis uses the default limits, so the test caches this program to
+        // lower the xref limit without a fixture that needs millions of references.
+        let e = engine_with("prog", &tk::elf64(tk::ElfArch::X86_64, false).0);
+        e.session().active_mut().unwrap().ext.insert(std::sync::Arc::new(NativeState { img: std::sync::Arc::new(img), prog }));
+
+        let page = |offset: usize| call(&e, "native_strings_find", json!({"pattern": "STATIC_REFERENCE", "offset": offset, "limit": 1}));
+        let first_page = page(0);
+        assert_eq!(first_page["result"]["total"], 2);
+        assert_eq!(first_page["coverage"]["next_offset"], 1);
+        let rows = first_page["result"]["matches"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["text"], first);
+        assert_eq!(rows[0]["reference_count"], 39, "the analysis kept 39 of the first string's 40 references");
+        assert_eq!(rows[0]["references"].as_array().unwrap().len(), MAX_STRING_REFERENCES);
+        assert_eq!(rows[0]["references_capped"], true);
+        assert!(rows[0]["references"][0]["function"].is_string(), "{}", rows[0]);
+        let limits = first_page["limitations"].as_array().unwrap();
+        assert!(limits.iter().any(|l| l["code"] == "xref_limit"), "{first_page}");
+        let capped = limits.iter().find(|l| l["code"] == "references_capped").expect("the display cap is reported");
+        let message = capped["message"].as_str().unwrap();
+        assert!(message.contains("analysis xref limit") && !message.contains("complete within this analysis"), "{message}");
+
+        let second_page = page(1);
+        assert_eq!(second_page["result"]["total"], 2);
+        assert!(second_page["coverage"]["next_offset"].is_null(), "the last page has no next offset");
+        let rows = second_page["result"]["matches"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["text"], second);
+        assert_eq!(rows[0]["reference_count"], 2, "its kept reference plus one from outside every function");
+        assert_eq!(rows[0]["references_capped"], false);
+        assert!(rows[0]["references"][1]["function"].is_null(), "{}", rows[0]);
+        assert!(
+            second_page["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "xref_limit"),
+            "the analysis limit reaches a page whose row isn't display-capped: {second_page}"
+        );
     }
 
     #[test]

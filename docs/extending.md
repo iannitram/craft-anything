@@ -17,6 +17,7 @@ place to add yours. Follow `AGENTS.md` (never crash, layers, external programs t
 | An external engine | `crates/engines/src/table.rs` | One `ExternalEngine` entry (exes, known paths, what it's for, install pins with SHA-256 checked against the publisher), plus a `tool_paths!` id in `settings.rs` if people can point at their own install. |
 | A front end for builds | anywhere above L5 | Hold a `rebuild::RunSet` (it queues past its limit) and `poll` it; test it with `RunSet::with_starter(StandIns::starter())`, whose runs report only what the test sends. |
 | A persisted file | its owner module | A version field and a migration step; see [file-formats.md](file-formats.md). |
+| A screen, a control or a size in the desktop app | `crates/ui-egui/src/` | Use the components in `widgets.rs` and the scale in `theme.rs`; a new size or colour goes into the scale, never into a screen. See [the design system](design-system.md). |
 | A UI language | `crates/ui-egui/src/i18n/` and `i18n.rs` | Add a TSV catalog and a language registry entry; preserve placeholders and run the catalog tests and `cargo xtask i18n-coverage`. See [localisation](localization.md) for scope and font setup. |
 
 ## Plugins: external MCP servers

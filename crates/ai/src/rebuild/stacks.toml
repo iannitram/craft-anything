@@ -34,6 +34,8 @@ steps = "Use Phaser for the game. Create its browser project in app/ with Phaser
 
 [[stack]]
 name = "Bevy"
+program = "cargo"
+program_from = "Install Rust from https://rustup.rs"
 asked_by = [" in bevy ", " with bevy ", " using bevy ", " use bevy "]
 uses = ["bevy"]
 steps = "Use Bevy for the game. Put Cargo.toml and src/main.rs directly in app/, with Bevy as a dependency, and build the game with Cargo."
@@ -73,17 +75,23 @@ steps = "Use plain HTML, CSS and a little JavaScript only if the page needs it: 
 
 [[stack]]
 name = "Rust (console)"
+program = "cargo"
+program_from = "Install Rust from https://rustup.rs"
 uses = []
 steps = "Use Rust for a console program: create a cargo project in app/ itself (app/Cargo.toml and app/src/main.rs, not a folder inside app/), read its arguments (std::env::args, or clap if it has many options), print to standard output and standard error the way the original does, exit with the original's exit codes, and draw no window. Run `cargo build` until it succeeds."
 
 [[stack]]
 name = "Rust + macroquad"
+program = "cargo"
+program_from = "Install Rust from https://rustup.rs"
 engine = "rust"
 uses = ["macroquad"]
 steps = "Use Rust with macroquad (a small game library). Create a cargo project in app/ itself (app/Cargo.toml and app/src/main.rs, not a folder inside app/), keep assets procedural (shapes, colours) unless the person provides some, and run `cargo build` until it succeeds."
 
 [[stack]]
 name = "Rust + egui (eframe)"
+program = "cargo"
+program_from = "Install Rust from https://rustup.rs"
 uses = ["eframe", "egui"]
 steps = "Use Rust with eframe/egui for the window and UI. Create a cargo project in app/ itself (app/Cargo.toml, not a folder inside app/) and run `cargo build` until it succeeds."
 

@@ -24,7 +24,7 @@ fn closing_stops_an_analysis() {
 
     let waiting = {
         let sha = sha.clone();
-        std::thread::spawn(move || deep::prepare(&settings, bytes, &sha, &|_| {}))
+        std::thread::spawn(move || deep::prepare(&settings, bytes, &sha, &|_| {}, &|| false))
     };
     let until = Instant::now() + Duration::from_secs(30);
     while !waiting.is_finished() {

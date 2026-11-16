@@ -27,6 +27,8 @@ serde_json = { workspace = true }
 log = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+craft-update = { git = "https://github.com/storytold/craft-libs", rev = "6ac2a6a34ae83fc0f0bfb25a569ba6388b72266a" }
+
 # Native open/save dialogs, always shown from a worker thread (never blocks a frame).
 rfd = { workspace = true }
 # Pictures pasted from the clipboard (see `paste`).
@@ -43,3 +45,7 @@ muda = { version = "0.21.2", default-features = false }
 craft-anything-testkit = { workspace = true }
 egui_kittest = { workspace = true, features = ["wgpu", "snapshot", "eframe"] }
 tempfile = "3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# Unit tests need a Linux window backend without the desktop binary's feature unification.
+eframe = { workspace = true, features = ["x11"] }

@@ -1,5 +1,6 @@
 # vi: original Vietnamese UI translations (address the person as "bạn"). Licensed MIT OR Apache-2.0.
 # UTF-8: English source<TAB>translation. Keep placeholders and escapes intact.
+Default (its own settings)	Mặc định (cài đặt riêng của nó)
 OpenCode default	Mặc định của OpenCode
 Model default	Mô hình mặc định
 Thinking depth	Mức độ suy nghĩ
@@ -1366,6 +1367,7 @@ your files there are the app, edited in place	các tệp của bạn ở đó ch
 {name} builds what you make; answers come from {brain}.	{name} xây dựng thứ bạn tạo; câu trả lời đến từ {brain}.
 {name} can't be attached: a message takes pictures up to 20 MB.	Không thể đính kèm {name}: mỗi tin nhắn nhận ảnh tối đa 20 MB.
 {name} can't be attached: it isn't a PNG, JPEG, GIF or WebP picture.	Không thể đính kèm {name}: đây không phải ảnh PNG, JPEG, GIF hoặc WebP.
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name} không thể bị giới hạn chỉ đọc, nên không được hỏi. Hãy hỏi bằng Claude Code hoặc bằng một AI có khóa API.
 {name} is ready	{name} đã sẵn sàng
 {name} is ready.	{name} đã sẵn sàng.
 {name} isn't available yet in this build.	{name} chưa có trong bản dựng này.
@@ -1467,3 +1469,27 @@ Connecting to {name}… {seconds} s	Đang kết nối với {name}… {seconds} 
 Stopped adding {name}.	Đã dừng thêm {name}.
 It isn't there any more, so {program} runs in its place.	Nó không còn ở đó nữa, nên {program} chạy thay thế.
 Use it	Dùng nó
+
+# Native update checks and verified installation.
+ArtCraft Launcher manages this app's version. Change its version there.	ArtCraft Launcher quản lý phiên bản của ứng dụng này. Hãy đổi phiên bản tại đó.
+Check again	Kiểm tra lại
+Check for Updates	Kiểm tra cập nhật
+Check for Updates…	Kiểm tra cập nhật…
+Checking for updates…	Đang kiểm tra cập nhật…
+Couldn't check for updates: {error}	Không thể kiểm tra cập nhật: {error}
+Downloading and verifying the update…	Đang tải xuống và xác minh bản cập nhật…
+No installer is available for this platform.	Không có trình cài đặt cho nền tảng này.
+Releases	Bản phát hành
+Save your work and stop running tasks before installing an update.	Lưu công việc và dừng các tác vụ đang chạy trước khi cài đặt bản cập nhật.
+The update failed: {error}	Cập nhật thất bại: {error}
+The update worker stopped unexpectedly. Try checking again.	Tiến trình cập nhật đã dừng ngoài dự kiến. Hãy thử kiểm tra lại.
+This installation is managed externally. Update it with its package manager or open Releases.	Bản cài đặt này được quản lý bên ngoài. Hãy cập nhật bằng trình quản lý gói hoặc mở Bản phát hành.
+Update and restart	Cập nhật và khởi động lại
+Update ready. Restarting…	Bản cập nhật đã sẵn sàng. Đang khởi động lại…
+Updated to {version}.	Đã cập nhật lên {version}.
+Use Releases or your package manager to update this installation.	Dùng Bản phát hành hoặc trình quản lý gói để cập nhật bản cài đặt này.
+You're up to date.	Bạn đang dùng phiên bản mới nhất.
+{version} is available.	Đã có phiên bản {version}.
+Forget a website sign-in	Quên thông tin đăng nhập của một trang web
+Sign in to a website	Đăng nhập vào một trang web
+Some shared files could not be hard-linked and were copied instead ({size}).	Một số tệp chia sẻ không thể tạo liên kết cứng nên đã được sao chép ({size}).

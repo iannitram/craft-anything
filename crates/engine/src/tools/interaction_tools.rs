@@ -176,8 +176,6 @@ const SAFE_COMMANDS: &[&str] = &[
     "npx prettier",
     "node --version",
     "cargo build",
-    // Runs the builder's own game (e.g. `cargo run -- --screenshot …`).
-    "cargo run",
     "cargo check",
     "cargo test",
     "cargo fmt",
@@ -195,14 +193,8 @@ const SAFE_COMMANDS: &[&str] = &[
     "git diff",
     "git log",
     "git branch",
-    "ls",
-    "dir",
     "pwd",
     "mkdir",
-    "cat ",
-    "head ",
-    "tail ",
-    "wc ",
     "echo ",
 ];
 
@@ -306,15 +298,6 @@ fn engine_build(part: &str) -> bool {
     }
 }
 
-/// A program the builder made inside app/ (to try its build, e.g. `--screenshot`). It must exist
-/// there: a bare name such as `rm` would otherwise look like `app/rm`.
-fn own_program(part: &str, app: &Path) -> bool {
-    let (prog, _) = program_of(part);
-    // The agent works from the workspace (app/'s parent) or from inside app/.
-    let bases = [app.parent().unwrap_or(app), app];
-    !prog.is_empty() && bases.iter().any(|b| resolve(b, prog).is_some_and(|p| inside(app, &p) && p != app && p.is_file()))
-}
-
 /// Decide a Bash command: every `&&`-joined part must be a safe build command, the game engine's
 /// own build, the builder's own program in app/, or a `cd` that stays inside the project, with
 /// no other shell control characters.
@@ -341,7 +324,7 @@ fn decide_command(cmd: &str, app: &Path) -> Decision {
                 _ => return ask(),
             }
         }
-        if !(safe_command(part) || engine_build(part) || own_program(part, app)) {
+        if !(safe_command(part) || engine_build(part)) {
             return ask();
         }
     }
@@ -372,7 +355,18 @@ pub fn decide(ws: Option<&Workspace>, tool: &str, input: &Value) -> Decision {
     };
     let app = ws.map(Workspace::app_dir);
     match tool {
-        "Read" | "Glob" | "Grep" | "LS" | "TodoWrite" => Decision::Allow,
+        "Read" | "Glob" | "Grep" | "LS" => {
+            // Reading is harmless only inside the project: the agent may inspect what it is
+            // building, not `~/.ssh`, `~/.aws` or the rest of the user's home.
+            let target = match tool {
+                "Read" => s("file_path"),
+                "Glob" if s("path").is_empty() => s("pattern"),
+                _ => s("path"),
+            };
+            let contained = target.is_empty() || opened_at(ws, &target).iter().all(|p| p.as_deref().zip(ws).is_some_and(|(p, w)| really_inside(&w.root, p)));
+            if contained { Decision::Allow } else { Decision::Ask { title: format!("Read outside the project: {target}"), kind } }
+        }
+        "TodoWrite" => Decision::Allow,
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
             let target = if tool == "NotebookEdit" { s("notebook_path") } else { s("file_path") };
             // app/ is what it builds; checks/ holds its own notes and screenshots. The inbox (where
@@ -434,6 +428,12 @@ pub fn approve_with(
     match outcome(ws.as_ref(), auto_mode, tool, input) {
         Outcome::Allow => Ok(Ok(())),
         Outcome::Refuse(why) => Ok(Err(why)),
+        Outcome::RefuseKind { why, kind } => {
+            if let Some(inbox) = inbox {
+                crate::inbox::Activity::approval_refused(inbox.dir(), kind);
+            }
+            Ok(Err(why))
+        }
         Outcome::Ask { title, remember } => {
             let Some(inbox) = inbox else {
                 return Ok(Err("Nobody is available to approve this. Stay inside the project folder and use the build commands.".into()));
@@ -457,6 +457,10 @@ enum Outcome {
     Allow,
     /// Not done; the builder is told why and keeps going.
     Refuse(String),
+    RefuseKind {
+        why: String,
+        kind: ActionKind,
+    },
     /// A card for the person, and what "always for this project" on it keeps.
     Ask {
         title: String,
@@ -492,7 +496,7 @@ fn outcome(ws: Option<&Workspace>, auto_mode: bool, tool: &str, input: &Value) -
     }
     match approval {
         Approval::Allow => Outcome::Allow,
-        Approval::Refuse => Outcome::Refuse(refusal(kind, chosen.is_some())),
+        Approval::Refuse => Outcome::RefuseKind { why: refusal(kind, chosen.is_some()), kind },
         Approval::Ask => Outcome::Ask { title, remember: if remembers_actions(kind) { Remember::Action(action) } else { Remember::Kind(kind) } },
     }
 }
@@ -949,7 +953,10 @@ mod tests {
         assert!(refused("Bash", &json!({"command": format!("strings \"{shown}/Game.exe\" | head")})));
         assert!(refused("Bash", &json!({"command": format!("cat {}", shown.replace('\\', "/").to_uppercase())})), "any spelling of its folder");
         assert!(!refused("Read", &file(&w.app_dir())), "the project stays open");
-        assert_eq!(approve_with(inbox(), true, false, "Read", &file(&game), &|| false, &mut || {}).unwrap(), Ok(()), "Deep mode may read it");
+        assert!(
+            approve_with(inbox(), true, false, "Read", &file(&game), &|| false, &mut || {}).unwrap().is_err(),
+            "Deep mode no longer reads outside the workspace"
+        );
 
         let site =
             Workspace::create(&dir.path().join("projects"), "s", "Recreate this website", TargetRef::Website { url: "https://www.Example.com/pricing".into() })
@@ -960,6 +967,24 @@ mod tests {
         assert!(off_limits(Some(&site), "Bash", &json!({"command": "curl -s https://example.com/robots.txt"})).is_some());
         assert!(off_limits(Some(&site), "Bash", &json!({"command": "npm run build"})).is_none());
         assert_eq!((host_of("https://user@Shop.Test:8443/a"), host_of("not a url")), (Some("shop.test".into()), None));
+    }
+
+    #[test]
+    fn reads_inside_the_project_are_allowed_outside_asked() {
+        let (_d, w) = ws();
+        assert_eq!(decide(Some(&w), "Read", &json!({"file_path": "app/src/main.rs"})), Decision::Allow);
+        assert_eq!(decide(Some(&w), "Glob", &json!({"path": w.app_dir().display().to_string(), "pattern": "**/*.tsx"})), Decision::Allow);
+        assert_eq!(decide(Some(&w), "Grep", &json!({"pattern": "fn main"})), Decision::Allow);
+        for (tool, input) in [
+            ("Read", json!({"file_path": "/etc/passwd"})),
+            ("Read", json!({"file_path": "../../.ssh/id_rsa"})),
+            ("Glob", json!({"path": "/home"})),
+            ("Grep", json!({"path": "/etc"})),
+            ("LS", json!({"path": "/home"})),
+        ] {
+            assert!(matches!(decide(Some(&w), tool, &input), Decision::Ask { .. }), "{tool} {input}");
+        }
+        assert!(matches!(decide(None, "Read", &json!({"file_path": "/etc/passwd"})), Decision::Ask { .. }));
     }
 
     #[test]
@@ -1132,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_builds_and_its_own_program_go_ahead() {
+    fn engine_builds_go_ahead_but_running_the_game_asks() {
         let (_d, w) = ws();
         let app = w.app_dir();
         for built in ["target/debug/game.exe", "Build/Game.exe"] {
@@ -1146,9 +1171,6 @@ mod tests {
             "\"C:\\Program Files\\Unity\\Hub\\Editor\\6000.0.23f1\\Editor\\Unity.exe\" -batchmode -quit -nographics -projectPath app -executeMethod CraftBuild.Build -logFile app/Logs/build.log",
             "\"D:/Engines/Godot_v4.4.1-stable_win64.exe\" --headless --path app --quit-after 120",
             "\"C:/Program Files/Epic Games/UE_5.4/Engine/Build/BatchFiles/RunUAT.bat\" BuildCookRun -project=app/Game.uproject",
-            "cargo run -- --screenshot shots/now.png",
-            "app/target/debug/game.exe --screenshot app/shots/now.png",
-            "cd app && ./Build/Game.exe --screenshot shots/now.png",
         ] {
             assert_eq!(decide_command(ok, &app), Decision::Allow, "{ok}");
         }
@@ -1159,6 +1181,9 @@ mod tests {
             "../elsewhere/tool.exe",
             "app/target/debug/game.exe > out.txt",
             "\"C:/x/build.bat\"",
+            "cargo run -- --screenshot shots/now.png",
+            "app/target/debug/game.exe --screenshot app/shots/now.png",
+            "cd app && ./Build/Game.exe --screenshot shots/now.png",
         ] {
             assert!(matches!(decide_command(ask, &app), Decision::Ask { .. }), "{ask}");
         }
@@ -1188,7 +1213,7 @@ mod tests {
         assert_eq!(outcome(None, false, "Read", &json!({})), Outcome::Allow);
         // A kind the person refuses later wins over what they always allowed before; asking keeps it.
         w.manifest.approvals.insert(ActionKind::Commands, Approval::Refuse);
-        assert!(matches!(outcome(Some(&w), true, "Bash", &cmd), Outcome::Refuse(_)));
+        assert!(matches!(outcome(Some(&w), true, "Bash", &cmd), Outcome::Refuse(_) | Outcome::RefuseKind { .. }));
         w.manifest.approvals.insert(ActionKind::Commands, Approval::Ask);
         assert_eq!(outcome(Some(&w), true, "Bash", &cmd), Outcome::Allow);
     }
@@ -1209,7 +1234,7 @@ mod tests {
             "unset CRAFT_ANYTHING_AGENT; cat craft.\"json\"",
         ] {
             assert_eq!(kind_of(Some(&w), "Bash", &json!({"command": cmd})), ActionKind::System, "{cmd}");
-            assert!(matches!(outcome(Some(&w), true, "Bash", &json!({"command": cmd})), Outcome::Refuse(_)), "{cmd}");
+            assert!(matches!(outcome(Some(&w), true, "Bash", &json!({"command": cmd})), Outcome::Refuse(_) | Outcome::RefuseKind { .. }), "{cmd}");
         }
         assert_eq!(kind_of(Some(&w), "Bash", &json!({"command": "cat package.json"})), ActionKind::Commands);
     }
@@ -1222,12 +1247,12 @@ mod tests {
         // Pushing allowed, system changes refused: refused, and the message names the refused kind.
         w.manifest.approvals.insert(ActionKind::Publish, Approval::Allow);
         w.manifest.approvals.insert(ActionKind::System, Approval::Refuse);
-        let Outcome::Refuse(why) = outcome(Some(&w), true, "Bash", &mixed) else { panic!("refused") };
+        let Outcome::RefuseKind { why, .. } = outcome(Some(&w), true, "Bash", &mixed) else { panic!("refused") };
         assert!(why.contains("\"system\""), "{why}");
         // The other way round: refused for pushing.
         w.manifest.approvals.insert(ActionKind::Publish, Approval::Refuse);
         w.manifest.approvals.insert(ActionKind::System, Approval::Allow);
-        let Outcome::Refuse(why) = outcome(Some(&w), true, "Bash", &mixed) else { panic!("refused") };
+        let Outcome::RefuseKind { why, .. } = outcome(Some(&w), true, "Bash", &mixed) else { panic!("refused") };
         assert!(why.contains("\"publish\""), "{why}");
         // Asked about when one asks and the other allows; allowed only when both allow.
         w.manifest.approvals.insert(ActionKind::Publish, Approval::Ask);
@@ -1237,7 +1262,7 @@ mod tests {
         // An earlier "always" on the command's first word lets none of it through.
         w.manifest.approvals.clear();
         w.manifest.allowed_actions.push("bash:git".into());
-        assert!(matches!(outcome(Some(&w), true, "Bash", &mixed), Outcome::Refuse(_)));
+        assert!(matches!(outcome(Some(&w), true, "Bash", &mixed), Outcome::Refuse(_) | Outcome::RefuseKind { .. }));
     }
 
     #[test]
@@ -1262,7 +1287,7 @@ mod tests {
             "Set-Content -Path:..\\inbox\\1.answer.json -Value yes",
         ] {
             assert_eq!(kind_of(Some(&w), "Bash", &json!({"command": cmd})), ActionKind::System, "{cmd}");
-            assert!(matches!(outcome(Some(&w), true, "Bash", &json!({"command": cmd})), Outcome::Refuse(_)), "{cmd}");
+            assert!(matches!(outcome(Some(&w), true, "Bash", &json!({"command": cmd})), Outcome::Refuse(_) | Outcome::RefuseKind { .. }), "{cmd}");
         }
         // An app's own inbox folder is the builder's work.
         for cmd in ["mkdir -p src/inbox", "cat app/src/inbox/view.rs"] {
@@ -1278,7 +1303,7 @@ mod tests {
         for record in ["craft.json", "inbox/1.answer.json", "./craft.json"] {
             assert!(matches!(decide(Some(&w), "Write", &write(record)), Decision::Ask { .. }), "{record}");
             assert_eq!(kind_of(Some(&w), "Write", &write(record)), ActionKind::System, "{record}");
-            assert!(matches!(outcome(Some(&w), true, "Write", &write(record)), Outcome::Refuse(_)), "{record}");
+            assert!(matches!(outcome(Some(&w), true, "Write", &write(record)), Outcome::Refuse(_) | Outcome::RefuseKind { .. }), "{record}");
         }
         // Inside app/ from either folder, or written in full, it's the builder's own work.
         assert_eq!(decide(Some(&w), "Write", &write("app/src/main.rs")), Decision::Allow);
@@ -1296,9 +1321,26 @@ mod tests {
         let (_d, mut w) = ws();
         w.manifest.allowed_actions.push("bash:cd".into());
         let push = json!({"command": "cd app && git push origin main"});
-        assert!(matches!(outcome(Some(&w), true, "Bash", &push), Outcome::Refuse(_)), "Auto mode still refuses it");
+        assert!(matches!(outcome(Some(&w), true, "Bash", &push), Outcome::Refuse(_) | Outcome::RefuseKind { .. }), "Auto mode still refuses it");
         assert!(matches!(outcome(Some(&w), false, "Bash", &push), Outcome::Ask { remember: Remember::Kind(ActionKind::Publish), .. }));
         assert_eq!(outcome(Some(&w), true, "Bash", &json!({"command": "cd app && lsblk"})), Outcome::Allow);
+    }
+
+    #[test]
+    fn a_refused_publish_tells_the_person_how_to_ask_next_time() {
+        let (_directory, workspace) = ws();
+        let inbox = workspace.inbox_dir();
+        let input = json!({"command": "git push origin main"});
+        for _ in 0..2 {
+            let result = approve_with(Some(Inbox::new(&inbox)), true, false, "Bash", &input, &|| false, &mut || {}).unwrap();
+            assert!(result.is_err());
+        }
+        let lines = crate::inbox::activity(&inbox);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].1.contains("/approvals publish ask"));
+        assert!(Inbox::new(&inbox).pending().is_empty());
+        crate::inbox::clear_activity(&inbox);
+        assert!(crate::inbox::activity(&inbox).is_empty());
     }
 
     #[test]
@@ -1307,7 +1349,7 @@ mod tests {
         let push = json!({"command": "git push origin main"});
         let fetch = json!({"url": "https://example.com/"});
         // Nothing chosen: Auto mode refuses a push and asks nobody; without it, the person is asked.
-        let Outcome::Refuse(why) = outcome(Some(&w), true, "Bash", &push) else { panic!("refused") };
+        let Outcome::RefuseKind { why, .. } = outcome(Some(&w), true, "Bash", &push) else { panic!("refused") };
         assert!(why.contains("Auto mode never") && why.contains("\"publish\""), "{why}");
         assert!(matches!(outcome(Some(&w), false, "Bash", &push), Outcome::Ask { .. }));
         // Pushes asked about, even in Auto mode: the card it was missing.
@@ -1320,13 +1362,13 @@ mod tests {
         assert_eq!(outcome(Some(&w), true, "Bash", &push), Outcome::Allow);
         // Each kind on its own: the web can be refused while pushing is allowed.
         w.manifest.approvals.insert(ActionKind::Web, Approval::Refuse);
-        let Outcome::Refuse(why) = outcome(Some(&w), true, "WebFetch", &fetch) else { panic!("refused") };
+        let Outcome::RefuseKind { why, .. } = outcome(Some(&w), true, "WebFetch", &fetch) else { panic!("refused") };
         assert!(why.contains("This project refuses reading the web"), "{why}");
         assert_eq!(outcome(Some(&w), true, "Bash", &push), Outcome::Allow);
         // Commands the build list allows aren't asked about, whatever "commands" gets.
         w.manifest.approvals.insert(ActionKind::Commands, Approval::Refuse);
         assert_eq!(outcome(Some(&w), true, "Bash", &json!({"command": "npm run build"})), Outcome::Allow);
-        assert!(matches!(outcome(Some(&w), true, "Bash", &json!({"command": "lsblk"})), Outcome::Refuse(_)));
+        assert!(matches!(outcome(Some(&w), true, "Bash", &json!({"command": "lsblk"})), Outcome::Refuse(_) | Outcome::RefuseKind { .. }));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 # ka: original Georgian UI translations. Licensed MIT OR Apache-2.0.
 # UTF-8: English source<TAB>translation. Keep placeholders and escapes intact.
+Default (its own settings)	ნაგულისხმევი (საკუთარი პარამეტრები)
 OpenCode default	OpenCode-ის ნაგულისხმევი
 Model default	მოდელის ნაგულისხმევი
 About 60 GB, an Epic Games account, and Xcode.	დაახლოებით 60 GB, Epic Games-ის ანგარიში და Xcode.
@@ -1387,6 +1388,7 @@ Zoom	მასშტაბი
 {name} builds what you make; answers come from {brain}.	{name} აწყობს იმას, რასაც ქმნით; პასუხები მოდის {brain}-ისგან.
 {name} can't be attached: a message takes pictures up to 20 MB.	{name}-ის მიმაგრება შეუძლებელია: შეტყობინება იღებს სურათებს 20 MB-მდე.
 {name} can't be attached: it isn't a PNG, JPEG, GIF or WebP picture.	{name}-ის მიმაგრება შეუძლებელია: ის PNG, JPEG, GIF ან WebP სურათი არ არის.
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name}-ის მხოლოდ კითხვით შეზღუდვა შეუძლებელია, ამიტომ მას კითხვებს არ ვუსვამთ. იკითხეთ Claude Code-ით ან AI-ით, რომელსაც API გასაღები აქვს.
 {name} is ready	{name} მზადაა
 {name} is ready.	{name} მზადაა.
 {name} isn't available yet in this build.	{name} ამ აწყობაში ჯერ მიუწვდომელია.
@@ -1467,3 +1469,27 @@ Connecting to {name}… {seconds} s	{name}-თან დაკავშირე
 Stopped adding {name}.	{name}-ის დამატება შეჩერდა.
 It isn't there any more, so {program} runs in its place.	ის აღარ არის იქ, ამიტომ მის ნაცვლად {program} ეშვება.
 Use it	გამოყენება
+
+# Native update checks and verified installation.
+ArtCraft Launcher manages this app's version. Change its version there.	ამ აპის ვერსიას ArtCraft Launcher მართავს. ვერსია იქ შეცვალეთ.
+Check again	ხელახლა შემოწმება
+Check for Updates	განახლებების შემოწმება
+Check for Updates…	განახლებების შემოწმება…
+Checking for updates…	მიმდინარეობს განახლებების შემოწმება…
+Couldn't check for updates: {error}	განახლებების შემოწმება ვერ მოხერხდა: {error}
+Downloading and verifying the update…	მიმდინარეობს განახლების ჩამოტვირთვა და შემოწმება…
+No installer is available for this platform.	ამ პლატფორმისთვის დამყენებელი ხელმისაწვდომი არ არის.
+Releases	გამოშვებები
+Save your work and stop running tasks before installing an update.	განახლების დაყენებამდე შეინახეთ ნამუშევარი და შეაჩერეთ მიმდინარე ამოცანები.
+The update failed: {error}	განახლება ვერ მოხერხდა: {error}
+The update worker stopped unexpectedly. Try checking again.	განახლების პროცესი მოულოდნელად შეწყდა. სცადეთ ხელახლა შემოწმება.
+This installation is managed externally. Update it with its package manager or open Releases.	ეს ინსტალაცია გარედან იმართება. განაახლეთ პაკეტების მმართველით ან გახსენით გამოშვებები.
+Update and restart	განახლება და ხელახლა გაშვება
+Update ready. Restarting…	განახლება მზადაა. მიმდინარეობს ხელახლა გაშვება…
+Updated to {version}.	განახლდა {version} ვერსიამდე.
+Use Releases or your package manager to update this installation.	ამ ინსტალაციის გასაახლებლად გამოიყენეთ გამოშვებები ან პაკეტების მმართველი.
+You're up to date.	უახლეს ვერსიას იყენებთ.
+{version} is available.	ხელმისაწვდომია {version}.
+Forget a website sign-in	ვებსაიტზე შესვლის დავიწყება
+Sign in to a website	ვებსაიტზე შესვლა
+Some shared files could not be hard-linked and were copied instead ({size}).	ზოგიერთი საერთო ფაილი მყარი ბმულით ვერ დაკავშირდა და დაკოპირდა ({size}).

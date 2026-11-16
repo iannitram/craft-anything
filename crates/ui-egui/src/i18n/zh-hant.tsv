@@ -1,5 +1,6 @@
 # zh-hant: original Chinese UI translations. Licensed MIT OR Apache-2.0.
 # UTF-8: English source<TAB>translation. Keep placeholders and escapes intact.
+Default (its own settings)	預設（其自身設定）
 OpenCode default	OpenCode 預設設定
 Model default	模型預設設定
 Thinking depth	思考深度
@@ -1366,6 +1367,7 @@ your files there are the app, edited in place	該位置的檔案就是應用程�
 {name} builds what you make; answers come from {brain}.	由 {name} 負責建置，{brain} 負責回答。
 {name} can't be attached: a message takes pictures up to 20 MB.	無法附加 {name}:訊息中的圖片最大為 20 MB。
 {name} can't be attached: it isn't a PNG, JPEG, GIF or WebP picture.	無法附加 {name}:它不是 PNG、JPEG、GIF 或 WebP 圖片。
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name} 無法被限制為唯讀，因此不會向它提問。請改用 Claude Code，或使用帶 API 金鑰的 AI 提問。
 {name} is ready	{name} 已就緒
 {name} is ready.	{name} 已就緒。
 {name} isn't available yet in this build.	此版本尚未提供{name}。
@@ -1467,3 +1469,27 @@ Connecting to {name}… {seconds} s	正在連線 {name}… {seconds} 秒
 Stopped adding {name}.	已停止新增 {name}。
 It isn't there any more, so {program} runs in its place.	它已不在那裡，因此改用 {program}。
 Use it	使用它
+
+# Native update checks and verified installation.
+ArtCraft Launcher manages this app's version. Change its version there.	ArtCraft Launcher 管理此應用程式的版本。請在那裡變更版本。
+Check again	再次檢查
+Check for Updates	檢查更新
+Check for Updates…	檢查更新…
+Checking for updates…	正在檢查更新…
+Couldn't check for updates: {error}	無法檢查更新：{error}
+Downloading and verifying the update…	正在下載並驗證更新…
+No installer is available for this platform.	此平台沒有可用的安裝程式。
+Releases	發行版本
+Save your work and stop running tasks before installing an update.	安裝更新前，請儲存工作並停止正在執行的工作。
+The update failed: {error}	更新失敗：{error}
+The update worker stopped unexpectedly. Try checking again.	更新工作執行緒意外停止。請重新檢查。
+This installation is managed externally. Update it with its package manager or open Releases.	此安裝由外部管理。請使用套件管理器更新，或開啟「發行版本」。
+Update and restart	更新並重新啟動
+Update ready. Restarting…	更新已就緒。正在重新啟動…
+Updated to {version}.	已更新至 {version}。
+Use Releases or your package manager to update this installation.	請透過「發行版本」或套件管理器更新此安裝。
+You're up to date.	已是最新版本。
+{version} is available.	{version} 已可用。
+Forget a website sign-in	忘記網站登入
+Sign in to a website	登入網站
+Some shared files could not be hard-linked and were copied instead ({size}).	部分共用檔案無法建立硬連結，已改為複製（{size}）。

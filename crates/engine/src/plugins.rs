@@ -230,8 +230,8 @@ pub fn refresh(p: &McpPlugin, config: &std::path::Path) -> Result<Vec<RemoteTool
     if let Some(problem) = p.problem() {
         return Err(ToolError::invalid(problem).with_remediation("Fix it in config.toml ([[plugins.mcp]])."));
     }
-    let mut client = McpClient::connect(p.display_name(), &p.server(), START_TIMEOUT)?;
-    let tools = client.list_tools(START_TIMEOUT)?;
+    let mut client = start(p, config)?;
+    let tools = client.list_tools(START_TIMEOUT).map_err(|e| logged(p, config, client.with_output(e)))?;
     let path = p.cache_path(config);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| ToolError::io(dir.display(), e))?;
@@ -239,6 +239,45 @@ pub fn refresh(p: &McpPlugin, config: &std::path::Path) -> Result<Vec<RemoteTool
     let json = serde_json::to_vec_pretty(&tools).map_err(|e| ToolError::internal(e.to_string()))?;
     crate::project::write_atomic(&path, &json)?;
     Ok(tools)
+}
+
+/// Start a plugin's server and complete the handshake, keeping a failure log when it fails.
+fn start(p: &McpPlugin, config: &std::path::Path) -> Result<McpClient, ToolError> {
+    McpClient::connect(p.display_name(), &p.server(), START_TIMEOUT).map_err(|e| logged(p, config, e))
+}
+
+/// A local server that didn't start or answer: write what ran and what it printed to a failure
+/// log in the config folder's `logs/` ([`crate::failure_log`]) and name it in the error. Its
+/// environment is left out and what looks like a key in its arguments is hidden. A remote server's error already says what it
+/// answered, and its address can carry a key, so it gets no log; nor does a stop.
+fn logged(p: &McpPlugin, config: &std::path::Path, e: ToolError) -> ToolError {
+    let Server::Command(cmd) = p.server() else { return e };
+    if e.code == ErrorCode::Cancelled {
+        return e;
+    }
+    // An argument can carry a key where no flag names it (`https://…/mcp?token=…`).
+    let command = crate::journal::scrubbed_line(&craft_anything_platform::process::printable_command(std::ffi::OsStr::new(&cmd.command), &cmd.args));
+    let detail = |k: &str| e.details.as_ref().and_then(|d| d.get(k)).cloned();
+    let report = crate::failure_log::Report {
+        what: format!("The {} plugin (an MCP server) didn't start", p.display_name()),
+        check: command.clone(),
+        command,
+        error: Some(e.message.clone()),
+        cwd: cmd.cwd.clone(),
+        exit_code: detail("exit_code").and_then(|c| c.as_i64()).and_then(|c| i32::try_from(c).ok()),
+        stderr: detail("output_tail").and_then(|t| t.as_str().map(|s| s.as_bytes().to_vec())).unwrap_or_default(),
+        ..Default::default()
+    };
+    match crate::failure_log::write(&crate::failure_log::dir_in(config), &report) {
+        Ok(path) => {
+            let said = e.remediation.clone().map(|r| format!("{r}\n\n")).unwrap_or_default();
+            e.with_remediation(format!("{said}The details are in {}", path.display()))
+        }
+        Err(w) => {
+            log::warn!("couldn't write a failure log for the {} plugin: {w}", p.display_name());
+            e
+        }
+    }
 }
 
 /// The function behind every proxied tool: route by [`Ctx::tool`], start the server if needed,
@@ -250,7 +289,7 @@ fn call_plugin(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError
     let mut slot = client.lock().unwrap_or_else(PoisonError::into_inner);
     if slot.is_none() {
         ctx.report(None, format!("Starting the {} plugin…", plugin.display_name()));
-        *slot = Some(McpClient::connect(plugin.display_name(), &plugin.server(), START_TIMEOUT)?);
+        *slot = Some(start(plugin, &ctx.session.config_dir())?);
     }
     let Some(c) = slot.as_mut() else { return Err(ToolError::internal("plugin client missing")) };
     let cancel = ctx.cancel.clone();
@@ -326,6 +365,43 @@ mod tests {
             enabled: true,
             consent: true,
         }
+    }
+
+    #[test]
+    fn a_plugin_that_exits_at_once_says_what_it_printed_and_leaves_a_log() {
+        #[cfg(windows)]
+        let (command, args) = ("cmd", vec!["/C".to_string(), "echo bad token in notes.cfg 1>&2 & exit 3".to_string()]);
+        #[cfg(not(windows))]
+        let (command, args) = ("sh", vec!["-c".to_string(), "echo bad token in notes.cfg >&2; exit 3".to_string()]);
+        let config = tempfile::tempdir().unwrap();
+        let p = McpPlugin { args, env: BTreeMap::from([("NOTES_KEY".to_string(), "sk-test-secret".to_string())]), ..plugin(command) };
+        let e = refresh(&p, config.path()).unwrap_err();
+        assert!(e.message.contains("exited with exit code 3"), "{e:?}");
+        let said = e.remediation.unwrap_or_default();
+        assert!(said.contains("bad token in notes.cfg") && said.contains("plugins.mcp"), "{said}");
+        let logs: Vec<_> = std::fs::read_dir(crate::failure_log::dir_in(config.path())).unwrap().flatten().map(|f| f.path()).collect();
+        assert_eq!(logs.len(), 1);
+        assert!(said.contains(&format!("The details are in {}", logs[0].display())), "{said}");
+        let log = std::fs::read_to_string(&logs[0]).unwrap();
+        for part in ["notes plugin (an MCP server) didn't start", "Exit code: 3", "bad token in notes.cfg", command] {
+            assert!(log.contains(part), "{part}: {log}");
+        }
+        assert!(!log.contains("sk-test-secret"), "its environment stays out of the log");
+    }
+
+    #[test]
+    fn a_plugin_that_cant_start_names_its_log_and_a_remote_one_writes_none() {
+        let config = tempfile::tempdir().unwrap();
+        let args = vec!["--url".to_string(), "https://mcp.example.test/mcp?token=plainsecretvalue42".to_string()];
+        let e = refresh(&McpPlugin { args, ..plugin("craft-anything-no-such-plugin-server") }, config.path()).unwrap_err();
+        assert!(e.remediation.unwrap_or_default().contains("The details are in"), "a missing program is logged too");
+        let logs: Vec<_> = std::fs::read_dir(crate::failure_log::dir_in(config.path())).unwrap().flatten().map(|f| f.path()).collect();
+        let log = std::fs::read_to_string(&logs[0]).unwrap();
+        assert!(log.contains("mcp.example.test/mcp?token=") && !log.contains("plainsecretvalue42"), "a key in an argument is hidden: {log}");
+        let remote = McpPlugin { url: Some("http://127.0.0.1:0/mcp".into()), ..plugin("") };
+        let other = tempfile::tempdir().unwrap();
+        assert!(refresh(&remote, other.path()).is_err());
+        assert!(!crate::failure_log::dir_in(other.path()).exists(), "no log for a remote server");
     }
 
     #[test]

@@ -21,6 +21,7 @@ enum Action {
     Mode(Mode),
     Deep(bool),
     Quit,
+    Updates,
     Url(&'static str),
 }
 
@@ -86,6 +87,7 @@ impl MenuBar {
         let palette = item("Command palette", cmd(Code::KeyK), Action::Palette);
         let theme = item("Switch light / dark theme", None, Action::App(AppCommand::ToggleTheme));
         let website = item("Craft Anything on GitHub", None, Action::Url(REPO));
+        let updates = item("Check for Updates…", None, Action::Updates);
         let report = item("Report a problem…", None, Action::Url(NEW_ISSUE));
         let mut check = |label: &'static str, action: Action| {
             let i = CheckMenuItem::new(tr(label), true, false, None);
@@ -134,7 +136,7 @@ impl MenuBar {
             .and_then(|()| file.append_items(&[&new_project, &open_file, &open_folder, &sep(), &export, &sep(), &close_window]))
             .and_then(|()| view.append_items(&[&palette, &sep(), &simple, &advanced, &sep(), &clean, &deep, &sep(), &theme, &sep(), &fullscreen]))
             .and_then(|()| window.append_items(&[&minimise, &zoom, &sep(), &to_front]))
-            .and_then(|()| help.append_items(&[&website, &report]))
+            .and_then(|()| help.append_items(&[&updates, &sep(), &website, &report]))
             .and_then(|()| menu.append_items(&[&app_menu, &file, &view, &window, &help]));
         if let Err(e) = built {
             log::warn!("the menu bar couldn't be built: {e}");
@@ -187,6 +189,7 @@ pub fn update(app: &mut CraftApp, ctx: &egui::Context) {
     }
     for action in picked {
         match action {
+            Action::Updates => app.updates.check(ctx),
             Action::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Action::Url(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
             _ if !ready => {}

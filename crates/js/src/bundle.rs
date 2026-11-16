@@ -275,6 +275,27 @@ impl<'s> BundleVisitor<'s> {
         good * 10 >= total * 9
     }
 
+    /// Every property is a module factory: a small-arity function under a plain key.
+    fn object_has_factories(o: &ObjectExpression<'_>) -> bool {
+        o.properties
+            .iter()
+            .all(|p| matches!(p, ObjectPropertyKind::ObjectProperty(p) if !p.computed && as_func(&p.value).is_some_and(|f| f.param_count() <= 3)))
+    }
+
+    /// `(g = g || [])` or `(g ||= [])`: how webpack's chunk loading reaches its global array,
+    /// whatever the global is called.
+    fn chunk_global(e: &Expression<'_>) -> bool {
+        let Expression::AssignmentExpression(a) = e.get_inner_expression() else { return false };
+        let empty = |e: &Expression<'_>| matches!(e.get_inner_expression(), Expression::ArrayExpression(x) if x.elements.is_empty());
+        match a.operator {
+            AssignmentOperator::Assign => {
+                matches!(a.right.get_inner_expression(), Expression::LogicalExpression(l) if l.operator == LogicalOperator::Or && empty(&l.right))
+            }
+            AssignmentOperator::LogicalOr => empty(&a.right),
+            _ => false,
+        }
+    }
+
     fn array_is_table(a: &ArrayExpression<'_>) -> bool {
         let funcs = a.elements.iter().filter(|e| e.as_expression().and_then(as_func).is_some_and(|f| f.param_count() <= 3)).count();
         let holes = a.elements.iter().filter(|e| matches!(e, ArrayExpressionElement::Elision(_))).count();
@@ -415,8 +436,14 @@ impl<'a> Visit<'a> for BundleVisitor<'_> {
                     _ => None,
                 })
                 .collect();
+            // A table of two or more factories is shape enough; a single one also needs webpack
+            // named in the file or webpack's `(g = g || []).push`, since `queue.push([[1], { a }])`
+            // is ordinary code too.
+            let single_module = |o: &ObjectExpression<'_>| {
+                Self::object_is_table(o) || (o.properties.len() == 1 && (self.webpack_hint || Self::chunk_global(&m.object)) && Self::object_has_factories(o))
+            };
             match payload.elements.get(1).and_then(|e| e.as_expression()).map(|e| e.get_inner_expression()) {
-                Some(Expression::ObjectExpression(o)) if Self::object_is_table(o) || o.properties.len() == 1 => {
+                Some(Expression::ObjectExpression(o)) if single_module(o) => {
                     self.info.chunk_ids.extend(chunk_ids.iter().cloned());
                     self.take_object(o, "webpack-chunk", &chunk_ids);
                     return;

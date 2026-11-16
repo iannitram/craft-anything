@@ -24,6 +24,13 @@ mod linux_gpu;
 /// Opens the window on the engine and AI hub (a path on the command line opens as the first
 /// target); if the window can't start, says why and where its log is.
 fn main() -> eframe::Result {
+    if let Some(result) = craft_anything_ui_egui::updates::finish_helper() {
+        let failed = result.is_err();
+        if let Err(error) = result {
+            eprintln!("Update failed: {error}");
+        }
+        std::process::exit(i32::from(failed));
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("craft-anything {}", env!("CARGO_PKG_VERSION"));
@@ -131,6 +138,7 @@ fn main() -> eframe::Result {
                 log::info!("window open");
                 CraftApp::setup_context(&cc.egui_ctx);
                 let mut app = CraftApp::new(engine, hub);
+                app.show_update_outcome_on_start();
                 // The window is built hidden and its first frame is drawn afterwards, where a graphics
                 // driver may still crash: the mark stays until frames have been shown (#74).
                 app.after_first_frames(move || {

@@ -74,6 +74,14 @@ pub struct ServerOptions {
 /// Tools that change the machine without an effect that says so.
 const ACTS_ON_MACHINE: [&str; 3] = ["plugins_add", "engines_install", "native_cutter_command_run"];
 
+/// Web tools that act on the person's own desktop and saved sign-ins (a window opens, a sign-in is
+/// kept or deleted): off in restricted mode even with --allow-web.
+const ACTS_ON_DESKTOP: [&str; 2] = ["web_site_sign_in", "web_site_sign_out"];
+
+/// The web tool that starts from a saved sign-in unless told not to: always fresh in restricted
+/// mode (see `Server::restricted_args`).
+const SAVED_SIGN_IN_READER: &str = "web_site_open";
+
 impl Default for ServerOptions {
     fn default() -> Self {
         ServerOptions {
@@ -136,8 +144,24 @@ pub struct Server {
     out: Writer,
 }
 
+/// A line for the log when the server's consent boundary is off: a client configuration that adds
+/// `--allow-run` otherwise turns every code-running call into an allowed one without a word.
+pub fn startup_notice(opts: &ServerOptions) -> Option<String> {
+    if !opts.allow_run {
+        return None;
+    }
+    Some(
+        "craft-anything mcp: --allow-run is set: tools that run code or change this computer are allowed without asking. Remove --allow-run to restore the approval step."
+            .to_string(),
+    )
+}
+
 /// Serve on this process's stdin/stdout until stdin closes.
 pub fn serve_stdio(engine: Arc<Engine>, opts: ServerOptions) -> std::io::Result<()> {
+    // stdout carries the JSON-RPC protocol, so a warning belongs on stderr.
+    if let Some(notice) = startup_notice(&opts) {
+        eprintln!("{notice}");
+    }
     let stdin = std::io::stdin();
     serve(engine, opts, stdin.lock(), Box::new(std::io::stdout()))
 }
@@ -360,7 +384,9 @@ impl Server {
         let effects = spec.effects;
         let web = spec.id.starts_with("web_") && effects.intersects(Effects::ACCESSES_NETWORK | Effects::LAUNCHES_PROCESS);
         let capture = web && spec.id.contains("capture");
-        let (off, way_back) = if capture {
+        let (off, way_back) = if ACTS_ON_DESKTOP.contains(&spec.id) {
+            (true, "Start the MCP server without --restricted to sign in to websites.")
+        } else if capture {
             (!self.opts.allow_capture, "Start the MCP server with --allow-capture to turn capture tools on.")
         } else if web {
             (!self.opts.allow_web, "Start the MCP server with --allow-web to turn web tools on.")
@@ -374,6 +400,30 @@ impl Server {
                 .with_remediation(way_back)
                 .with_details(json!({"reason": "restricted_mode", "tool": spec.id}))
         })
+    }
+
+    /// In restricted mode, `args` for `name` with saved sign-ins kept out: network access
+    /// (`--allow-web`) is not access to the person's accounts, so `web_site_open` always starts a
+    /// fresh browser here (`signed_in` becomes false) and asking for a saved sign-in is refused.
+    fn restricted_args(&self, name: &str, mut args: Value) -> Result<Value, ToolError> {
+        let registry = self.engine.registry();
+        if !self.opts.restricted || registry.canonical(name).unwrap_or(name) != SAVED_SIGN_IN_READER {
+            return Ok(args);
+        }
+        if args.get("signed_in").is_some_and(|v| v.as_bool() != Some(false) && !v.is_null()) {
+            return Err(ToolError::new(
+                craft_anything_evidence::ErrorCode::FeatureMissing,
+                format!("{SAVED_SIGN_IN_READER} can't use a saved sign-in in restricted mode."),
+            )
+            .with_remediation("Open the site with signed_in: false, or start the MCP server without --restricted to use saved sign-ins.")
+            .with_details(json!({"reason": "restricted_mode", "tool": SAVED_SIGN_IN_READER, "param": "signed_in"})));
+        }
+        if let Value::Object(m) = &mut args {
+            m.insert("signed_in".into(), json!(false));
+        } else if args.is_null() {
+            args = json!({"signed_in": false});
+        }
+        Ok(args)
     }
 
     fn visible(&self, set: Toolset) -> bool {
@@ -436,7 +486,8 @@ impl Server {
     fn tools_call(&self, id: &Value, params: &Value, token: &CancelToken) -> Value {
         let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
         let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-        let progress_token = params.get("_meta").and_then(|m| m.get("progressToken")).cloned();
+        // MCP's ProgressToken is a string or a number; a null or structured value is not a token.
+        let progress_token = params.get("_meta").and_then(|m| m.get("progressToken")).filter(|t| t.is_string() || t.is_number()).cloned();
         let seq = Arc::new(AtomicU64::new(0));
         let result = match name {
             "list_toolsets" => Ok(ToolOutput::Value(self.toolsets_json())),
@@ -518,6 +569,7 @@ impl Server {
         if let Some(err) = self.restricted_refusal(name) {
             return Err(err);
         }
+        let args = self.restricted_args(name, args)?;
         // A tool from a toolset that isn't enabled yet: enable it rather than refusing.
         if let Some(spec) = self.engine.registry().get(name)
             && !self.visible(spec.toolset)

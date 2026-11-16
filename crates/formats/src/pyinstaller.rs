@@ -140,7 +140,7 @@ fn read_table(data: &[u8], c: &Cookie) -> (Vec<Member>, Option<String>) {
             let flag = r.u8(at + 16)?;
             let type_code = r.u8(at + 17)?;
             let name = r.slice(at + ENTRY_HEAD, len - ENTRY_HEAD)?;
-            let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+            let end = name.iter().position(|b| *b == 0)?;
             let path = String::from_utf8_lossy(name.get(..end)?).into_owned();
             let in_payload = offset.checked_add(stored_size).is_some_and(|end| end <= c.toc_at as u64);
             let compression = match (in_payload, flag) {

@@ -149,12 +149,41 @@ pub(crate) fn query_process(config: &BackendConfig, options: &BackendOptions, di
 
 /// Query the selected installation, propagating cancellation, process failures and invalid catalogue errors.
 pub(crate) fn discover(config: &BackendConfig, options: &BackendOptions, directory: Option<&Path>, stop: &Stop) -> Result<Vec<AgentModel>, ToolError> {
-    let stop = stop.clone();
-    let out = query_process(config, options, directory)?
-        .cancel_when(move || stop.is_stopped())
-        .remediation("Check OpenCode V2 and its provider setup on the selected computer, then reload the models.")
-        .run_checked()?;
+    let query = || {
+        let stop = stop.clone();
+        query_process(config, options, directory)?
+            .cancel_when(move || stop.is_stopped())
+            .remediation("Check OpenCode V2 and its provider setup on the selected computer, then reload the models.")
+            .run_checked()
+    };
+    let out = match query() {
+        // A private server can answer before its plugins have started (#1859): ask once more.
+        Err(e) if still_starting(&e) => {
+            pause(stop, STARTING_PAUSE)?;
+            query()?
+        }
+        r => r?,
+    };
     parse_models(&out.stdout)
+}
+
+/// How long to give OpenCode's plugins before asking again (#1859).
+const STARTING_PAUSE: Duration = Duration::from_secs(2);
+
+/// OpenCode's typed answer while it's still starting: `{"_tag":"ServiceUnavailableError",…}`.
+fn still_starting(e: &ToolError) -> bool {
+    e.code == ErrorCode::ProgramFailed
+        && e.details.as_ref().and_then(|d| d.get("output_tail")).and_then(serde_json::Value::as_str).is_some_and(|t| t.contains("\"ServiceUnavailableError\""))
+}
+
+/// Wait `total`, ending early with the stop's error when it's stopped.
+fn pause(stop: &Stop, total: Duration) -> Result<(), ToolError> {
+    let until = std::time::Instant::now() + total;
+    while std::time::Instant::now() < until {
+        stop.check()?;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    stop.check()
 }
 
 /// Validate explicit selections against the current instance before saving or starting a run.
@@ -353,5 +382,42 @@ mod tests {
         std::fs::write(&program, "#!/bin/sh\nsleep 5\n").unwrap();
         let err = query_process(&config(), &options, Some(dir.path())).unwrap().timeout(Duration::from_millis(50)).run_checked().unwrap_err();
         assert_eq!(err.code, ErrorCode::TimedOut);
+    }
+
+    /// #1859: OpenCode's 503 while its plugins start is asked about once more; the second answer is used.
+    #[cfg(unix)]
+    #[test]
+    fn a_server_still_starting_is_asked_once_more() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("opencode");
+        let busy = r#"{"_tag":"ServiceUnavailableError","message":"Location plugins did not finish activating","service":"plugin"}"#;
+        let script = format!("#!/bin/sh\nprintf x >> tries\nif [ ! -f started ]; then touch started; echo '{busy}'; exit 1; fi\ncat models.json\n");
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let options = BackendOptions { command: Some(program.display().to_string()), ..Default::default() };
+        std::fs::write(dir.path().join("models.json"), json!({"data":[model("m",true,"chat", &[])]}).to_string()).unwrap();
+        assert_eq!(discover(&config(), &options, Some(dir.path()), &Stop::default()).unwrap()[0].id, "test/m");
+        assert_eq!(std::fs::read_to_string(dir.path().join("tries")).unwrap(), "xx", "asked twice");
+        // Still starting the second time: that answer is the error, and it isn't asked a third time.
+        std::fs::write(dir.path().join("tries"), "").unwrap();
+        std::fs::write(&program, format!("#!/bin/sh\nprintf x >> tries\necho '{busy}'\nexit 1\n")).unwrap();
+        let err = discover(&config(), &options, Some(dir.path()), &Stop::default()).unwrap_err();
+        assert!(still_starting(&err), "{err:?}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("tries")).unwrap(), "xx");
+    }
+
+    /// Only OpenCode's typed "still starting" answer is asked again, not any failure.
+    #[test]
+    fn only_a_server_still_starting_is_asked_again() {
+        let failed = |tail: &str| ToolError::new(ErrorCode::ProgramFailed, "opencode stopped with exit code 1.").with_details(json!({"output_tail": tail}));
+        assert!(still_starting(&failed(r#"{"_tag":"ServiceUnavailableError","message":"Location plugins did not finish activating"}"#)));
+        assert!(!still_starting(&failed(r#"{"_tag":"ProviderAuthError","message":"bad key"}"#)));
+        assert!(!still_starting(&failed("ServiceUnavailableError in some prose")), "the typed tag, not the word");
+        assert!(!still_starting(&ToolError::new(ErrorCode::TimedOut, "timed out")));
+        // A stop during the pause ends it with the stop's error.
+        let stop = Stop::default();
+        stop.stop();
+        assert!(pause(&stop, Duration::from_secs(5)).is_err());
     }
 }

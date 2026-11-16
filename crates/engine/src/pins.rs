@@ -33,6 +33,8 @@ use std::time::Duration;
 /// The folder in a project that holds its pins.
 pub const PINNED: &str = "pinned";
 pub const PIN_FILE: &str = "pin.json";
+/// Where a pin keeps a program it copied from outside the app (a moved Cargo target directory).
+const PIN_PROGRAM: &str = "pin-program";
 /// The current `pin.json` format version.
 pub const PIN_VERSION: u32 = 2;
 /// Version 2 remembers the program selected for an argument-free launch inside the copied app.
@@ -106,6 +108,10 @@ pub struct Pin {
     /// What a light pin shares with the project.
     #[serde(default)]
     pub shared_bytes: u64,
+    /// Bytes that were meant to be shared (hard-linked) but had to be copied instead, because the
+    /// drive or the file didn't allow hard links. Only meaningful for light pins.
+    #[serde(default)]
+    pub copied_shared_bytes: u64,
     /// The selected program relative to the copied app, for a launch without arguments.
     /// Older pins and launches through an external runtime keep the existing discovery path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,6 +156,8 @@ impl Pin {
             }
             return Ok((program, Vec::new()));
         }
+        // A pin from before programs were recorded: its own copy decides, not where Cargo builds
+        // the project now (a global target-dir would point at the latest build).
         crate::outputs::launch(&app, godot).ok_or_else(|| {
             ToolError::new(ErrorCode::NotFound, "There's nothing to start: no built program in this pin.")
                 .with_remediation("Pin a working build or open the folder to look.")
@@ -232,6 +240,18 @@ enum Keep {
     FilesIn(PathBuf),
 }
 
+/// The selected program's path under the app when it is inside it, from relative or absolute paths.
+fn inside_app(app: &Path, program: &Path) -> Option<PathBuf> {
+    let app = workspace::normalized(app);
+    let program = workspace::normalized(program);
+    program.strip_prefix(&app).ok().map(Path::to_path_buf)
+}
+
+/// The program a pin records: its path in the app, or the pin-owned copy of one built outside it.
+fn pin_program(app: &Path, program: &Path) -> Option<PathBuf> {
+    inside_app(app, program).or_else(|| program.file_name().map(|name| Path::new(PIN_PROGRAM).join(name)))
+}
+
 /// What a pin copies: the app without what a build makes again, the project's own records (an app
 /// edited in place) or `.git`; plus what starting it needs from those folders.
 struct Plan {
@@ -239,19 +259,24 @@ struct Plan {
     keep: Vec<Keep>,
     /// The program's folder: what's in it is always copied, since a running program locks it.
     program_dir: Option<PathBuf>,
+    /// A program from outside the app: its folder, where it goes in the pin, and its file name.
+    external: Option<(PathBuf, PathBuf, std::ffi::OsString)>,
 }
 
 impl Plan {
-    fn new(ws: &Workspace, program: &Path) -> Plan {
+    fn new(ws: &Workspace, program: &Path, copy_external: bool) -> Plan {
         let app = ws.app_dir();
+        let program_abs = workspace::normalized(program);
+        let relative = inside_app(&app, &program_abs);
+        let in_app_parent = relative.as_ref().and_then(|rel| rel.parent()).map(|rel| app.join(rel));
         let mut keep = Vec::new();
-        if let Ok(rel) = program.strip_prefix(&app)
+        if let Some(rel) = &relative
             && let Some(first) = rel.components().next()
         {
             let top = app.join(first);
             let only_files = first.as_os_str().to_str().is_some_and(|n| PROGRAM_FILES_ONLY.contains(&n));
-            match program.parent() {
-                Some(dir) if only_files => keep.push(Keep::FilesIn(dir.to_path_buf())),
+            match &in_app_parent {
+                Some(dir) if only_files => keep.push(Keep::FilesIn(dir.clone())),
                 _ if workspace::rebuilt(&top) => keep.push(Keep::Whole(top)),
                 _ => {}
             }
@@ -261,7 +286,16 @@ impl Plan {
         if app.join("project.godot").is_file() && imported.is_dir() {
             keep.push(Keep::Whole(imported));
         }
-        Plan { app, keep, program_dir: program.parent().map(Path::to_path_buf) }
+        let external = if relative.is_none() && copy_external {
+            match (program_abs.parent(), program_abs.file_name()) {
+                (Some(source), Some(name)) => Some((source.to_path_buf(), PathBuf::from(PIN_PROGRAM), name.to_os_string())),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let program_dir = external.as_ref().map(|(source, _, _)| source.clone()).or(in_app_parent);
+        Plan { app, keep, program_dir, external }
     }
 
     /// Every (file, where it goes under `to`) the copy makes, in order.
@@ -294,6 +328,24 @@ impl Plan {
                     {
                         own.push((e.path(), to.join(rel).join(e.file_name()), m.len()));
                     }
+                }
+            }
+        }
+        if let Some((source, dest, name)) = &self.external {
+            for e in std::fs::read_dir(source).map_err(|e| ToolError::io(source.display(), e))?.flatten() {
+                let path = e.path();
+                let file_name = e.file_name();
+                // A shared target directory holds other projects' programs too: copy the one this
+                // pin starts and the files beside it, not every executable in the folder.
+                let selected = file_name.as_os_str() == name.as_os_str();
+                if !selected && crate::outputs::is_program(&path) {
+                    continue;
+                }
+                if let Ok(m) = e.metadata()
+                    && m.is_file()
+                    && (selected || (!compiler_leftover(&path) && !stray_copy(&path)))
+                {
+                    own.push((path, to.join(dest).join(file_name), m.len()));
                 }
             }
         }
@@ -358,13 +410,13 @@ fn walk(from: &Path, to: &Path, skip: &dyn Fn(&Path) -> bool, depth: usize, out:
     Ok(())
 }
 
-/// What there is to start in `app`: the program and its arguments (see `outputs::launch`). A
+/// What there is to start in `app`: the program and its arguments (see `outputs::launch_now`). A
 /// website isn't pinned yet.
 fn start_of(app: &Path, godot: Option<&Path>) -> Result<(PathBuf, Vec<String>), ToolError> {
     if crate::outputs::site_dir(app).is_some() {
         return Err(ToolError::unsupported("This project made a website, and websites can't be pinned yet.").with_remediation("Use project_preview to see it."));
     }
-    crate::outputs::launch(app, godot).ok_or_else(|| {
+    crate::outputs::launch_now(app, godot).ok_or_else(|| {
         ToolError::new(ErrorCode::NotFound, "There's nothing to pin yet: no built program in this project.")
             .with_remediation("Finish a build first (rebuild), then pin it.")
     })
@@ -372,8 +424,8 @@ fn start_of(app: &Path, godot: Option<&Path>) -> Result<(PathBuf, Vec<String>), 
 
 /// What a pin of the project's current build would take on disk.
 pub fn estimate(ws: &Workspace, godot: Option<&Path>) -> Result<Size, ToolError> {
-    let (program, _) = start_of(&ws.app_dir(), godot)?;
-    let files = Plan::new(ws, &program).files(ws, Path::new(""))?;
+    let (program, args) = start_of(&ws.app_dir(), godot)?;
+    let files = Plan::new(ws, &program, args.is_empty()).files(ws, Path::new(""))?;
     let bytes = |only_copied: bool| files.iter().filter(|f| !(only_copied && f.shared)).fold(0u64, |n, f| n.saturating_add(f.len));
     Ok(Size { bytes: bytes(false), files: files.len() as u64, light_bytes: bytes(true) })
 }
@@ -386,7 +438,7 @@ pub fn create(ws: &Workspace, mode: PinMode, name: Option<&str>, godot: Option<&
             .with_remediation("Pin it as frozen or light."));
     }
     let (program, args) = start_of(&ws.app_dir(), godot)?;
-    let recorded_program = if args.is_empty() { program.strip_prefix(ws.app_dir()).ok().map(Path::to_path_buf) } else { None };
+    let recorded_program = if args.is_empty() { pin_program(&ws.app_dir(), &program) } else { None };
     let parent = ws.root.join(PINNED);
     std::fs::create_dir_all(&parent).map_err(|e| ToolError::io(parent.display(), e))?;
     let mut id = list(ws).iter().map(|p| p.id).max().unwrap_or(0).saturating_add(1);
@@ -406,9 +458,10 @@ pub fn create(ws: &Workspace, mode: PinMode, name: Option<&str>, godot: Option<&
         (None, Some(r)) => format!("{project} · round {r}"),
         (None, None) => format!("{project} · pin {id}"),
     };
-    let mut pin = Pin { version: PIN_VERSION, id, name, mode, created_ms: now_ms(), round, bytes: 0, shared_bytes: 0, program: recorded_program };
+    let mut pin =
+        Pin { version: PIN_VERSION, id, name, mode, created_ms: now_ms(), round, bytes: 0, shared_bytes: 0, copied_shared_bytes: 0, program: recorded_program };
     let made = (|| {
-        (pin.bytes, pin.shared_bytes) = copy(ws, &program, &pin.app_dir(ws), mode, progress)?;
+        (pin.bytes, pin.shared_bytes, pin.copied_shared_bytes) = copy(ws, &program, args.is_empty(), &pin.app_dir(ws), mode, progress)?;
         pin.launch(ws, godot)?;
         save(ws, &pin)
     })();
@@ -424,10 +477,31 @@ pub fn create(ws: &Workspace, mode: PinMode, name: Option<&str>, godot: Option<&
 
 /// Make a pin's copy; what it took and what it shares. A file that can't be linked (a drive
 /// without hard links, a file with as many as it can have) is copied.
-fn copy(ws: &Workspace, program: &Path, to: &Path, mode: PinMode, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<(u64, u64), ToolError> {
-    let files = Plan::new(ws, program).files(ws, to)?;
+fn copy(
+    ws: &Workspace,
+    program: &Path,
+    copy_external: bool,
+    to: &Path,
+    mode: PinMode,
+    progress: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<(u64, u64, u64), ToolError> {
+    copy_linking(ws, program, copy_external, to, mode, progress, &|from, to| std::fs::hard_link(from, to))
+}
+
+/// `copy`, with the way a file is linked given as a parameter, so a test can make linking fail
+/// without needing a drive that can't link.
+fn copy_linking(
+    ws: &Workspace,
+    program: &Path,
+    copy_external: bool,
+    to: &Path,
+    mode: PinMode,
+    progress: &mut dyn FnMut(u64, u64) -> bool,
+    link: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(u64, u64, u64), ToolError> {
+    let files = Plan::new(ws, program, copy_external).files(ws, to)?;
     let total = files.iter().fold(0u64, |n, f| n.saturating_add(f.len));
-    let (mut done, mut shared) = (0u64, 0u64);
+    let (mut done, mut shared, mut copied_shared) = (0u64, 0u64, 0u64);
     for f in &files {
         if !progress(done, total) {
             return Err(ToolError::new(ErrorCode::Cancelled, "Pinning was stopped; nothing was kept."));
@@ -435,18 +509,21 @@ fn copy(ws: &Workspace, program: &Path, to: &Path, mode: PinMode, progress: &mut
         if let Some(d) = f.to.parent() {
             std::fs::create_dir_all(d).map_err(|e| ToolError::io(d.display(), e))?;
         }
-        if mode == PinMode::Light && f.shared && std::fs::hard_link(&f.from, &f.to).is_ok() {
+        if mode == PinMode::Light && f.shared && link(&f.from, &f.to).is_ok() {
             shared = shared.saturating_add(f.len);
         } else {
             std::fs::copy(&f.from, &f.to).map_err(|e| {
                 ToolError::io(f.from.display(), e)
                     .with_remediation("Check there's room on the drive for the copy, or pin it as a light copy, which takes less.")
             })?;
+            if mode == PinMode::Light && f.shared {
+                copied_shared = copied_shared.saturating_add(f.len);
+            }
         }
         done = done.saturating_add(f.len);
     }
     progress(total, total);
-    Ok((total.saturating_sub(shared), shared))
+    Ok((total.saturating_sub(shared), shared, copied_shared))
 }
 
 /// Give a pin a new name.
@@ -600,6 +677,39 @@ mod tests {
         }
     }
 
+    /// R5.7: a named program built outside the app (a moved Cargo target directory) is copied into
+    /// the pin and recorded there, so a frozen pin doesn't depend on the external build folder.
+    #[test]
+    fn a_pin_copies_a_program_built_outside_the_app_and_records_the_copy() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = Workspace::create(d.path(), "Snake", "a snake game", TargetRef::None).unwrap();
+        let app = ws.app_dir();
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::write(app.join("Cargo.toml"), "[package]\nname = \"pin-probe\"\n").unwrap();
+        std::fs::write(app.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::create_dir_all(app.join(".cargo")).unwrap();
+        std::fs::write(app.join(".cargo/config.toml"), "[build]\ntarget-dir = \"../shared-out\"\n").unwrap();
+        let shared = ws.root.join("shared-out/debug");
+        std::fs::create_dir_all(&shared).unwrap();
+        let program = shared.join(exe("pin-probe"));
+        std::fs::write(&program, b"program").unwrap();
+        mark_program(&program);
+        let other = shared.join(exe("other-project"));
+        std::fs::write(&other, b"other").unwrap();
+        mark_program(&other);
+        assert_eq!(crate::outputs::built_program(&app), Some(program.clone()), "the named external program is found");
+
+        let pin = create(&ws, PinMode::Frozen, None, None, &mut |_, _| true).unwrap();
+        let copy = pin.app_dir(&ws).join(PIN_PROGRAM).join(exe("pin-probe"));
+        assert_eq!(pin.program, Some(PathBuf::from(PIN_PROGRAM).join(exe("pin-probe"))), "the pin records its copy");
+        assert!(copy.is_file(), "the program is copied into the pin");
+        assert!(!pin.app_dir(&ws).join(PIN_PROGRAM).join(exe("other-project")).exists(), "another project's program is not");
+        let (started, args) = pin.launch(&ws, None).unwrap();
+        assert_eq!((started, args), (copy.clone(), Vec::new()));
+        std::fs::remove_file(&program).unwrap();
+        assert_eq!(pin.launch(&ws, None).unwrap().0, copy, "the frozen pin keeps its own copy");
+    }
+
     #[test]
     fn a_frozen_pin_copies_the_app_and_its_program_but_not_what_a_build_makes() {
         let d = tempfile::tempdir().unwrap();
@@ -731,6 +841,35 @@ mod tests {
         delete(&ws, pin.id).unwrap();
         assert!(!pin.dir(&ws).exists());
         assert_eq!(std::fs::read_to_string(app.join("assets/save.db")).unwrap(), "changed", "removing a pin leaves the project alone");
+    }
+
+    #[test]
+    fn a_shared_file_that_cannot_be_linked_is_counted_as_copied() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = built(d.path());
+        let app = ws.app_dir();
+        std::fs::write(app.join("assets/sky.PNG"), "old sky").unwrap();
+        std::fs::write(app.join("assets/song.ogg"), "old song").unwrap();
+        // The control: on a drive that links, the same files are shared and none is counted as copied.
+        let linked = d.path().join("pin-linked");
+        let (linked_bytes, shared, copied) =
+            copy_linking(&ws, &app, true, &linked, PinMode::Light, &mut |_, _| true, &|from, to| std::fs::hard_link(from, to)).unwrap();
+        assert_eq!((shared, copied), (15, 0), "the two media files are shared");
+
+        // A drive (or a file) that refuses the link: the same bytes are copied instead, and said so.
+        let no_links = |_: &Path, _: &Path| Err(std::io::Error::other("no hard links here"));
+        let to = d.path().join("pin-copied");
+        let (bytes, shared, copied) = copy_linking(&ws, &app, true, &to, PinMode::Light, &mut |_, _| true, &no_links).unwrap();
+        assert_eq!((shared, copied), (0, 15), "the two media files were meant to be shared and were copied");
+        assert_eq!(bytes.saturating_sub(linked_bytes), 15, "what the copy takes grows by the bytes it had to copy");
+        assert_eq!(std::fs::read_to_string(to.join("assets/sky.PNG")).unwrap(), "old sky", "the copy is still usable");
+    }
+
+    #[test]
+    fn an_old_pin_without_copied_shared_bytes_still_loads() {
+        let old = read_pin(br#"{"version":1,"id":2,"name":"A","mode":"light","created_ms":5,"bytes":10,"shared_bytes":8}"#).unwrap();
+        assert_eq!(old.copied_shared_bytes, 0, "a pin written before copied_shared_bytes existed reads as zero");
+        assert_eq!((old.bytes, old.shared_bytes), (10, 8));
     }
 
     #[test]

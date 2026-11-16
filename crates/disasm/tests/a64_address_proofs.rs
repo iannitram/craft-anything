@@ -87,6 +87,17 @@ fn indexed_loads_do_not_name_an_imported_function() {
 }
 
 #[test]
+fn zero_register_indices_still_resolve_their_load_slot() {
+    // `ldr x16, [x1, xzr]` offsets by zero: the zero register is no index, so the known base
+    // still proves the slot and the branch through the loaded pointer keeps it.
+    let mut constants = known_base(0x1000);
+    let load = apply(&mut constants, 0xf87f_6830, 0x1004);
+    assert_eq!(load.refs, vec![0x1000], "{}", load.text());
+    let branch = apply(&mut constants, 0xd61f_0200, 0x1008); // br x16
+    assert_eq!(branch.flow, Flow::IndirectJump { slot: Some(0x1000) });
+}
+
+#[test]
 fn writeback_loads_retire_the_old_base_and_keep_the_loaded_slot() {
     for (word, source) in [(0xf840_8420, 0x1000), (0xf840_8c20, 0x1008)] {
         let mut constants = known_base(0x1000);

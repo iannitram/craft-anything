@@ -187,19 +187,30 @@ pub fn parse_pe(data: &[u8]) -> Result<PeImage, FormatError> {
     let opt_size = usize::from(r.u16_le(coff.saturating_add(16)).ok_or_else(|| FormatError::Truncated("COFF header".into()))?);
     let characteristics = r.u16_le(coff.saturating_add(18)).ok_or_else(|| FormatError::Truncated("COFF header".into()))?;
     let opt = coff.saturating_add(20);
-    let magic = r.u16_le(opt).ok_or_else(|| FormatError::Truncated("optional header".into()))?;
-    let (dirs, ndirs_off) = match magic {
-        0x10b => (opt.saturating_add(96), opt.saturating_add(92)),
-        0x20b => (opt.saturating_add(112), opt.saturating_add(108)),
+    // Every field below comes from the optional header the COFF header declares, so a short
+    // `SizeOfOptionalHeader` can't borrow the CLI directory from the section table (as `pe::headers`
+    // bounds it).
+    let optional = Reader::new(r.slice(opt, opt_size).ok_or_else(|| FormatError::Truncated("optional header".into()))?);
+    let magic = optional.u16_le(0).ok_or_else(|| FormatError::Truncated("optional header".into()))?;
+    let (dirs, ndirs_off, fixed) = match magic {
+        0x10b => (96usize, 92usize, 96usize),
+        0x20b => (112, 108, 112),
         m => return Err(FormatError::Malformed(format!("unknown optional header magic {m:#x}"))),
     };
-    let subsystem = r.u16_le(opt.saturating_add(68)).unwrap_or(0);
-    let dll_characteristics = r.u16_le(opt.saturating_add(70)).unwrap_or(0);
-    let ndirs = r.u32_le(ndirs_off).ok_or_else(|| FormatError::Truncated("optional header".into()))?;
+    if opt_size < fixed {
+        return Err(FormatError::Truncated("fixed optional header fields".into()));
+    }
+    let subsystem = optional.u16_le(68).unwrap_or(0);
+    let dll_characteristics = optional.u16_le(70).unwrap_or(0);
+    let ndirs = optional.u32_le(ndirs_off).ok_or_else(|| FormatError::Truncated("optional header".into()))?;
     if ndirs <= 14 {
         return Err(FormatError::Unsupported("no CLI header: this is not a .NET assembly".into()));
     }
-    let cli_directory = dd(&r, dirs.saturating_add(14 * 8));
+    // Directory 14 must be complete inside the declared optional header.
+    if opt_size < fixed + 15 * 8 {
+        return Err(FormatError::Truncated("CLI data directory".into()));
+    }
+    let cli_directory = dd(&optional, dirs.saturating_add(14 * 8));
     if cli_directory.is_empty() {
         return Err(FormatError::Unsupported("no CLI header: this is not a .NET assembly".into()));
     }

@@ -122,8 +122,9 @@ pub fn grants(adapter: &dyn AgentAdapter) -> Grants {
         approvals: declared(id).map_or(not_stated, |d| d.approvals),
         resume: if adapter.resumes() { Given::Yes } else { Given::No },
         mid_turn_notes: declared(id).map_or(not_stated, |d| d.mid_turn_notes),
-        // ACP hands the message over in the session, so no command line is involved either way.
-        long_message: if adapter.prompt_on_stdin() || path == Path::Acp { Given::Yes } else { Given::No },
+        // ACP hands the message over in the session, so no command line is involved either way. A
+        // message file is written only on this computer: over SSH it still goes in argv.
+        long_message: if adapter.prompt_on_stdin() || adapter.reads_message_file() || path == Path::Acp { Given::Yes } else { Given::No },
     }
 }
 
@@ -138,7 +139,7 @@ pub fn table(adapters: &AgentAdapters) -> Vec<(&'static str, Grants)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli_agents::{APPROVAL_TOOL, ArgsCx, MCP_NAME, McpCommand};
+    use crate::cli_agents::{APPROVAL_TOOL, Access, ArgsCx, MCP_NAME, McpCommand};
     use crate::config::BackendOptions;
     use std::path::Path as StdPath;
 
@@ -151,9 +152,18 @@ mod tests {
     fn builder_run(adapter: &dyn AgentAdapter) -> (Vec<String>, Option<String>) {
         let mcp = McpCommand { command: "craft-anything-cli".into(), args: vec!["mcp".into()], notes: Some(StdPath::new("notes").to_path_buf()) };
         let options = BackendOptions::default();
-        let cx =
-            ArgsCx { options: &options, prompt: "make a game", preamble: "", mcp: &mcp, resume: None, builder: true, reads_checked: false, question: false };
-        (adapter.args(&cx), adapter.mcp_env(&mcp).ok().flatten().map(|(k, v)| format!("{k}={v}")))
+        let cx = ArgsCx {
+            options: &options,
+            prompt: "make a game",
+            preamble: "",
+            mcp: &mcp,
+            resume: None,
+            builder: true,
+            reads_checked: false,
+            question: false,
+            message_file: None,
+        };
+        (adapter.args(&cx), adapter.mcp_env(&mcp, Access::Build).ok().flatten().map(|(k, v)| format!("{k}={v}")))
     }
 
     /// Whether the run carries someone else's program to reach our server: in an argument (Claude
@@ -241,7 +251,11 @@ mod tests {
             let g = grants(a.as_ref());
             let row = row_of(a.as_ref());
             assert_eq!(g.resume.given(), a.resumes(), "{id}: resume is the adapter's own answer");
-            assert_eq!(g.long_message.given(), a.prompt_on_stdin() || row.path == Path::Acp, "{id}: a long message must reach it off the command line");
+            assert_eq!(
+                g.long_message.given(),
+                a.prompt_on_stdin() || a.reads_message_file() || row.path == Path::Acp,
+                "{id}: a long message must reach it off the command line"
+            );
         }
     }
 

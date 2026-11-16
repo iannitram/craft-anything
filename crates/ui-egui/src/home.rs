@@ -6,7 +6,7 @@ use crate::state::{Modal, Screen};
 use crate::theme::{self, Tokens};
 use crate::{CraftApp, Pick, Route, icons, widgets};
 use craft_anything_engine::Consent;
-use egui::{Margin, RichText, Ui, Vec2};
+use egui::{RichText, Ui, Vec2};
 use serde_json::json;
 
 /// Tools that open a website, best first.
@@ -54,13 +54,13 @@ pub fn show(app: &mut CraftApp, ui: &mut Ui) {
         let w = full_w.min(1000.0) - 48.0;
         let pad = ((full_w - w) / 2.0).max(24.0);
         // Tight enough that Start is in view at 900 px with every choice showing (tested).
-        ui.add_space(24.0);
+        ui.add_space(theme::space::XL);
         ui.horizontal(|ui| {
             ui.add_space(pad);
             ui.vertical(|ui| {
                 ui.set_width(w);
                 crate::make::hero(app, ui, w);
-                ui.add_space(36.0);
+                ui.add_space(theme::space::XXL);
             });
         });
     });
@@ -76,26 +76,26 @@ pub fn modals(app: &mut CraftApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let mut close = false;
     let resp = egui::Modal::new(egui::Id::new("craft-modal"))
-        .frame(egui::Frame::new().fill(t.card).corner_radius(t.r_lg()).inner_margin(Margin::same(24)).stroke(egui::Stroke::new(1.0, t.card_border)))
+        .frame(egui::Frame::new().fill(t.card).corner_radius(t.r_lg()).inner_margin(theme::pad::ROOMY).stroke(egui::Stroke::new(1.0, t.card_border)))
         .show(ctx, |ui| {
             ui.set_width(440.0);
             match &modal {
                 Modal::ComingSoon { title, body, icon } => {
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(52.0), egui::Sense::hover());
                     ui.painter().rect_filled(rect, t.radius, t.accent_soft);
-                    icons::paint(ui, rect, icon, 26.0, t.accent_ink);
-                    ui.add_space(10.0);
+                    icons::paint(ui, rect, icon, theme::icon::XL, t.accent_ink);
+                    ui.add_space(theme::space::MD);
                     ui.label(theme::heading(tr(title), theme::SECTION));
-                    ui.add_space(4.0);
+                    ui.add_space(theme::space::XS);
                     ui.label(RichText::new(tr(body)).color(t.text_dim));
-                    ui.add_space(16.0);
+                    ui.add_space(theme::space::LG);
                     if widgets::primary(ui, "Got it").clicked() {
                         close = true;
                     }
                 }
                 Modal::Website => {
                     ui.label(theme::heading(tr("Look at a website"), theme::SECTION));
-                    ui.add_space(8.0);
+                    ui.add_space(theme::space::SM);
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut app.state.url_input)
                             .hint_text("https://example.com")
@@ -110,7 +110,7 @@ pub fn modals(app: &mut CraftApp, ctx: &egui::Context) {
                         ui.data_mut(|d| d.insert_temp(opened, true));
                     }
                     let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    ui.add_space(12.0);
+                    ui.add_space(theme::space::MD);
                     ui.horizontal(|ui| {
                         let ok = !app.state.url_input.trim().is_empty();
                         if (widgets::primary_icon(ui, Some("globe"), "Open it", ok).clicked() || enter)
@@ -137,7 +137,7 @@ pub fn modals(app: &mut CraftApp, ctx: &egui::Context) {
                     if let Some((_, title, blurb, steps)) = TUTORIALS.get(*i) {
                         ui.label(theme::heading(tr(title), theme::SECTION));
                         ui.label(RichText::new(tr(blurb)).color(t.text_dim));
-                        ui.add_space(12.0);
+                        ui.add_space(theme::space::MD);
                         for (n, s) in steps.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), egui::Sense::hover());
@@ -151,9 +151,9 @@ pub fn modals(app: &mut CraftApp, ctx: &egui::Context) {
                                 );
                                 ui.add(egui::Label::new(tr(s)).wrap());
                             });
-                            ui.add_space(4.0);
+                            ui.add_space(theme::space::XS);
                         }
-                        ui.add_space(12.0);
+                        ui.add_space(theme::space::MD);
                         ui.horizontal(|ui| {
                             if widgets::primary_icon(ui, Some("folder-open"), "Open something", true).clicked() {
                                 app.pick(Pick::OpenFile);
@@ -180,7 +180,7 @@ pub fn modals(app: &mut CraftApp, ctx: &egui::Context) {
                 Modal::About => {
                     ui.label(theme::heading("Craft Anything", theme::SECTION));
                     ui.label(RichText::new(format!("{} {}", tr("Version"), env!("CARGO_PKG_VERSION"))).color(t.text_dim));
-                    ui.add_space(12.0);
+                    ui.add_space(theme::space::MD);
                     if widgets::primary(ui, "Close").clicked() {
                         close = true;
                     }

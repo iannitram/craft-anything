@@ -42,6 +42,9 @@ pub struct ArgsCx<'a> {
     /// A question about a build: only reading (none in Clean room), no tool server, and a fresh
     /// session or a fork that leaves the builder's session unchanged.
     pub question: bool,
+    /// Where the message was written, for an adapter that [reads it from a file](AgentAdapter::reads_message_file);
+    /// None over SSH, or when the file couldn't be written, and the message goes in argv.
+    pub message_file: Option<&'a Path>,
 }
 
 /// One way of driving an agent CLI.
@@ -75,9 +78,19 @@ pub trait AgentAdapter: Send + Sync {
     }
     /// Refuse options that the native transport cannot support, before preflight or process I/O.
     /// Saving a model choice and discovering its catalogue do not imply native execution support.
-    /// `cwd` is the folder the agent will run in on this computer; none for a run over SSH.
+    /// `cwd` is the folder the agent will run in on this computer.
     fn check_native_options(&self, _options: &BackendOptions, _cwd: Option<&Path>) -> Result<(), ToolError> {
         Ok(())
+    }
+
+    /// Check native settings where an SSH agent actually runs.
+    fn check_remote_options(&self, options: &BackendOptions, _host: &str, _stop: &Stop) -> Result<(), ToolError> {
+        self.check_native_options(options, None)
+    }
+
+    /// An environment setting that must be applied on the SSH host.
+    fn remote_run_env(&self) -> Option<(&'static str, String)> {
+        None
     }
 
     /// Use ACP by default and refuse the per-message CLI runner. An explicit `acp = false` or
@@ -165,7 +178,7 @@ pub trait AgentAdapter: Send + Sync {
     fn parse(&self, _p: &mut StreamParser, _v: &Value) -> Vec<AgentEvent> {
         Vec::new()
     }
-    /// Events for one line of stderr (e.g. a missing session, which only stderr names).
+    /// Diagnostics that an agent reports outside its JSON stream.
     fn parse_stderr(&self, _p: &mut StreamParser, _line: &str) -> Vec<AgentEvent> {
         Vec::new()
     }
@@ -186,6 +199,12 @@ pub trait AgentAdapter: Send + Sync {
     /// The message goes in on stdin, not in argv: a long one passes Windows' command-line limit
     /// ("The filename or extension is too long", os error 206, #402).
     fn prompt_on_stdin(&self) -> bool {
+        false
+    }
+    /// The message (preamble first) goes in a file on this computer, named in
+    /// [`ArgsCx::message_file`], for an agent that reads one but not stdin: a long one passes
+    /// Windows' command-line limit too (#402).
+    fn reads_message_file(&self) -> bool {
         false
     }
     /// What goes in on stdin when [`prompt_on_stdin`](AgentAdapter::prompt_on_stdin) says so:
@@ -219,7 +238,7 @@ pub trait AgentAdapter: Send + Sync {
     }
     /// An environment variable that hands a local native run our tool server, for an agent that
     /// takes it from its environment rather than its arguments.
-    fn mcp_env(&self, _mcp: &McpCommand) -> Result<Option<(&'static str, String)>, ToolError> {
+    fn mcp_env(&self, _mcp: &McpCommand, _access: Access) -> Result<Option<(&'static str, String)>, ToolError> {
         Ok(None)
     }
     /// Whether what a build needs on a remote SSH host is there, checked before a build starts.
@@ -229,7 +248,7 @@ pub trait AgentAdapter: Send + Sync {
     }
     /// Prepare this run's tool server on a remote SSH host (a config file there), returning the
     /// environment variable to set on the remote command. Default: the agent can't carry one.
-    fn remote_tool_server(&self, _host: &str, _mcp: &McpCommand) -> Result<Option<(&'static str, String)>, ToolError> {
+    fn remote_tool_server(&self, _host: &str, _mcp: &McpCommand, _access: Access) -> Result<Option<(&'static str, String)>, ToolError> {
         Ok(None)
     }
     /// The file in which this computer keeps the agent's saved session `id`, so the project can
@@ -377,16 +396,10 @@ const READING_TOOLS: &[&str] = &["Read", "Glob", "Grep", "LS", "NotebookRead"];
 /// (`--fork-session`) and the copy not kept, no tool server, and only Read, Glob and Grep (none in
 /// Clean room).
 fn question_args(mut a: Vec<String>, cx: &ArgsCx) -> Vec<String> {
-    a.extend([
-        "-p".into(),
-        "--output-format".into(),
-        "stream-json".into(),
-        "--verbose".into(),
-        "--append-system-prompt".into(),
-        cx.preamble.to_string(),
-        "--model".into(),
-        cx.options.cli_model.clone().unwrap_or_else(|| crate::anthropic::DEFAULT_MODEL.into()),
-    ]);
+    a.extend(["-p".into(), "--output-format".into(), "stream-json".into(), "--verbose".into(), "--append-system-prompt".into(), cx.preamble.to_string()]);
+    if let Some(model) = cx.options.cli_model.as_deref().filter(|m| !m.trim().is_empty()) {
+        a.extend(["--model".into(), model.to_string()]);
+    }
     if let Some(r) = cx.resume {
         a.extend(["--resume".into(), r.to_string(), "--fork-session".into()]);
     }
@@ -448,11 +461,13 @@ impl AgentAdapter for ClaudeCode {
     }
 
     fn model_in_use(&self, options: Option<&BackendOptions>) -> Option<String> {
-        Some(options.and_then(|options| options.cli_model.clone()).unwrap_or_else(|| crate::anthropic::DEFAULT_MODEL.into()))
+        Some(options.and_then(|options| options.cli_model.clone()).unwrap_or_else(|| "Claude Code default".into()))
     }
 
     fn model_choices(&self, _config: &BackendConfig, _options: &BackendOptions) -> Result<Vec<String>, ToolError> {
-        Ok(crate::anthropic::MODELS.iter().map(|model| model.to_string()).collect())
+        let mut models = vec![crate::anthropic::CLAUDE_CODE_DEFAULT.to_string()];
+        models.extend(crate::anthropic::MODELS.iter().map(|model| model.to_string()));
+        Ok(models)
     }
 
     fn args(&self, cx: &ArgsCx) -> Vec<String> {
@@ -462,9 +477,11 @@ impl AgentAdapter for ClaudeCode {
         }
         let mcp_json = json!({"mcpServers": {MCP_NAME: {"command": cx.mcp.command, "args": cx.mcp.args}}}).to_string();
         a.extend(["-p".into(), "--output-format".into(), "stream-json".into(), "--verbose".into(), "--append-system-prompt".into(), cx.preamble.to_string()]);
-        // Opus 5.5 everywhere unless config.toml names another model on purpose; the effort
-        // goes in through the environment (see `run_cli`).
-        a.extend(["--model".into(), cx.options.cli_model.clone().unwrap_or_else(|| crate::anthropic::DEFAULT_MODEL.into())]);
+        // Omit --model unless config.toml names one: users may have custom models configured in
+        // Claude Code, and forcing a hardcoded default blocks them.
+        if let Some(model) = cx.options.cli_model.as_deref().filter(|m| !m.trim().is_empty()) {
+            a.extend(["--model".into(), model.to_string()]);
+        }
         if let Some(r) = cx.resume {
             a.extend(["--resume".into(), r.to_string()]);
         }
@@ -527,12 +544,22 @@ impl AgentAdapter for ClaudeCode {
                     });
                 }
             }
+            // Each turn reports its plan's limits; `rejected` means this one was refused by them.
+            "rate_limit_event" => {
+                let info = v.get("rate_limit_info");
+                if info.and_then(|i| i.get("status")).and_then(Value::as_str) == Some("rejected") {
+                    let kind = info.and_then(|i| i.get("rateLimitType")).and_then(Value::as_str).unwrap_or_default().to_string();
+                    p.plan_limit = Some((kind, info.and_then(|i| i.get("resetsAt")).and_then(Value::as_u64)));
+                }
+            }
             "assistant" => {
                 if let Some(code) = v.get("error").and_then(Value::as_str) {
-                    let failure = TurnFailure::claude(code);
+                    let plan_limit = if code == "rate_limit" { p.plan_limit.clone() } else { None };
+                    let failure = if plan_limit.is_some() { TurnFailure::new(FailureKind::UsageLimit) } else { TurnFailure::claude(code) };
                     p.failure = Some(failure);
                     let why = v.pointer("/message/content").map(content_text).unwrap_or_else(|| code.to_string());
                     let (message, hint) = claude_code_failure_in(&why, self.folder.as_deref());
+                    let hint = plan_limit.map(|(kind, at)| plan_limit_fix(&kind, at, unix_now())).or(hint);
                     let remediation = hint.or_else(|| match failure.kind {
                         FailureKind::Authentication => self.sign_in_fix(),
                         FailureKind::Billing => Some("Check the account's credits, plan and spending limit before trying again.".into()),
@@ -588,6 +615,9 @@ impl AgentAdapter for ClaudeCode {
                     p.failure.get_or_insert(TurnFailure::new(FailureKind::Unknown));
                     let why = if s("result").is_empty() { s("subtype") } else { s("result") };
                     let (message, remediation) = claude_code_failure_in(&why, self.folder.as_deref());
+                    // The run keeps the turn's last error: a used-up plan limit keeps saying when it resets.
+                    let plan_limit = p.failure.filter(|f| f.kind == FailureKind::UsageLimit).and(p.plan_limit.clone());
+                    let remediation = plan_limit.map(|(kind, at)| plan_limit_fix(&kind, at, unix_now())).or(remediation);
                     out.push(AgentEvent::Error { message, remediation, log: None });
                 }
             }
@@ -617,9 +647,33 @@ impl AgentAdapter for ClaudeCode {
     }
 
     fn signed_in(&self, program: &str) -> Option<bool> {
-        let out = self.process(program).args(["auth", "status", "--json"]).timeout(Duration::from_secs(15)).stdout_cap(64 * 1024).run().ok()?;
-        let v: Value = serde_json::from_str(out.stdout_text().trim()).ok()?;
-        v.get("loggedIn").and_then(Value::as_bool)
+        let out = match self.process(program).args(["auth", "status", "--json"]).timeout(Duration::from_secs(15)).stdout_cap(64 * 1024).run() {
+            Ok(out) => out,
+            Err(e) => {
+                log::debug!("claude auth status --json didn't run: {e}");
+                return None;
+            }
+        };
+        // The status is the first JSON object printed: a certificate warning or a banner before it
+        // isn't a reason to call the person signed out (#1830).
+        let text = out.stdout_text();
+        let Some(json) = first_json_object(&text) else {
+            log::debug!("claude auth status --json: exit {:?}, {} bytes on stdout, no JSON object in it", out.code, text.len());
+            return None;
+        };
+        let v: Value = match serde_json::from_str(json) {
+            Ok(v) => v,
+            Err(e) => {
+                // The answer's wording, never its content: it names an account and a token mode.
+                log::debug!("claude auth status --json: exit {:?}, {} bytes on stdout, its JSON didn't parse: {e}", out.code, text.len());
+                return None;
+            }
+        };
+        let signed = v.get("loggedIn").and_then(Value::as_bool);
+        if signed != Some(true) {
+            log::debug!("claude auth status --json: exit {:?}, {} bytes on stdout, loggedIn: {signed:?}", out.code, text.len());
+        }
+        signed
     }
 
     /// The account its `.claude.json` names (`oauthAccount`), kept there while the sign-in itself
@@ -805,6 +859,36 @@ impl AgentAdapter for Codex {
         &["codex"]
     }
 
+    fn resumes(&self) -> bool {
+        true
+    }
+
+    fn check_native_options(&self, options: &BackendOptions, _cwd: Option<&Path>) -> Result<(), ToolError> {
+        if options.args.iter().any(|arg| arg == "--ephemeral") {
+            return Err(ToolError::invalid("Codex's --ephemeral option does not save conversations for later turns.")
+                .with_remediation("Remove --ephemeral from this backend's arguments so Craft Anything can resume the project's conversation."));
+        }
+        if options.args.iter().any(|arg| arg == "--worktree") {
+            return Err(ToolError::invalid("Codex's --worktree option cannot continue this project's saved conversation.").with_remediation(
+                "Remove --worktree from this backend's arguments. To work in a worktree, select its existing folder as the project folder.",
+            ));
+        }
+        Ok(())
+    }
+
+    fn parse_stderr(&self, p: &mut StreamParser, line: &str) -> Vec<AgentEvent> {
+        let diagnostic = line.trim().to_ascii_lowercase();
+        if p.session_missing || !diagnostic.starts_with("error:") || !diagnostic.contains("no rollout found for thread id ") {
+            return Vec::new();
+        }
+        p.session_missing = true;
+        vec![AgentEvent::Error {
+            message: "Codex's earlier conversation about this project isn't on this computer.".into(),
+            remediation: Some("Ask again: a new conversation starts from what the project already has.".into()),
+            log: None,
+        }]
+    }
+
     /// Ask the selected CLI, not its auth file or keychain; discard raw status output.
     fn signed_in(&self, program: &str) -> Option<bool> {
         let out = Process::new(program).args(["login", "status"]).timeout(Duration::from_secs(10)).stdout_cap(16 * 1024).run().ok()?;
@@ -835,13 +919,8 @@ impl AgentAdapter for Codex {
 
     fn args(&self, cx: &ArgsCx) -> Vec<String> {
         // A question never resumes: Codex can't fork, so it would change the builder's session.
-        // Backend args `exec resume` doesn't accept (`--sandbox`, `-C`…) start a fresh session.
         let resume = cx.resume.filter(|_| self.resumes_with(cx.options, cx.question));
-        let mut v = vec!["exec".to_string()];
-        if resume.is_some() {
-            v.push("resume".into());
-        }
-        v.push("--json".into());
+        let mut v = vec!["exec".to_string(), "--json".to_string()];
         // Project folders aren't git repositories, and `codex exec` refuses to run outside one
         // without this (#69). Not twice: it may already be in the backend's own args.
         const SKIP_GIT: &str = "--skip-git-repo-check";
@@ -849,12 +928,7 @@ impl AgentAdapter for Codex {
             v.push(SKIP_GIT.into());
         }
         if cx.builder {
-            // `exec resume` has no `--sandbox`; the same setting goes in as a config override.
-            if resume.is_some() {
-                v.extend(["-c".into(), "sandbox_mode=\"workspace-write\"".into()]);
-            } else {
-                v.extend(["--sandbox".into(), "workspace-write".into()]);
-            }
+            v.extend(["--sandbox".into(), "workspace-write".into()]);
         }
         v.extend(["-c".into(), format!("mcp_servers.{MCP_NAME}.command={}", toml_string(&cx.mcp.command))]);
         // Codex doesn't refresh its callable tools after enable_toolset (#538), so list every
@@ -875,38 +949,19 @@ impl AgentAdapter for Codex {
             v.extend(["-m".into(), m.clone()]);
         }
         v.extend(cx.options.args.iter().cloned());
-        // Options come before the session id.
+        // Exec-only flags (notably --sandbox) stay before the resume subcommand.
+        // The saved thread id is positional data, never another CLI option.
         if let Some(id) = resume {
-            v.push(id.to_string());
+            v.extend(["resume".into(), "--".into(), id.into()]);
         }
         // The message itself goes in on stdin (see `stdin_text`).
         v.push("-".into());
         v
     }
 
-    /// `codex exec resume` continues the thread whose id `parse` records.
-    fn resumes(&self) -> bool {
-        true
-    }
-
-    /// A question never resumes (Codex can't fork), nor do backend args `exec resume` refuses.
+    /// A question never resumes (Codex can't fork).
     fn resumes_with(&self, options: &BackendOptions, question: bool) -> bool {
-        !question && codex_resume_accepts(&options.args)
-    }
-
-    /// A thread Codex doesn't have (the project came from another computer) is only on stderr.
-    fn parse_stderr(&self, p: &mut StreamParser, line: &str) -> Vec<AgentEvent> {
-        if !line.contains(CODEX_NO_ROLLOUT) {
-            return Vec::new();
-        }
-        p.session_missing = true;
-        vec![AgentEvent::Error {
-            message: "Codex's earlier conversation about this project isn't on this computer.".into(),
-            remediation: Some(
-                "It was started on another computer or in another folder. Ask again: a new conversation starts from what the project already has.".into(),
-            ),
-            log: None,
-        }]
+        !question
     }
 
     fn required_flags(&self) -> (&'static [&'static str], &'static [&'static str]) {
@@ -980,31 +1035,6 @@ impl AgentAdapter for Codex {
     }
 }
 
-/// What `codex exec resume` prints when it has no such thread.
-const CODEX_NO_ROLLOUT: &str = "no rollout found for thread id";
-
-/// Whether `codex exec resume` takes every one of the backend's extra args (checked against
-/// codex-cli 0.167). Anything else, such as `--sandbox` or `-C`, would break the resume, and
-/// `--ephemeral` saves no thread to continue.
-fn codex_resume_accepts(args: &[String]) -> bool {
-    const FLAGS: &[&str] = &["--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"];
-    const WITH_VALUE: &[&str] = &["-c", "--config", "-m", "--model", "-i", "--image", "--output-last-message"];
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if FLAGS.contains(&a.as_str()) {
-            continue;
-        }
-        if WITH_VALUE.contains(&a.as_str()) {
-            if it.next().is_none() {
-                return false;
-            }
-            continue;
-        }
-        return false;
-    }
-    true
-}
-
 /// Unknown output (including future CLI formats) is not a claim that the account is connected.
 fn codex_login_status(success: bool, stdout: &str, stderr: &str) -> Option<bool> {
     let text = format!("{stdout}\n{stderr}").to_ascii_lowercase();
@@ -1020,7 +1050,7 @@ fn codex_login_status(success: bool, stdout: &str, stderr: &str) -> Option<bool>
 /// What a finished Codex tool call says. A failed call carries `"result": null` beside its
 /// `error`, which showed as "null" (#540), so null fields are skipped and an error's message is
 /// used as written. Codex's refusal to run one of our tools it can't ask about gets the way out.
-fn codex_tool_text(item: &Value, tool: &str, ours: bool) -> String {
+pub(crate) fn codex_tool_text(item: &Value, tool: &str, ours: bool) -> String {
     let field = |k: &str| item.get(k).filter(|v| !v.is_null());
     let error = field("error").map(|e| e.get("message").and_then(Value::as_str).map_or_else(|| e.to_string(), str::to_string));
     let text = match (field("result"), error) {
@@ -1030,9 +1060,16 @@ fn codex_tool_text(item: &Value, tool: &str, ours: bool) -> String {
     };
     // Another MCP server's refusal isn't fixed by our setup: it keeps Codex's own words.
     if ours && text.contains(CODEX_NEEDS_APPROVAL) {
-        // The feed keeps 200 characters of a result, so the fix comes first and fits.
+        // The feed keeps 200 characters of a result, so the fix comes first and fits. Setup
+        // approves only the tools that ask the person themselves; any other is approved, or not,
+        // in the person's own Codex settings, and setup changes nothing for it (#1867).
+        if craft_anything_engine::AGENT_APP_PREAPPROVED_TOOLS.contains(&tool) {
+            return format!(
+                "Codex blocked {tool}: it can't ask for approval here. Fix: run `craft-anything-cli setup --client codex --yes`, then retry. See docs/codex.md."
+            );
+        }
         return format!(
-            "Codex blocked {tool}: it can't ask for approval here. Fix: run `craft-anything-cli setup --client codex --yes`, then retry. See docs/codex.md."
+            "Codex blocked {tool}: it can't ask for approval here. To allow it, add {tool} = {{ approval_mode = \"approve\" }} inside `tools` in Codex's config.toml."
         );
     }
     text
@@ -1138,10 +1175,61 @@ pub(super) fn remote_cli_path(host: &str) -> Option<String> {
     absolute_path_line(&out.stdout_text())
 }
 
+/// The first JSON object in `text`, to its closing brace. A CLI can print a warning (a certificate
+/// notice on Windows, a banner) before its answer, and the answer is still the object (#1830).
+fn first_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let rest = text.get(start..)?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in rest.char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return rest.get(..i + c.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The first line of `text` when it is an absolute path; a shell function, alias or banner isn't.
 fn absolute_path_line(text: &str) -> Option<String> {
     let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
     line.starts_with('/').then(|| line.to_string())
+}
+
+#[cfg(test)]
+mod first_json_object_tests {
+    use super::first_json_object;
+
+    /// #1830: a warning printed before the status doesn't hide it, and braces inside text don't
+    /// end it early.
+    #[test]
+    fn the_first_json_object_is_taken_from_noisy_output() {
+        assert_eq!(first_json_object("{\"loggedIn\":true}"), Some("{\"loggedIn\":true}"));
+        let noisy = "(node:1) Warning: self-signed certificate\n{\n  \"loggedIn\": true,\n  \"note\": \"a } inside text\"\n}\n";
+        let json = first_json_object(noisy).expect("the object after the warning");
+        let parsed: serde_json::Value = serde_json::from_str(json).expect("balanced at the right brace");
+        assert_eq!(parsed["loggedIn"], true);
+        assert_eq!(first_json_object("nothing here"), None);
+        assert_eq!(first_json_object("{\"unfinished\": "), None);
+    }
 }
 
 #[cfg(test)]

@@ -31,7 +31,7 @@ pub use craft_anything_platform::serve::StaticServer;
 use craft_anything_platform::serve::serve_dir;
 use craft_anything_platform::sync::Mutex;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -275,7 +275,11 @@ pub struct RebuildRun {
 
 impl RebuildRun {
     /// Start a run on a worker thread. Fails fast (before any work) when no coding agent is set up.
-    pub fn start(hub: &AiHub, mut ws: Workspace, opts: RunOptions) -> Result<RebuildRun, ToolError> {
+    pub fn start(hub: &AiHub, ws: Workspace, opts: RunOptions) -> Result<RebuildRun, ToolError> {
+        // The project as it is now. A run that waited in the queue, or one started as the project's
+        // last run was ending, holds a copy from before that run's last saves (its session), and
+        // everything below, the worker's saves included, works from this copy.
+        let mut ws = Workspace::open(&ws.root).unwrap_or(ws);
         let cfg = hub.config();
         let entry = builder_backend(&cfg, opts.backend.as_deref().or_else(|| project_builder(&cfg, &ws)))?;
         // The person's choice of mode is a session setting. A run that waited its turn uses the mode
@@ -325,6 +329,7 @@ impl RebuildRun {
         // Notes an earlier run never handed over (the app closed while they waited, #1620) wait for
         // this run's builder; their old files go before the app can add any to this one.
         let left = notes::take_left(&notes::notes_dir(&ws.inbox_dir()), opts.message.is_none());
+        craft_anything_engine::inbox::clear_activity(&ws.inbox_dir());
         if !left.is_empty() {
             left_notes_are_a_request(&mut ws);
         }
@@ -662,14 +667,15 @@ impl Worker {
     /// Add the time worked since the last record (and an agent turn's tokens and reported cost)
     /// to the project's usage.json. A question can add its own cost at the same time; a failure is
     /// logged and the build carries on.
-    fn record_usage(&mut self, turn: Option<(u64, u64, Option<f64>, bool)>) {
+    fn record_usage(&mut self, turn: Option<&AgentEvent>) {
         let Some(clock) = self.usage.as_mut() else { return };
         let ms = u64::try_from(clock.since.elapsed().as_millis()).unwrap_or(u64::MAX);
         clock.since = Instant::now();
         let saved = ProjectUsage::update(&clock.root, |u| {
             u.work_ms = u.work_ms.saturating_add(ms);
-            if let Some((input, output, cost, estimate)) = turn {
-                u.add_turn(input, output, cost, estimate);
+            if let Some(AgentEvent::TurnDone { input_tokens, output_tokens, tokens_unknown, cost_usd, cost_is_estimate, .. }) = turn {
+                u.tokens_incomplete |= *tokens_unknown;
+                u.add_turn(*input_tokens, *output_tokens, *cost_usd, *cost_is_estimate);
             }
         });
         if let Err(e) = saved {
@@ -861,6 +867,9 @@ impl Worker {
             let adapter = opts.adapters.for_backend(&entry.config.model, &entry.options);
             if let Some(host) = remote_host {
                 adapter.check_remote_tool_server(host, &self.stop)?;
+                // The settings check may be slow (one ssh read), so it follows the run's stop.
+                let stop = crate::model::Stop::for_tool(self.stop.clone());
+                adapter.check_remote_options(&entry.options, host, &stop)?;
             } else {
                 crate::cli_agents::check_builder_tools(adapter.as_ref(), &entry.config.model, &entry.options, &ws.root, &self.stop)?;
                 let program = crate::cli_agents::program_of(&entry.config, &entry.options)?;
@@ -891,6 +900,13 @@ impl Worker {
         self.self_check = Some((kind.clone(), opts.good_enough));
         let kind = kind.as_ref();
         self.editor = self.find_editor(&ws.manifest.stack)?;
+        // A new build whose stack's program is missing would learn so only at its first check,
+        // after a whole turn (#1837). A project already in app/ isn't stopped: the person may
+        // have moved it to another stack, which the recorded one doesn't show. An API builder over
+        // SSH builds here, so only a coding agent on the other computer skips it.
+        if !study::tools_run_remotely(remote, api.is_some()) && stacks::toolchain_in(&ws.app_dir()).is_none() {
+            missing_program_stop(&ws.manifest.stack, |p| craft_anything_platform::which(p).is_some())?;
+        }
         let api_resumed = api.as_ref().is_some_and(crate::agent::ApiConversation::resumed);
         let kept = KeptHistory { in_mode: kept_without_api.in_mode || api_resumed, elsewhere: kept_without_api.elsewhere };
         let carrying_on = is_carrying_on(opts, kept.in_mode);
@@ -1395,6 +1411,11 @@ impl Worker {
         // since when it was asked to stop.
         let mut idle_since: Option<Instant> = None;
         let mut stop_asked: Option<Instant> = None;
+        let mut said = HashMap::new();
+        // An API builder's next tool (a decompile waiting on Ghidra, #1714) may already hold the
+        // session when its last one finishes: the refresh waits for a free moment, so the loop
+        // keeps reading what that tool says meanwhile.
+        let mut refresh = false;
         loop {
             if self.stop.is_cancelled() {
                 agent.stop();
@@ -1413,22 +1434,22 @@ impl Worker {
             }
             let stop_ignored = stop_asked.is_some_and(|at| at.elapsed() >= STOP_GRACE);
             for e in agent.poll() {
-                if matches!(e, AgentEvent::ToolFinished { .. } | AgentEvent::TurnDone { .. }) {
-                    let mut session = self.engine.session();
-                    let project = session.project.clone().filter(|project| project.root == ws.investigation_dir());
-                    if let Some(project) = project
-                        && let Err(error) = session.open_project(project)
-                    {
-                        log::warn!("Couldn't refresh the investigation: {}", error.message);
-                    }
+                refresh |= matches!(e, AgentEvent::ToolFinished { .. });
+                if matches!(e, AgentEvent::TurnDone { .. }) {
+                    refresh_investigation(&mut self.engine.session(), ws);
+                    refresh = false;
                 }
                 match &e {
                     AgentEvent::TextDelta { text } => reply.push_str(text),
                     // Our own loop asks before tools that need consent. The Build tools are the
                     // builder's job (they apply the approval policy themselves); nothing else runs.
                     AgentEvent::ConsentNeeded { call_id, tool, .. } => {
-                        let build = self.engine.registry().get(tool).is_some_and(|s| s.toolset == craft_anything_engine::Toolset::Build);
-                        agent.answer_consent(call_id, build);
+                        if self.engine.registry().get(tool).is_some_and(|s| s.toolset == craft_anything_engine::Toolset::Build) {
+                            agent.answer_consent(call_id, true);
+                        } else {
+                            // Nobody was asked: say so, or the model invents a reason (#1938).
+                            agent.refuse_consent(call_id, &format!("{tool}: {BUILD_REFUSES_CONSENT}."));
+                        }
                     }
                     // Decided on the tool's own id (its CLI and `mcp__…__` names included).
                     AgentEvent::ToolStarted { tool, .. }
@@ -1439,10 +1460,10 @@ impl Worker {
                     AgentEvent::Error { message, remediation, .. } => failed = Some((message.clone(), remediation.clone())),
                     _ => {}
                 }
-                if let AgentEvent::TurnDone { input_tokens, output_tokens, cost_usd, cost_is_estimate, .. } = &e {
-                    self.record_usage(Some((*input_tokens, *output_tokens, *cost_usd, *cost_is_estimate)));
-                }
                 let done = matches!(e, AgentEvent::TurnDone { .. });
+                if done {
+                    self.record_usage(Some(&e));
+                }
                 // A saved session that isn't on this computer isn't the build failing: the turn
                 // starts a new one (or, with nothing to start it from, the run's error says why).
                 if !(matches!(e, AgentEvent::Error { .. }) && agent.session_lost()) {
@@ -1450,6 +1471,9 @@ impl Worker {
                 }
                 if done {
                     self.relay_read_notes(ws);
+                    for line in newly_said(&ws.inbox_dir(), &mut said) {
+                        self.emit(RunEvent::Step { step: Step::Build, text: line });
+                    }
                     self.stop.check()?;
                     // An agent-level error (sign-in, crash, limits) ends the run: checking a
                     // build that never happened would only mislead.
@@ -1463,7 +1487,7 @@ impl Worker {
                 let why = if stop_ignored { "didn't stop when asked; the run stops without it" } else { "ended its turn without saying so" };
                 log::warn!("The builder {why}.");
                 // Said as the agent would have, so the feed ends its message and the clocks the turn.
-                let done = AgentEvent::TurnDone { backend: String::new(), input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false };
+                let done = AgentEvent::TurnDone { backend: String::new(), input_tokens: 0, output_tokens: 0, cost_usd: None, cost_is_estimate: false, tokens_unknown: false };
                 self.emit(RunEvent::Agent(done));
                 self.relay_read_notes(ws);
                 self.stop.check()?;
@@ -1472,8 +1496,15 @@ impl Worker {
                 }
                 return Ok(reply);
             }
+            if refresh && let Some(mut session) = self.engine.try_session() {
+                refresh_investigation(&mut session, ws);
+                refresh = false;
+            }
             self.relay_inbox();
             self.relay_read_notes(ws);
+            for line in newly_said(&ws.inbox_dir(), &mut said) {
+                self.emit(RunEvent::Step { step: Step::Build, text: line });
+            }
             self.answer_self_checks(ws)?;
             if self.usage.as_ref().is_some_and(|c| c.since.elapsed() >= USAGE_FLUSH) {
                 self.record_usage(None);
@@ -1539,6 +1570,30 @@ fn left_notes_are_a_request(ws: &mut Workspace) {
     }
 }
 
+/// Read the investigation again after the builder's tools changed it; a view refresh, so a failure
+/// is only logged.
+fn refresh_investigation(session: &mut craft_anything_engine::Session, ws: &Workspace) {
+    let project = session.project.clone().filter(|project| project.root == ws.investigation_dir());
+    if let Some(project) = project
+        && let Err(error) = session.open_project(project)
+    {
+        log::warn!("Couldn't refresh the investigation: {}", error.message);
+    }
+}
+
+/// What the tools working for the builder say that the feed hasn't shown yet (a decompile waiting
+/// on Ghidra, #1714): each wait's line once per change, as the one-time analysis is shown.
+fn newly_said(inbox: &Path, said: &mut HashMap<String, String>) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (wait, line) in craft_anything_engine::inbox::activity(inbox) {
+        if said.get(&wait) != Some(&line) {
+            said.insert(wait, line.clone());
+            lines.push(line);
+        }
+    }
+    lines
+}
+
 /// What the run says, and the status it leaves on the project, when it ends: paused, failed, or
 /// a caught bug. A caught bug must not leave the saved status as it last was ("Checking" while
 /// nothing runs), or the project looks stuck rather than stopped.
@@ -1561,6 +1616,11 @@ fn run_outcome(result: Result<Result<String, ToolError>, Box<dyn std::any::Any +
         }
     }
 }
+
+/// What a builder on an API model is told when it calls a tool that needs consent outside the
+/// Build tools: the build refuses those itself, without asking the person (#1938).
+pub const BUILD_REFUSES_CONSENT: &str = "Nobody was asked: a build doesn't run tools that need the person's consent, so this one didn't run. \
+For a plugin's tool, the plugin's `consent` setting in the person's config.toml decides whether it needs consent";
 
 /// Checks in a row that may find the build not working before the run stops and asks for a new
 /// request. Each "Try again" used to start another `max_rounds` of checks, with nothing counting
@@ -1707,4 +1767,12 @@ pub fn builder_backend(cfg: &crate::AiConfig, named: Option<&str>) -> Result<cra
             ToolError::new(ErrorCode::BadSettings, "Building needs a coding agent (such as Claude Code) or an AI backend with an API key.")
                 .with_remediation("Install a coding agent or add an API key in Settings → AI, then try again.")
         })
+}
+
+/// Stops a build whose stack needs a program (`cargo`) this computer doesn't have, with how to get it.
+fn missing_program_stop(stack: &str, have: impl Fn(&str) -> bool) -> Result<(), ToolError> {
+    let Some((program, from)) = stacks::missing_program(stack, have) else { return Ok(()) };
+    Err(ToolError::new(ErrorCode::BadSettings, format!("{stack} is built with {program}, which isn't on this computer.")).with_remediation(format!(
+        "{from}, then try again; or start the project again with another stack (\"Build with\" in the app, --build-with in the CLI)."
+    )))
 }

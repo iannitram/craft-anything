@@ -35,6 +35,11 @@ pub struct Stack {
     /// Its build is a website: a project built with it and nothing to recreate is one.
     #[serde(default)]
     pub site: bool,
+    /// The program its build can't run without (`cargo`), and how to get it.
+    #[serde(default)]
+    pub program: Option<String>,
+    #[serde(default)]
+    pub program_from: Option<String>,
 }
 
 pub use craft_anything_engine::toolchains::{Toolchain, found_in as toolchain_in};
@@ -89,6 +94,13 @@ pub fn words(request: &str) -> String {
 
 pub fn get(name: &str) -> Option<&'static Stack> {
     catalogue().iter().find(|s| s.name == name)
+}
+
+/// The stack's own program (`cargo`) when `have` says this computer doesn't have it, and how to get it.
+pub fn missing_program(stack: &str, have: impl Fn(&str) -> bool) -> Option<(&'static str, &'static str)> {
+    let s = get(stack)?;
+    let program = s.program.as_deref().filter(|p| !have(p))?;
+    Some((program, s.program_from.as_deref().unwrap_or_default()))
 }
 
 /// A stack picked by name: its full name or its engine id, ignoring case (`unity`, `Godot`,

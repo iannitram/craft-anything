@@ -1234,22 +1234,24 @@ impl Launched {
     }
 
     /// Stop it (the program itself; what it started on its own may stay). Returns once it has
-    /// ended, or false if it couldn't be stopped.
+    /// ended, or false if it couldn't be stopped or is still there [`REAP_GRACE`] later. The
+    /// library's `kill()` waits with no limit (#1438), and waiting under the lock would hold up
+    /// the watcher and everyone asking whether it runs.
     pub fn stop(&self) -> bool {
-        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if st.ended.is_some() {
-            return true;
-        }
-        let Some(child) = st.child.as_mut() else { return false };
-        let _ = child.kill();
-        match child.wait() {
-            Ok(status) => {
-                st.ended = Some(Ended { code: status.code(), after: self.started.elapsed() });
-                st.child = None;
-                true
+        {
+            let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if st.ended.is_some() {
+                return true;
             }
-            Err(_) => false,
+            let Some(child) = st.child.as_mut() else { return false };
+            // A program that just ended refuses the kill: the wait below says how it ended.
+            let _ = child.start_kill();
         }
+        let ended = self.wait_timeout(REAP_GRACE).is_some();
+        if !ended {
+            log::warn!("program {}: still there {} s after it was stopped; not waiting for it", self.pid, REAP_GRACE.as_secs());
+        }
+        ended
     }
 }
 

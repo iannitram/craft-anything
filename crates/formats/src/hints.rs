@@ -48,18 +48,57 @@ pub fn detect(b: &Binary, data: &[u8]) -> Vec<Hint> {
     } else if sec(".gopclntab") || sec("__gopclntab") || sym("runtime.main") {
         push(&mut out, hint("go", "language", "Go", "strong", "Go runtime symbols or pclntab section"));
     }
-    if out.iter().any(|h| h.id == "go")
-        && let Some(at) = find_bytes(data, b"go1.", SCAN_LIMIT)
-    {
-        let v: String = data
-            .get(at..(at + 16).min(data.len()))
-            .unwrap_or(&[])
-            .iter()
-            .take_while(|c| c.is_ascii_alphanumeric() || **c == b'.')
-            .map(|&c| c as char)
-            .collect();
-        if let Some(h) = out.iter_mut().find(|h| h.id == "go") {
+    if out.iter().any(|h| h.id == "go") {
+        // Prefer the version the build-info reader extracts (#1397): it reads the build-info
+        // section, so an unrelated `go1.` that happens to come earlier in the file (a constant,
+        // a path, a debug string) can't be mistaken for the toolchain version.
+        let (version, from_build_info) = match crate::go::inspect(data, None) {
+            Ok(report) => match report.buildinfo.and_then(|b| b.go_version) {
+                Some(v) if !v.is_empty() => (Some(v), true),
+                _ => (None, false),
+            },
+            Err(_) => (None, false),
+        };
+        let version = version.or_else(|| {
+            // Fall back to scanning bytes only when there is no build info to read. Start after
+            // the build-info section or marker when one is present, so an unrelated `go1.` that
+            // sits earlier in the file (a constant, a path, a debug string) is not mistaken for
+            // the toolchain version. Accept a version-shaped token (`go1.<digits>(.<digits>)*`)
+            // so a run of unrelated digits can't be appended to it.
+            let mut scan_start = 0usize;
+            for s in &b.sections {
+                if (s.name == ".go.buildinfo" || s.name == "__go_buildinfo")
+                    && let Some(off) = s.file_offset
+                    && let Ok(off) = usize::try_from(off)
+                {
+                    scan_start = scan_start.max(off);
+                }
+            }
+            if let Some(at) = find_bytes(data, b"\xff Go buildinf:", SCAN_LIMIT) {
+                scan_start = scan_start.max(at);
+            }
+            let haystack = data.get(scan_start..).unwrap_or(&[]);
+            find_bytes(haystack, b"go1.", SCAN_LIMIT).and_then(|rel| {
+                let at = scan_start + rel;
+                let v: String = data
+                    .get(at..(at + 32).min(data.len()))
+                    .unwrap_or(&[])
+                    .iter()
+                    .take_while(|c| c.is_ascii_alphanumeric() || **c == b'.')
+                    .map(|&c| c as char)
+                    .collect();
+                if is_go_version(&v) { Some(v) } else { None }
+            })
+        });
+        if let Some(v) = version
+            && let Some(h) = out.iter_mut().find(|h| h.id == "go")
+        {
             h.label = format!("Go ({v})");
+            // A version that came from scanning bytes, not the build info, is only a guess:
+            // keep the hint's confidence lower so a reader doesn't treat it as observed.
+            if !from_build_info {
+                h.strength = "weak";
+            }
         }
     }
     // Rust
@@ -204,9 +243,43 @@ pub fn detect(b: &Binary, data: &[u8]) -> Vec<Hint> {
     out
 }
 
+/// A version token the byte scan may accept: `go1.<digits>(.<digits>)*`.
+fn is_go_version(v: &str) -> bool {
+    let Some(rest) = v.strip_prefix("go1.") else {
+        return false;
+    };
+    !rest.is_empty() && rest.split('.').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_version_before_the_build_info_is_not_used() {
+        // An unrelated `go1.` that appears before the build-info marker must not win over the
+        // version the marker carries (#1397).
+        let (elf, _) = craft_anything_testkit::elf64(craft_anything_testkit::ElfArch::X86_64, true);
+        let mut go = elf.clone();
+        go.extend_from_slice(b"go1.190119941996 ");
+        go.extend_from_slice(b"\xff Go buildinf:\x08\x02go1.22.3\0");
+        let b = crate::parse_binary(&go).unwrap();
+        let hints = detect(&b, &go);
+        let g = hints.iter().find(|h| h.id == "go").unwrap();
+        assert_eq!(g.label, "Go (go1.22.3)", "{g:?}");
+    }
+
+    #[test]
+    fn go_version_comes_from_build_info() {
+        // The version the build-info reader extracts wins, and it keeps strong confidence
+        // (#1397, #1858).
+        let elf = craft_anything_testkit::formats::go_elf();
+        let b = crate::parse_binary(&elf).unwrap();
+        let hints = detect(&b, &elf);
+        let g = hints.iter().find(|h| h.id == "go").unwrap();
+        assert_eq!(g.label, "Go (go1.21.5)", "{g:?}");
+        assert_eq!(g.strength, "strong", "{g:?}");
+    }
 
     #[test]
     fn finds_markers() {

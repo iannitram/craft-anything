@@ -141,16 +141,16 @@ pub(crate) fn menu(app: &mut CraftApp, ui: &mut Ui, root: &Path) {
                 let sel = CHOICES.iter().position(|(_, c)| *c == now).unwrap_or(0);
                 // Every row has the same labels, which `segmented` makes its ids from.
                 ui.push_id(row.name, |ui| {
-                    if let Some(c) = widgets::segmented(ui, &names, sel, 24.0).and_then(|i| CHOICES.get(i)) {
+                    if let Some(c) = widgets::segmented(ui, &names, sel, theme::ControlSize::Small).and_then(|i| CHOICES.get(i)) {
                         picked = Some((row.kind, c.1));
                     }
                 });
                 ui.end_row();
             }
         });
-        ui.add_space(4.0);
+        ui.add_space(theme::space::XS);
         let note = tr("Default follows Auto mode: with it on, what can be undone goes ahead and the rest is refused; with it off, the builder asks.");
-        ui.add(egui::Label::new(RichText::new(note).size(theme::SMALL).color(t.text_faint)).wrap());
+        ui.add(egui::Label::new(RichText::new(note).size(theme::SMALL).line_height(Some(theme::leading(theme::SMALL))).color(t.text_faint)).wrap());
     });
     if let Some((kind, choice)) = picked {
         app.set_approval(root, kind, choice);

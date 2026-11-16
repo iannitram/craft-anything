@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 
 /// Ghidra's engine id, as the engine table, Settings and every listing name it.
 pub const ID: &str = "ghidra";
+/// The engine store folder the Java for Ghidra is unpacked into; the Java runtime engine is found
+/// there too (the engine table's `Install::Guided::folder`).
+pub const JAVA_FOLDER: &str = "jdk";
 /// The Ghidra release Craft Anything installs (it needs Java 21).
 pub const VERSION: &str = "12.1.4";
 /// What the person downloads, for the question we ask first (Ghidra 543 MB + Java 196 MB).
@@ -42,20 +45,84 @@ pub fn headless(install_dir: Option<&Path>, store: &Path) -> Option<PathBuf> {
 /// [`headless`] finds before it looks around the computer.
 pub fn headless_configured(install_dir: Option<&Path>, store: &Path) -> Option<PathBuf> {
     if let Some(dir) = install_dir {
-        if dir.is_file() {
-            return Some(dir.to_path_buf());
-        }
-        if let Some(p) = in_root_or_child(dir, launcher) {
-            return Some(p);
+        let found = if dir.is_file() { launcher_from_file(dir) } else { in_root_or_child(dir, launcher) };
+        if found.is_some() {
+            return found;
         }
     }
     in_child(&store.join(ID), launcher)
 }
 
+/// Longest start script read when following one to its Ghidra folder.
+const SCRIPT_CAP: u64 = 16 * 1024;
+/// Most paths a start script names that are looked at on disk.
+const SCRIPT_PATHS: usize = 32;
+
+/// Ghidra's headless launcher from a file the person picked as Ghidra's folder. Whatever is returned
+/// is run as the launcher, so it is only ever Ghidra's own `support/analyzeHeadless` or a script
+/// that runs it:
+/// - the file itself when it is that launcher (by name, as given, even through a link), or a script
+///   naming that launcher (a wrapper that sets up Java first, say);
+/// - else the launcher of the Ghidra folder the file is in, links followed (`ghidraRun` on PATH as
+///   a link);
+/// - else, for a start script such as the one Linux packages put on PATH
+///   (`exec /opt/ghidra/ghidraRun "$@"`), the launcher of the Ghidra folder it names.
+///
+/// Anything else is `None`, so the setting isn't listed as Ghidra.
+fn launcher_from_file(file: &Path) -> Option<PathBuf> {
+    let exes = crate::engine(ID)?.host_exes();
+    let is_launcher = |p: &Path| p.file_name().is_some_and(|n| exes.iter().any(|exe| n == *exe));
+    let real = std::fs::canonicalize(file).ok()?;
+    if is_launcher(file) || is_launcher(&real) {
+        return Some(file.to_path_buf());
+    }
+    // A script that runs the launcher is kept before anything else, even in Ghidra's own folder.
+    let named = named_in_script(&real).unwrap_or_default();
+    if named.iter().any(|p| is_launcher(p) && p.is_file()) {
+        return Some(file.to_path_buf());
+    }
+    let folder_of = |p: &Path| p.parent().and_then(|dir| launcher(dir).or_else(|| dir.parent().and_then(launcher)));
+    // The path as given first, then where its links lead: on Windows `canonicalize` adds `\\?\`,
+    // which batch files handle badly.
+    let followed = |p: &Path| folder_of(p).or_else(|| folder_of(&std::fs::canonicalize(p).ok()?));
+    if let Some(found) = folder_of(file).or_else(|| folder_of(&real)) {
+        return Some(found);
+    }
+    named.iter().find_map(|p| if p.is_dir() { launcher(p) } else { followed(p) })
+}
+
+/// The absolute paths a short text file names that are on disk, as a start script names Ghidra's
+/// folder (`None` when it is too long or isn't text). A quoted path is taken whole, spaces and all.
+/// One level only: a script it names isn't read in turn.
+fn named_in_script(file: &Path) -> Option<Vec<PathBuf>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(file).ok()?.take(SCRIPT_CAP + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > SCRIPT_CAP || bytes.contains(&0) {
+        return None;
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    // Between quotes first (odd pieces of a split on that quote), then word by word.
+    let quoted = ['"', '\''].into_iter().flat_map(|q| text.split(q).skip(1).step_by(2));
+    // `$GHIDRA_HOME/ghidraRun` after `GHIDRA_HOME=/opt/ghidra`: the assigned folder is named too.
+    let words = text.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '=' | ';' | '`' | '(' | ')'));
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for p in quoted.chain(words).map(PathBuf::from).filter(|p| p.is_absolute()) {
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
+        if paths.len() == SCRIPT_PATHS {
+            break;
+        }
+    }
+    paths.retain(|p| p.exists());
+    Some(paths)
+}
+
 /// The Java runtime to run Ghidra with: the one the person set, else the managed one. `None` lets
 /// Ghidra look for its own.
 pub fn java_home(java_home: Option<&Path>, store: &Path) -> Option<PathBuf> {
-    java_home.filter(|p| p.is_dir()).map(Path::to_path_buf).or_else(|| in_child(&store.join("jdk"), |d| has_java(d).then(|| d.to_path_buf())))
+    java_home.filter(|p| p.is_dir()).map(Path::to_path_buf).or_else(|| in_child(&store.join(JAVA_FOLDER), |d| has_java(d).then(|| d.to_path_buf())))
 }
 
 /// Download, check and unpack Java (unless one is already managed) and Ghidra into the engine
@@ -72,7 +139,7 @@ pub fn install(store: &Path, cancel: Option<Cancel>, progress: &dyn Fn(&str, u64
             .with_remediation(format!("Install Ghidra {VERSION} from {PAGE}, then choose its folder in Settings → Engines.")));
     };
     if java_home(None, store).is_none() {
-        fetch(java, store, "jdk", "Java runtime", cancel.clone(), progress)?;
+        fetch(java, store, JAVA_FOLDER, "Java runtime", cancel.clone(), progress)?;
     }
     fetch(ghidra, store, "ghidra", "Ghidra", cancel, progress)?;
     let exe =
@@ -260,6 +327,120 @@ mod tests {
         touch(&jdk.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" }));
         assert_eq!(java_home(None, &store), Some(jdk));
         assert_eq!(java_home(Some(d.path()), &store).as_deref(), Some(d.path()), "a Java the person set wins");
+    }
+
+    const EXE: &str = if cfg!(windows) { "analyzeHeadless.bat" } else { "analyzeHeadless" };
+
+    /// A Ghidra folder as its zip unpacks: `ghidraRun` at the top, the headless launcher in `support/`.
+    fn ghidra_folder(at: &Path) -> PathBuf {
+        touch(&at.join("ghidraRun"));
+        let exe = at.join("support").join(EXE);
+        touch(&exe);
+        exe
+    }
+
+    fn same(a: Option<PathBuf>, b: &Path) -> bool {
+        a.and_then(|a| std::fs::canonicalize(a).ok()) == std::fs::canonicalize(b).ok()
+    }
+
+    /// A Ghidra setting that names a file is run as Ghidra's headless launcher, so it has to be one.
+    #[test]
+    fn a_setting_naming_the_launcher_itself_is_that_launcher() {
+        let d = tempfile::tempdir().unwrap();
+        let exe = ghidra_folder(&d.path().join("ghidra_12.1.4_PUBLIC"));
+        assert_eq!(headless_configured(Some(&exe), &d.path().join("store")), Some(exe));
+    }
+
+    /// Arch's package puts a start script on PATH that runs `/opt/ghidra/ghidraRun`, Ghidra's window,
+    /// not its headless launcher: picked as the setting, it was listed as found and Deep mode
+    /// quietly used the built-in decompiler.
+    #[test]
+    fn a_start_script_is_followed_to_the_ghidra_folder_it_names() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("opt").join("My Ghidra");
+        let exe = ghidra_folder(&root);
+        let script = d.path().join("bin").join("ghidra");
+        let store = d.path().join("store");
+        let mut bodies = vec![
+            format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", root.join("ghidraRun").display()),
+            format!("#!/bin/sh\nGHIDRA_HOME='{}'\nexec \"$GHIDRA_HOME/ghidraRun\" \"$@\"\n", root.display()),
+        ];
+        let plain = d.path().join("opt").join("ghidra");
+        if !plain.display().to_string().contains(' ') {
+            ghidra_folder(&plain);
+            bodies.push(format!("#!/bin/sh\nexec {}/ghidraRun \"$@\"\n", plain.display()));
+        }
+        for body in bodies {
+            touch(&script);
+            std::fs::write(&script, &body).unwrap();
+            let found = headless_configured(Some(&script), &store);
+            assert!(same(found.clone(), &exe) || same(found, &plain.join("support").join(EXE)), "{body}");
+            assert!(!headless_configured(Some(&script), &store).unwrap().display().to_string().starts_with(r"\\?\"));
+        }
+        // Too long to be a start script: not read.
+        std::fs::write(&script, format!("{}\nexec \"{}\"\n", "#".repeat(SCRIPT_CAP as usize), root.join("ghidraRun").display())).unwrap();
+        assert_eq!(headless_configured(Some(&script), &store), None);
+    }
+
+    /// A script that runs the headless launcher itself (setting up Java first, say) is run as it is.
+    #[test]
+    fn a_wrapper_around_the_launcher_is_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let exe = ghidra_folder(&d.path().join("ghidra"));
+        let wrapper = d.path().join("bin").join("ghidra-headless");
+        touch(&wrapper);
+        std::fs::write(&wrapper, format!("#!/bin/sh\nJAVA_HOME=/jdk exec \"{}\" \"$@\"\n", exe.display())).unwrap();
+        assert_eq!(headless_configured(Some(&wrapper), &d.path().join("store")), Some(wrapper));
+        // Also when it sits in Ghidra's own folder, beside `ghidraRun`.
+        let beside = d.path().join("ghidra").join("headless-with-java");
+        std::fs::write(&beside, format!("#!/bin/sh\nJAVA_HOME=/jdk exec \"{}\" \"$@\"\n", exe.display())).unwrap();
+        assert_eq!(headless_configured(Some(&beside), &d.path().join("store")), Some(beside));
+    }
+
+    /// A start script that runs a link onto PATH (`exec /usr/bin/ghidraRun`) leads to where it points.
+    #[cfg(unix)]
+    #[test]
+    fn a_start_script_naming_a_link_is_followed_through_it() {
+        let d = tempfile::tempdir().unwrap();
+        let exe = ghidra_folder(&d.path().join("opt").join("ghidra"));
+        let bin = d.path().join("usr").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(d.path().join("opt").join("ghidra").join("ghidraRun"), bin.join("ghidraRun")).unwrap();
+        let script = d.path().join("ghidra");
+        std::fs::write(&script, format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", bin.join("ghidraRun").display())).unwrap();
+        assert!(same(headless_configured(Some(&script), &d.path().join("store")), &exe));
+    }
+
+    #[test]
+    fn a_file_that_leads_to_no_ghidra_is_not_ghidra() {
+        let d = tempfile::tempdir().unwrap();
+        let store = d.path().join("store");
+        let notes = d.path().join("notes.txt");
+        std::fs::write(&notes, "nothing to see").unwrap();
+        assert_eq!(headless_configured(Some(&notes), &store), None);
+        let script = d.path().join("ghidra");
+        std::fs::write(&script, format!("#!/bin/sh\nexec {}/ghidraRun \"$@\"\n", d.path().join("gone").display())).unwrap();
+        assert_eq!(headless_configured(Some(&script), &store), None);
+        std::fs::write(&script, [0xff, 0xfe, 0x00, 0x2f]).unwrap();
+        assert_eq!(headless_configured(Some(&script), &store), None, "not text");
+        // With nothing usable set, the managed install is still found.
+        let managed = ghidra_folder(&store.join(ID).join("ghidra_12.1.4_PUBLIC"));
+        assert_eq!(headless_configured(Some(&notes), &store), Some(managed));
+    }
+
+    /// Homebrew and some packages link `ghidraRun` onto PATH instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_ghidras_start_script_is_followed_to_its_folder() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("Caskroom").join("ghidra_12.1.4_PUBLIC");
+        let exe = ghidra_folder(&root);
+        let bin = d.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(root.join("ghidraRun"), bin.join("ghidraRun")).unwrap();
+        assert!(same(headless_configured(Some(&bin.join("ghidraRun")), &d.path().join("store")), &exe));
+        std::os::unix::fs::symlink(&exe, bin.join(EXE)).unwrap();
+        assert_eq!(headless_configured(Some(&bin.join(EXE)), &d.path().join("store")), Some(bin.join(EXE)), "a linked launcher is kept as given");
     }
 
     #[test]

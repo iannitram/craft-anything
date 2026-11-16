@@ -1,5 +1,6 @@
 # Brazilian Portuguese UI catalog: English key<TAB>Portuguese text. See ../i18n.rs.
 # Brazilian Portuguese translation of the English source; wording and terminology reviewed.
+Default (its own settings)	Padrão (suas próprias configurações)
 OpenCode default	Padrão do OpenCode
 Model default	Padrão do modelo
 Thinking depth	Nível de raciocínio
@@ -1366,6 +1367,7 @@ your files there are the app, edited in place	os arquivos dessa pasta são o apl
 {name} builds what you make; answers come from {brain}.	{name} cria seus projetos; as respostas vêm de {brain}.
 {name} can't be attached: a message takes pictures up to 20 MB.	Não é possível anexar {name}: cada imagem deve ter no máximo 20 MB.
 {name} can't be attached: it isn't a PNG, JPEG, GIF or WebP picture.	Não é possível anexar {name}: o arquivo precisa ser uma imagem PNG, JPEG, GIF ou WebP.
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name} não pode ser limitado a só ler, então não recebe perguntas. Pergunte com o Claude Code ou com uma IA que tenha chave de API.
 {name} is ready	Pronto para usar: {name}
 {name} is ready.	Pronto para usar: {name}.
 {name} isn't available yet in this build.	{name} ainda não está disponível nesta versão.
@@ -1467,3 +1469,27 @@ Connecting to {name}… {seconds} s	Conectando a {name}… {seconds} s
 Stopped adding {name}.	A adição de {name} foi interrompida.
 It isn't there any more, so {program} runs in its place.	Ele não está mais lá, então {program} é usado no lugar.
 Use it	Usar este
+
+# Native update checks and verified installation.
+ArtCraft Launcher manages this app's version. Change its version there.	O ArtCraft Launcher gerencia a versão deste aplicativo. Altere a versão nele.
+Check again	Verificar novamente
+Check for Updates	Verificar atualizações
+Check for Updates…	Verificar atualizações…
+Checking for updates…	Verificando atualizações…
+Couldn't check for updates: {error}	Não foi possível verificar atualizações: {error}
+Downloading and verifying the update…	Baixando e verificando a atualização…
+No installer is available for this platform.	Não há instalador disponível para esta plataforma.
+Releases	Versões
+Save your work and stop running tasks before installing an update.	Salve seu trabalho e interrompa as tarefas em execução antes de instalar uma atualização.
+The update failed: {error}	A atualização falhou: {error}
+The update worker stopped unexpectedly. Try checking again.	O processo de atualização parou inesperadamente. Tente verificar novamente.
+This installation is managed externally. Update it with its package manager or open Releases.	Esta instalação é gerenciada externamente. Atualize-a pelo gerenciador de pacotes ou abra Versões.
+Update and restart	Atualizar e reiniciar
+Update ready. Restarting…	Atualização pronta. Reiniciando…
+Updated to {version}.	Atualizado para {version}.
+Use Releases or your package manager to update this installation.	Use Versões ou seu gerenciador de pacotes para atualizar esta instalação.
+You're up to date.	Você está usando a versão mais recente.
+{version} is available.	{version} está disponível.
+Forget a website sign-in	Esquecer o login de um site
+Sign in to a website	Entrar em um site
+Some shared files could not be hard-linked and were copied instead ({size}).	Alguns arquivos compartilhados não puderam ser vinculados por hard link e foram copiados ({size}).

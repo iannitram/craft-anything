@@ -307,9 +307,22 @@ fn find_cli() -> Option<PathBuf> {
             {
                 return Some(up);
             }
+            if let Some(profile) = new_layout_profile_dir(dir).map(|d| d.join(&name))
+                && is_executable(&profile)
+            {
+                return Some(profile);
+            }
         }
     }
     which("craft-anything-cli")
+}
+
+/// `target/<profile>` for a test binary in Cargo's newer build-dir layout (Rust 1.100), which puts
+/// it in `target/<profile>/build/<package>/<hash>/out` while the CLI is still built into
+/// `target/<profile>`. Without this, every test that starts the helper found none.
+fn new_layout_profile_dir(dir: &Path) -> Option<&Path> {
+    let build = dir.ancestors().nth(3)?;
+    (dir.file_name().is_some_and(|n| n == "out") && build.file_name().is_some_and(|n| n == "build")).then_some(build.parent()).flatten()
 }
 
 /// `path` without the `\\?\` prefix `canonicalize` adds on Windows, so clients that can't start
@@ -389,6 +402,17 @@ fn is_executable(p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rust 1.100's Cargo runs a test binary from target/<profile>/build/<package>/<hash>/out, so
+    /// the CLI one level up wasn't there any more and every test that starts the helper failed.
+    #[test]
+    fn the_cli_is_found_from_cargos_newer_test_binary_folder() {
+        let out = Path::new("/w/target/debug/build/craft-anything-ai/8138ba20ac4e84fe/out");
+        assert_eq!(new_layout_profile_dir(out), Some(Path::new("/w/target/debug")));
+        for other in ["/w/target/debug/deps", "/w/target/debug/build/ring/9ac8/out/x", "/w/target/debug/elsewhere/p/h/out", "/opt/app", "/out"] {
+            assert_eq!(new_layout_profile_dir(Path::new(other)), None, "{other}");
+        }
+    }
 
     #[test]
     fn plain_form_drops_the_extended_length_prefix_only_when_it_names_the_same_file() {

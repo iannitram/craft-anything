@@ -66,6 +66,14 @@ fn answered_from(session: Option<&str>, resumes: bool) -> AnsweredFrom {
     if session.is_some() && resumes { AnsweredFrom::BuildersSession } else { AnsweredFrom::TheFiles }
 }
 
+/// The AI that would answer a question about a project whose saved builder is `saved` (`chosen`
+/// is Settings → AI's builder), when it's an agent that [`ask`] refuses: so the ask box can say
+/// so before the question is sent. The choice is [`builder_backend`]'s, from the UI's list.
+pub fn cannot_answer<'a>(backends: &'a [crate::BackendConfig], saved: Option<&str>, chosen: Option<&str>) -> Option<&'a crate::BackendConfig> {
+    let b = saved.and_then(|n| backends.iter().find(|b| b.enabled && b.name == n)).or_else(|| crate::default_builder(backends, chosen))?;
+    (b.kind == BackendKind::AgentCli && !crate::cli_agents::adapter_for(&b.model).answers_questions()).then_some(b)
+}
+
 /// Answer `question` about `ws` (see the module docs), with the person's `settings` (taken from
 /// the caller, which may hold the session: a tool does while it runs, so locking it here would
 /// wait forever). Blocks until it's answered, `cancel` is set, or [`WAIT`] passes: call it off
@@ -329,6 +337,33 @@ mod tests {
         assert_eq!(ago(Duration::from_secs(172_800)), "2 days ago");
     }
 
+    /// #1695: the ask box names the AI that would refuse a question, as `ask` picks it: the
+    /// project's builder while it's on, else the default; Claude Code and API keys answer.
+    #[test]
+    fn the_ai_that_would_refuse_a_question_is_known_before_it_is_sent() {
+        let b = |name: &str, kind, model: &str, enabled| crate::BackendConfig {
+            name: name.into(),
+            kind,
+            model: model.into(),
+            base_url: None,
+            ssh_host: None,
+            enabled,
+        };
+        let list = [
+            b("Codex", BackendKind::AgentCli, "codex", true),
+            b("Claude Code", BackendKind::AgentCli, "claude-code", true),
+            b("Claude", BackendKind::Anthropic, "claude-opus-5-5", true),
+            b("OpenCode", BackendKind::AgentCli, "opencode", false),
+        ];
+        let name = |saved, chosen| cannot_answer(&list, saved, chosen).map(|b| b.name.as_str());
+        assert_eq!(name(Some("Codex"), Some("Claude Code")), Some("Codex"));
+        assert_eq!(name(Some("Claude Code"), None), None);
+        assert_eq!(name(Some("Claude"), Some("Codex")), None, "an API key answers");
+        assert_eq!(name(Some("OpenCode"), Some("Claude Code")), None, "a builder that's off is replaced by the default");
+        assert_eq!(name(None, Some("Codex")), Some("Codex"));
+        assert_eq!(name(None, None), Some("Codex"), "the first agent that's on");
+    }
+
     /// A copy of the builder's session has no tool server, and saw the build's tools as gone.
     #[test]
     fn a_question_is_told_its_missing_tools_are_not_the_builds() {
@@ -500,7 +535,14 @@ mod tests {
     #[test]
     fn an_answer_is_its_words_until_the_turn_ends_and_an_error_is_an_error() {
         let words = |t: &str| AgentEvent::TextDelta { text: t.into() };
-        let done = AgentEvent::TurnDone { backend: "A".into(), input_tokens: 1, output_tokens: 1, cost_usd: Some(0.02), cost_is_estimate: false };
+        let done = AgentEvent::TurnDone {
+            backend: "A".into(),
+            input_tokens: 1,
+            output_tokens: 1,
+            tokens_unknown: false,
+            cost_usd: Some(0.02),
+            cost_is_estimate: false,
+        };
         let mut ok = Scripted(vec![words("They're in "), words("app/src."), done]);
         assert_eq!(collect(&mut ok, &CancelToken::default(), WAIT).unwrap(), ("They're in app/src.".to_string(), Some(0.02), false));
         let mut bad = Scripted(vec![AgentEvent::Error { message: "not signed in".into(), remediation: Some("Sign in".into()), log: None }]);

@@ -42,7 +42,17 @@ mod tests {
 
     fn args(builder: bool, options: &BackendOptions) -> Vec<String> {
         let mcp = McpCommand { command: "craft-anything-cli".into(), args: vec!["mcp".into()], notes: None };
-        Hermes.args(&ArgsCx { options, prompt: "make a game", preamble: "PRE ", mcp: &mcp, resume: None, builder, reads_checked: false, question: false })
+        Hermes.args(&ArgsCx {
+            options,
+            prompt: "make a game",
+            preamble: "PRE ",
+            mcp: &mcp,
+            resume: None,
+            builder,
+            reads_checked: false,
+            question: false,
+            message_file: None,
+        })
     }
 
     #[test]

@@ -91,7 +91,8 @@ pub struct AnalyzeParams {
     /// First module of the module page in the result.
     #[serde(default)]
     pub offset: usize,
-    /// Modules per page in the result (the graph itself is always complete up to max_nodes).
+    /// Modules per page in the result (the graph keeps up to max_nodes nodes and 4 x max_nodes
+    /// edges; a cap that drops any is reported as a limitation and makes coverage partial).
     #[serde(default = "default_module_limit")]
     pub limit: usize,
 }
@@ -337,6 +338,9 @@ pub(crate) fn load_app_input(ctx: &Ctx<'_>, p: &AnalyzeParams) -> Result<(AppInp
             let walked =
                 walk_dir(&ep, &WalkOptions { max_files: p.max_files, max_depth: 48, skip_dir: &skip, gitignore: false, include_hidden: false }, &ctx.cancel)?;
             listing_truncated |= walked.truncated;
+            if walked.truncated {
+                input.notes.push(format!("{base}: the folder listing was cut short by the file-count or depth limit"));
+            }
             unlisted.extend(walked.unlisted.iter().map(|(rel, e)| (format!("{base}/{rel}"), e.clone())));
             for f in &walked.files {
                 let rel = format!("{base}/{}", f.rel);
@@ -437,6 +441,9 @@ fn js_app_map(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError>
     // A folder that couldn't be listed holds files never counted, so the count can't be complete (#294).
     let unlisted = lims.iter().any(|l| l.code == "unlisted_folders");
     let truncated = lims.iter().any(|l| l.code == "truncated");
+    // A graph cut by its node or edge cap, or a module whose fact lists were cut, is not complete
+    // either, whatever the module page shows.
+    let capped_graph = lims.iter().any(|l| matches!(l.code.as_str(), "node_cap" | "edge_cap" | "facts_truncated"));
     let mut coverage = if complete_modules {
         Coverage {
             status: if read >= listed && !unlisted {
@@ -454,6 +461,9 @@ fn js_app_map(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError>
     if truncated {
         coverage.status = craft_anything_evidence::CoverageStatus::Partial;
         coverage.total = None;
+    }
+    if capped_graph {
+        coverage.status = craft_anything_evidence::CoverageStatus::Partial;
     }
     let mut b = EvidenceBuilder::new("js_app_map", subject, env(ctx))
         .params(json!({"input_path": p.input_path, "include_node_modules": p.include_node_modules, "max_nodes": p.max_nodes, "offset": p.offset, "limit": p.limit, "source_paths": p.source_paths}))
@@ -474,26 +484,35 @@ fn js_app_map(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError>
 
 /// Read an application graph from evidence or analyse a path. Returns the graph and the evidence id.
 pub(crate) fn load_graph(ctx: &Ctx<'_>, v: &Value) -> Result<(AppGraph, Option<String>), ToolError> {
+    let (g, id, _) = load_graph_with_limitations(ctx, v)?;
+    Ok((g, id))
+}
+
+/// [`load_graph`] with the limitations that apply to the graph: the path analysis's, or the saved
+/// evidence's (the full re-analysis's when a paged record had to be expanded).
+pub(crate) fn load_graph_with_limitations(ctx: &Ctx<'_>, v: &Value) -> Result<(AppGraph, Option<String>, Vec<Limitation>), ToolError> {
     if let Some(path) = is_path_input(v) {
-        let (g, _, _, _) = analyze_to_graph(ctx, &AnalyzeParams::for_path(path))?;
-        return Ok((g, None));
+        let (g, _, lims, _) = analyze_to_graph(ctx, &AnalyzeParams::for_path(path))?;
+        return Ok((g, None, lims));
     }
     let ev = resolve_evidence_input(ctx, v, &["js_app_map"])?;
     let total = ev.result.get("modules_total").and_then(Value::as_u64).unwrap_or(0);
     let shown = ev.result.get("modules").and_then(Value::as_array).map_or(0, Vec::len) as u64;
     let mut g: AppGraph =
         serde_json::from_value(ev.result.clone()).map_err(|e| ToolError::invalid(format!("evidence {} does not hold an application graph: {e}", ev.id)))?;
+    let mut lims = ev.limitations.clone();
     if shown < total {
         // A paged record: re-analyse the recorded input for the full module list.
         if let Some(path) = ev.params.get("input_path").and_then(Value::as_str) {
-            let (full, _, _, _) = analyze_to_graph(ctx, &AnalyzeParams::for_path(path))?;
+            let (full, _, full_lims, _) = analyze_to_graph(ctx, &AnalyzeParams::for_path(path))?;
             if full.graph_id != g.graph_id {
                 return Err(ToolError::new(ErrorCode::FileChanged, format!("{path} changed since evidence {} was recorded", ev.id)));
             }
             g = full;
+            lims = full_lims;
         }
     }
-    Ok((g, Some(ev.id)))
+    Ok((g, Some(ev.id), lims))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -732,5 +751,61 @@ mod tests {
         let forced = call(&e, "js_app_map", json!({"input_path": main, "format": "directory"}));
         assert!(forced.is_err(), "a regular file read as a folder is an error: {forced:?}");
         assert_eq!(call(&e, "js_app_map", json!({"input_path": bundle})).unwrap()["result"], readable["result"]);
+    }
+
+    /// A graph cut by its edge cap is partial, with the cap named.
+    #[test]
+    fn an_app_map_cut_by_its_edge_cap_is_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        let files: Vec<(String, String)> = (0..16)
+            .map(|i| {
+                let src: String = (0..16).filter(|j| *j != i).map(|j| format!("require('./m{j}.js');\n")).collect();
+                (format!("m{i}.js"), src)
+            })
+            .collect();
+        let refs: Vec<(&str, String)> = files.iter().map(|(path, src)| (path.as_str(), src.clone())).collect();
+        fx::write_files(dir.path(), &refs).unwrap();
+        let e = Engine::new(crate::testing::session());
+        let r = call(&e, "js_app_map", json!({"input_path": dir.path(), "max_nodes": 32})).unwrap();
+        assert_eq!(r["coverage"]["status"], "partial", "{r}");
+        assert!(r["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "edge_cap"), "{r}");
+        // A later page that reaches the total is still partial when the graph itself was cut.
+        let paged = call(&e, "js_app_map", json!({"input_path": dir.path(), "max_nodes": 32, "offset": 8, "limit": 8})).unwrap();
+        assert_eq!(paged["coverage"]["status"], "partial", "{paged}");
+    }
+
+    /// A graph cut by its node cap is partial too, not complete.
+    #[test]
+    fn an_app_map_cut_by_its_node_cap_is_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        let files: Vec<(String, String)> = (0..20).map(|i| (format!("m{i}.js"), format!("const m{i} = {i};\n"))).collect();
+        let refs: Vec<(&str, String)> = files.iter().map(|(path, src)| (path.as_str(), src.clone())).collect();
+        fx::write_files(dir.path(), &refs).unwrap();
+        let e = Engine::new(crate::testing::session());
+        let r = call(&e, "js_app_map", json!({"input_path": dir.path(), "max_nodes": 16})).unwrap();
+        assert!(r["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "node_cap"), "{r}");
+        assert_eq!(r["coverage"]["status"], "partial", "{r}");
+    }
+
+    /// A module whose facts list was cut is disclosed and makes the map's coverage partial.
+    #[test]
+    fn an_app_map_with_cut_facts_is_partial_and_disclosed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = (0..5000).map(|_| "require('./dep.js');\n").collect::<String>();
+        source.push_str("require('./lost.js');\n");
+        fx::write_files(
+            dir.path(),
+            &[
+                ("package.json", r#"{"name":"imports","main":"main.js"}"#.to_string()),
+                ("main.js", source),
+                ("dep.js", String::new()),
+                ("lost.js", String::new()),
+            ],
+        )
+        .unwrap();
+        let e = Engine::new(crate::testing::session());
+        let r = call(&e, "js_app_map", json!({"input_path": dir.path()})).unwrap();
+        assert!(r["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "facts_truncated"), "{r}");
+        assert_eq!(r["coverage"]["status"], "partial", "{r}");
     }
 }
