@@ -324,6 +324,7 @@ Website address	Adresse du site web
 Open it	L'ouvrir
 Here's what I found on that page:	Voici ce que j'ai trouvé sur cette page :
 Open something	Ouvrir quelque chose
+About	À propos
 Version	Version
 Type your question after /btw.	Tapez votre question après /btw.
 There's no /{name} command. You can use {commands}.	Il n'y a pas de commande /{name}. Vous pouvez utiliser {commands}.
@@ -350,6 +351,7 @@ Plugin removed.	Plugin retiré.
 Plugins read. Their new tools are offered from the next start.	Plugins lus. Leurs nouveaux outils seront proposés au prochain démarrage.
 Some plugins couldn't be read:	Certains plugins n'ont pas pu être lus :
 Couldn't open the folder.	Impossible d'ouvrir le dossier.
+Couldn't save your settings.	Impossible d'enregistrer vos réglages.
 Part of the app got stuck, so it was stopped and the rest carried on. Your work is kept.	Une partie de l'application s'est bloquée ; elle a été arrêtée et le reste a continué. Votre travail est conservé.
 Part of the app is stuck. Restarting clears it, and your work is kept.	Une partie de l'application est bloquée. Redémarrer règle le problème, et votre travail est conservé.
 Open log	Ouvrir le journal
@@ -416,6 +418,7 @@ For example: a website for my bakery	Par exemple : un site web pour ma boulanger
 Add pictures of the original (optional: screenshots help it look right)	Ajouter des images de l'original (facultatif : des captures d'écran aident à le rendre fidèle)
 Start	Démarrer
 Say what you want first.	Dites d'abord ce que vous voulez.
+This applies once you choose something to recreate above.	Ce choix s'applique une fois que vous avez choisi ci-dessus quoi recréer.
 What do you want to look inside?	Dans quoi voulez-vous regarder ?
 We only read it; nothing runs. Every answer shows how sure we are.	Nous le lisons seulement ; rien ne s'exécute. Chaque réponse indique notre degré de certitude.
 An app or a file	Une application ou un fichier
@@ -1443,6 +1446,7 @@ yesterday	hier
 … {} older	… {} plus anciens
 Drag to give the plan more or less room; double-click to reset	Faites glisser pour donner plus ou moins de place au plan ; double-cliquez pour rétablir
 Copy the message	Copier le message
+Copy the version	Copier la version
 Choose what the builder's approvals get	Choisir ce que reçoivent les autorisations du constructeur
 Reading the web	Lecture du web
 Other commands	Autres commandes
@@ -1463,3 +1467,35 @@ What the builder may do without asking you, in this project.	Ce que le construct
 Default follows Auto mode: with it on, what can be undone goes ahead and the rest is refused; with it off, the builder asks.	Par défaut suit le mode automatique : activé, ce qui peut être annulé se fait et le reste est refusé ; désactivé, le constructeur demande.
 Connecting to {name}… {seconds} s	Connexion à {name}… {seconds} s
 Some shared files could not be hard-linked and were copied instead ({size}).	Certains fichiers partagés n'ont pas pu être liés en dur et ont été copiés ({size}).
+This server lists several chat models. Choose one:	Ce serveur propose plusieurs modèles de chat. Choisissez-en un :
+Choose a model	Choisir un modèle
+Default (its own settings)	Par défaut (ses propres réglages)
+Read a text file	Lire un fichier texte
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name} ne peut pas être restreint à la lecture seule ; aucune question ne lui est donc posée. Posez vos questions avec Claude Code, ou avec une IA dotée d'une clé d'API.
+Stopped adding {name}.	Ajout de {name} arrêté.
+It isn't there any more, so {program} runs in its place.	Il n'existe plus, donc {program} s'exécute à sa place.
+Use it	L'utiliser
+ArtCraft Launcher manages this app's version. Change its version there.	ArtCraft Launcher gère la version de cette application. Modifiez-la dans ArtCraft Launcher.
+Check again	Vérifier à nouveau
+Check for Updates	Rechercher des mises à jour
+Check for Updates…	Rechercher des mises à jour…
+Checking for updates…	Recherche de mises à jour…
+Couldn't check for updates: {error}	Impossible de rechercher les mises à jour : {error}
+Downloading and verifying the update…	Téléchargement et vérification de la mise à jour…
+No installer is available for this platform.	Aucun installateur n'est disponible pour cette plateforme.
+Releases	Releases
+Save your work and stop running tasks before installing an update.	Enregistrez votre travail et arrêtez les tâches en cours avant d'installer une mise à jour.
+The update failed: {error}	La mise à jour a échoué : {error}
+The update worker stopped unexpectedly. Try checking again.	Le processus de mise à jour s'est arrêté de façon inattendue. Relancez la recherche.
+This installation is managed externally. Update it with its package manager or open Releases.	Cette installation est gérée de l'extérieur. Mettez-la à jour avec son gestionnaire de paquets ou ouvrez Releases.
+Update and restart	Mettre à jour et redémarrer
+Update ready. Restarting…	Mise à jour prête. Redémarrage…
+Updated to {version}.	Mise à jour vers {version} effectuée.
+Use Releases or your package manager to update this installation.	Utilisez Releases ou votre gestionnaire de paquets pour mettre à jour cette installation.
+You're up to date.	Vous êtes à jour.
+{version} is available.	La version {version} est disponible.
+Forget a website sign-in	Oublier la connexion à un site web
+Sign in to a website	Se connecter à un site web
+
+# Saved-builder notice: English until native-speaker review.
+The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

@@ -521,11 +521,7 @@ struct ActivityParams {
 
 /// Build an adb handle for the active settings, wiring cancellation and progress-friendly deadlines.
 fn adb_for(ctx: &Ctx<'_>) -> Result<Adb, ToolError> {
-    let s = &ctx.session.settings;
-    let path = craft_anything_engines::locate("adb", &s.engines.tools, &s.engine_store_dir()).ok_or_else(|| {
-        ToolError::new(ErrorCode::EngineMissing, "Android platform-tools (adb) isn't installed.")
-            .with_remediation("Install it from Settings → Engines, or run engines_install with engine \"adb\".")
-    })?;
+    let path = super::external_disasm_tools::locate_as(ctx, "adb", ErrorCode::EngineMissing)?;
     Ok(Adb::new(path).cancel(cancel_of(ctx)))
 }
 
@@ -632,7 +628,8 @@ fn clip(s: &str, max: usize) -> (String, bool) {
 fn engines_adb_check(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
     let _: Empty = parse_params(params)?;
     let s = &ctx.session.settings;
-    let found = craft_anything_engines::locate("adb", &s.engines.tools, &s.engine_store_dir());
+    let found = s.engine_path("adb");
+    let (missing, install) = s.engine_not_found("adb");
     let mut lims = Vec::new();
     let (version, error) = match &found {
         Some(path) => match Adb::new(path.clone()).cancel(cancel_of(ctx)).timeout(Duration::from_secs(20)).version() {
@@ -649,7 +646,7 @@ fn engines_adb_check(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Too
     let summary = match (&found, &version) {
         (Some(p), Some(v)) => format!("adb is available: {v} at {}.", p.display()),
         (Some(p), None) => format!("adb was found at {} but did not report a version.", p.display()),
-        (None, _) => "adb is not installed. Install it from Settings → Engines, or run engines_install with engine \"adb\".".into(),
+        (None, _) => format!("{missing} {install}"),
     };
     let e = EvidenceBuilder::new("engines_adb_check", Subject { kind: "engine".into(), sha256: None, name: Some("adb".into()) }, device_env(ctx))
         .params(json!({}))
@@ -1458,6 +1455,23 @@ mod tests {
         let out = e.call("engines_adb_check", json!({}), CallOptions::new(Caller::Cli)).unwrap();
         let v = out.to_json();
         assert_eq!(v["result"]["available"], adb_locatable(&e));
+    }
+
+    /// A folder set as adb's path without adb in it is named, not called "not installed".
+    #[test]
+    fn a_folder_without_adb_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings { deep_mode: true, ..Default::default() };
+        settings.engines.store_dir = Some(dir.path().join("store"));
+        settings.engines.only_configured = true;
+        settings.engines.tools.adb = Some(dir.path().to_path_buf());
+        let e = Engine::new(Session::new(settings));
+        let shown = dir.path().display().to_string();
+        let v = e.call("engines_adb_check", json!({}), CallOptions::new(Caller::Cli)).unwrap().to_json();
+        let summary = v["summary"].as_str().unwrap_or_default().to_string() + &v.to_string();
+        assert!(summary.contains("has no") && summary.contains(&shown.replace('\\', "\\\\")), "{v}");
+        let err = e.call("adb_devices_find", json!({}), CallOptions::new(Caller::Cli)).unwrap_err();
+        assert!(err.message.contains("has no") && err.message.contains(&shown), "{}", err.message);
     }
 
     #[test]

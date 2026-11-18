@@ -224,7 +224,7 @@ pub fn choice_tile(ui: &mut Ui, size: Vec2, icon: &str, label: &str, blurb: &str
         );
     }
     focus_ring(ui, &resp, rect);
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, tr(label)));
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, resp.enabled(), on, tr(label)));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

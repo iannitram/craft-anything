@@ -353,13 +353,12 @@ const MAX_SCRIPT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_MESSAGES: usize = 5000;
 
 fn frida_for(ctx: &Ctx<'_>) -> Result<Frida, ToolError> {
-    let s = &ctx.session.settings;
-    let path = craft_anything_engines::locate("frida", &s.engines.tools, &s.engine_store_dir())
-        .ok_or_else(|| ToolError::new(ErrorCode::EngineMissing, "Frida isn't installed.").with_remediation(INSTALL))?;
+    let path = super::external_disasm_tools::locate_as(ctx, "frida", ErrorCode::EngineMissing).map_err(|e| {
+        let fix = format!("{} Frida comes with `pipx install frida-tools`.", e.remediation.as_deref().unwrap_or_default());
+        e.with_remediation(fix)
+    })?;
     Ok(Frida::new(path).cancel(cancel_of(ctx)))
 }
-
-const INSTALL: &str = "Install Frida (for example `pipx install frida-tools`), then set its path in Settings → Engines if it isn't on PATH.";
 
 fn cancel_of(ctx: &Ctx<'_>) -> Cancel {
     let c = ctx.cancel.clone();

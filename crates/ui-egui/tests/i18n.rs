@@ -113,9 +113,13 @@ fn chinese_startup_language_menu_and_saved_selection() {
 
         restored.get_by_value("English").click();
         restored.run();
-        restored.get_by_label("System").scroll_to_me();
+        // Theme has a System choice too, on Studio's line: take the language menu's.
+        let off_theme_line = |y: f32, line: f32| (y - line).abs() >= 4.0;
+        let line = restored.get_by_label("Studio").rect().center().y;
+        restored.query_all_by_label("System").find(|n| off_theme_line(n.rect().center().y, line)).expect("the language menu's System").scroll_to_me();
         restored.run();
-        restored.get_by_label("System").click();
+        let line = restored.get_by_label("Studio").rect().center().y;
+        restored.query_all_by_label("System").find(|n| off_theme_line(n.rect().center().y, line)).expect("the language menu's System").click();
         restored.run_steps(3);
         assert!(restored.state().settings.language.is_empty());
         let expected = sys_locale::get_locales().find_map(|tag| i18n::language_from_tag(&tag)).unwrap_or("en");
@@ -140,4 +144,91 @@ fn chinese_startup_language_menu_and_saved_selection() {
     i18n::set_language("unsupported-locale");
     assert_eq!(i18n::language(), "en");
     assert_eq!(i18n::tr("Settings"), "Settings");
+    builder_replacement_notices(temp.path());
+}
+
+/// Run alongside the other locale checks in this test, never concurrently with them.
+fn builder_replacement_notices(dir: &Path) {
+    use craft_anything_ai::{AiHub, BackendConfig, BackendKind, Detected, KeyStore};
+    use std::sync::Arc;
+
+    for code in i18n::LANGUAGES.iter().map(|l| l.code).chain(["tr-TR", "unsupported-locale"]) {
+        let dir = dir.join(format!("builder-{code}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = Settings { mode: Mode::Beginner, first_run_done: true, language: code.into(), ..Default::default() };
+        let mut h = harness(settings, &dir);
+        let turkish = i18n::language() == "tr";
+        let notice = |saved: &str, used: &str| {
+            if turkish {
+                format!(
+                    "Bu proje için seçilen yapay zekâ ({saved}) devre dışı bırakılmış veya artık yapılandırılmamış. Projeyi bunun yerine {used} oluşturacak."
+                )
+            } else {
+                craft_anything_ai::rebuild::replaced_builder_notice(saved, used)
+            }
+        };
+        assert_eq!(
+            craft_anything_ai::rebuild::replaced_builder_notice("Off", "Claude"),
+            "The AI chosen for this project (Off) is turned off or no longer set up. Claude builds instead.",
+            "{code}: changing the UI language must not change the headless notice",
+        );
+        h.state_mut().detected = Some(Vec::new());
+        h.state_mut().backends.push(BackendConfig {
+            name: "Off".into(),
+            kind: BackendKind::Anthropic,
+            model: "test-model".into(),
+            base_url: None,
+            ssh_host: None,
+            enabled: false,
+        });
+
+        // Disabled and removed choices retain both names, including Unicode and punctuation.
+        for saved in ["Off", "Gone", "Önceki AI (özel)", "{used}", "{saved}"] {
+            assert_eq!(h.state_mut().builder_backend(Some(saved)).as_deref(), Some("Claude"));
+            assert_eq!(h.state().state.toasts.last(), Some(&(notice(saved, "Claude"), false)), "{code}");
+        }
+
+        // The Make picker uses the same localised notice and still clears its stale choice.
+        h.state_mut().state.settings_open = false;
+        h.state_mut().state.make.ai = Some("Off".into());
+        h.run_steps(3);
+        assert!(h.state().state.make.ai.is_none());
+        h.get_by_label(&notice("Off", "Claude"));
+
+        h.state_mut().state.toasts.clear();
+        for wanted in [Some("Claude"), None, Some("")] {
+            assert_eq!(h.state_mut().builder_backend(wanted).as_deref(), Some("Claude"));
+            assert!(h.state().state.toasts.is_empty(), "{code}: no replacement");
+        }
+        h.state_mut().backends.clear();
+        assert!(h.state_mut().builder_backend(Some("Off")).is_none());
+        assert!(h.state().state.toasts.is_empty(), "{code}: nothing can build");
+
+        // A discovered agent is announced only after its setup succeeds.
+        h.state_mut().detected = Some(vec![Detected {
+            suggestion: BackendConfig {
+                name: "Yeni AI {saved} {used}".into(),
+                kind: BackendKind::AgentCli,
+                model: "claude-code".into(),
+                base_url: None,
+                ssh_host: None,
+                enabled: true,
+            },
+            reason: "Fixture".into(),
+            needs_key: false,
+        }]);
+        let hub = h.state().hub.clone();
+        let blocked = dir.join("blocked");
+        std::fs::write(&blocked, "a file, not a settings folder").unwrap();
+        h.state_mut().hub = Arc::new(AiHub::with_stores(h.state().engine.clone(), blocked.join("config.toml"), KeyStore::file_only(dir.join("keys.toml"))));
+        assert!(h.state_mut().builder_backend(Some("Off")).is_none());
+        assert!(!h.state().backends.iter().any(|b| b.name == "Yeni AI {saved} {used}"));
+        assert!(!h.state().state.toasts.is_empty());
+        assert!(h.state().state.toasts.iter().all(|(_, error)| *error), "{code}: failed setup must not claim an agent builds");
+
+        h.state_mut().hub = hub;
+        assert_eq!(h.state_mut().builder_backend(Some("Off")).as_deref(), Some("Yeni AI {saved} {used}"));
+        assert_eq!(h.state().state.toasts.last(), Some(&(notice("Off", "Yeni AI {saved} {used}"), false)), "{code}");
+    }
+    i18n::set_language("en");
 }

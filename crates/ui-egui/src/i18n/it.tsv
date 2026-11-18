@@ -305,6 +305,7 @@ Couldn't look through that folder.	Non ho potuto guardare in quella cartella.
 Couldn't open it.	Non ho potuto aprirlo.
 Couldn't open the folder.	Non ho potuto aprire la cartella.
 Couldn't open {}: {}	Non ho potuto aprire {}: {}
+Couldn't save your settings.	Non ho potuto salvare le impostazioni.
 Couldn't start a worker thread: {e}	Non ho potuto avviare un thread di lavoro: {e}
 Couldn't start it.	Non ho potuto avviarlo.
 Coverage unknown	Copertura sconosciuta
@@ -989,6 +990,7 @@ Saved in	Salvato in
 Saves space: copies the program and code, and shares dependencies and media with the project. A shared file rewritten in place changes here too.	Risparmia spazio: copia il programma e il codice, e condivide dipendenze e media con il progetto. Un file condiviso riscritto sul posto cambia anche qui.
 Say what you want	Di' cosa vuoi
 Say what you want first.	Prima di' cosa vuoi.
+This applies once you choose something to recreate above.	Si applica quando scegli sopra qualcosa da ricreare.
 Say what you want to make, or drop an app or file on the window to look inside it. Everything runs in Clean room mode unless you switch on Deep.	Di' cosa vuoi fare, oppure trascina un'app o un file sulla finestra per guardare dentro. Tutto gira in Camera bianca, finché non attivi Approfondito.
 Screenshot	Schermata
 Screenshot a page	Schermata di una pagina
@@ -1194,6 +1196,7 @@ Use the projects folder	Usa la cartella dei progetti
 Use this	Usa questo
 Use {name}	Usa {name}
 Value flow	Flusso dei valori
+About	Informazioni
 Version	Versione
 Waiting	In attesa
 Waiting for another build to finish: this one starts next.	In attesa che finisca un'altra costruzione: questa parte dopo.
@@ -1448,6 +1451,7 @@ Full screen	Schermo intero
 Zoom	Zoom
 Bring all to front	Porta tutto in primo piano
 Copy the message	Copia il messaggio
+Copy the version	Copia la versione
 Drag to give the plan more or less room; double-click to reset	Trascina per dare al piano più o meno spazio; doppio clic per ripristinare
 Choose what the builder's approvals get	Scegli cosa ricevono le approvazioni del costruttore
 Reading the web	Leggere il web
@@ -1495,3 +1499,8 @@ You're up to date.	Hai la versione più recente.
 Forget a website sign-in	Dimentica l'accesso a un sito web
 Sign in to a website	Accedi a un sito web
 Some shared files could not be hard-linked and were copied instead ({size}).	Alcuni file condivisi non hanno potuto essere collegati fisicamente e sono stati copiati ({size}).
+This server lists several chat models. Choose one:	Questo server offre diversi modelli di chat. Scegline uno:
+Choose a model	Scegli un modello
+
+# Saved-builder notice: English until native-speaker review.
+The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

@@ -3,7 +3,8 @@
 
 use crate::DisasmError;
 use crate::decode::{Insn, Mode, decode};
-use craft_anything_formats::{Arch, Binary, Format};
+use craft_anything_formats::{Arch, Binary, Format, SymbolKind};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -14,19 +15,46 @@ pub struct Image {
     pub mode: Option<Mode>,
 }
 
+/// Select the built-in decoding mode for `bin`. Entryless ARM images (such as `.so` shared
+/// libraries) inspect distinct executable function symbols, exports, and function starts so Thumb
+/// libraries (`addr & 1 == 1`) are not decoded as 32-bit A32 code.
 pub fn mode_for(bin: &Binary) -> Option<Mode> {
     match bin.arch {
         Arch::X86_16 => Some(Mode::X16),
         Arch::X86 => Some(Mode::X32),
         Arch::X86_64 => Some(Mode::X64),
         Arch::Aarch64 => Some(Mode::A64),
-        Arch::Arm => {
-            if bin.entry.is_some_and(|e| e & 1 == 1) {
-                Some(Mode::T32)
-            } else {
-                Some(Mode::A32)
+        Arch::Arm => match bin.entry {
+            Some(e) if e & 1 == 1 => Some(Mode::T32),
+            Some(_) => Some(Mode::A32),
+            None => {
+                let mut seen = BTreeMap::new();
+                let mut count = |addr: u64| {
+                    let clean = addr & !1;
+                    if addr != 0 && bin.is_exec(clean) {
+                        if addr & 1 == 1 {
+                            seen.insert(clean, true);
+                        } else if addr & 3 == 0 {
+                            seen.entry(clean).or_insert(false);
+                        }
+                    }
+                };
+                for s in &bin.symbols {
+                    if s.defined && s.kind == SymbolKind::Function {
+                        count(s.addr);
+                    }
+                }
+                for e in &bin.exports {
+                    count(e.addr);
+                }
+                for &f in &bin.function_starts {
+                    count(f);
+                }
+                let thumb = seen.values().filter(|&&is_thumb| is_thumb).count();
+                let arm = seen.len().saturating_sub(thumb);
+                Some(if thumb > arm { Mode::T32 } else { Mode::A32 })
             }
-        }
+        },
         Arch::Other => None,
     }
 }

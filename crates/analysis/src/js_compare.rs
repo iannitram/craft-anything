@@ -64,10 +64,40 @@ fn same_content(a: &ModuleSummary, b: &ModuleSummary) -> bool {
     }
 }
 
+/// Claim unmatched `left` items against unclaimed `right` items for one priority tier.
+fn claim_pass<L, R, K: Copy>(
+    left: &[L],
+    right: &[R],
+    matched: &mut [Option<(usize, K)>],
+    used: &mut BTreeSet<usize>,
+    tier: K,
+    mut predicate: impl FnMut(&L, &R) -> bool,
+) {
+    for (li, l_item) in left.iter().enumerate() {
+        if matched.get(li).is_some_and(Option::is_some) {
+            continue;
+        }
+        if let Some(ri) = right.iter().enumerate().position(|(ri, r_item)| !used.contains(&ri) && predicate(l_item, r_item)) {
+            used.insert(ri);
+            if let Some(slot) = matched.get_mut(li) {
+                *slot = Some((ri, tier));
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ModuleMatch {
+    ExactPath,
+    Content,
+    HashlessName,
+    Structure,
+}
+
 /// Match modules: same path and content → unchanged; same path → changed; same content
 /// elsewhere → moved; the same name apart from a bundler's build hash (one on each side) →
 /// changed, with the old name; same structure (fingerprint) elsewhere → renamed. Each right
-/// module is used once.
+/// module is used once across priority passes.
 fn match_modules<'a>(l: &'a [ModuleSummary], r: &'a [ModuleSummary]) -> Value {
     // Names without their build hash that occur exactly once on each side.
     let unique = |mods: &'a [ModuleSummary]| {
@@ -81,54 +111,42 @@ fn match_modules<'a>(l: &'a [ModuleSummary], r: &'a [ModuleSummary]) -> Value {
     };
     let (unique_l, unique_r) = (unique(l), unique(r));
     let mut used: BTreeSet<usize> = BTreeSet::new();
+    let mut matched = vec![None; l.len()];
+    claim_pass(l, r, &mut matched, &mut used, ModuleMatch::ExactPath, |m, x| x.path == m.path);
+    claim_pass(l, r, &mut matched, &mut used, ModuleMatch::Content, |m, x| !m.sha256.is_empty() && x.sha256 == m.sha256);
+    claim_pass(l, r, &mut matched, &mut used, ModuleMatch::HashlessName, |m, x| {
+        without_build_hash(&m.path).filter(|k| unique_l.contains(k) && unique_r.contains(k)).is_some_and(|k| without_build_hash(&x.path).as_ref() == Some(&k))
+    });
+    claim_pass(l, r, &mut matched, &mut used, ModuleMatch::Structure, |m, x| m.fingerprint.is_some() && x.fingerprint == m.fingerprint);
+
     let mut unchanged = 0usize;
     let mut changed = Vec::new();
     let mut moved = Vec::new();
     let mut renamed = Vec::new();
     let mut removed = Vec::new();
-    for m in l {
-        if let Some(i) = r.iter().position(|x| x.path == m.path) {
-            used.insert(i);
-            match r.get(i) {
-                Some(x) if same_content(x, m) => unchanged += 1,
-                Some(x) => changed.push(json!({
-                    "path": m.path,
-                    "same_structure": x.fingerprint.is_some() && x.fingerprint == m.fingerprint,
-                    "bytes": [m.bytes, x.bytes],
-                    "exports": export_diff(m, x),
-                    "functions": diff(&set(m.functions.iter().map(String::as_str)), &set(x.functions.iter().map(String::as_str))),
-                })),
-                None => {}
-            }
-            continue;
+    for (m, hit) in l.iter().zip(matched) {
+        match hit.and_then(|(i, tier)| r.get(i).map(|x| (x, tier))) {
+            Some((x, ModuleMatch::ExactPath)) if same_content(x, m) => unchanged += 1,
+            Some((x, ModuleMatch::ExactPath)) => changed.push(json!({
+                "path": m.path,
+                "same_structure": x.fingerprint.is_some() && x.fingerprint == m.fingerprint,
+                "bytes": [m.bytes, x.bytes],
+                "exports": export_diff(m, x),
+                "functions": diff(&set(m.functions.iter().map(String::as_str)), &set(x.functions.iter().map(String::as_str))),
+            })),
+            Some((x, ModuleMatch::Content)) => moved.push(json!({"from": m.path, "to": &x.path})),
+            Some((x, ModuleMatch::HashlessName)) => changed.push(json!({
+                "path": x.path,
+                "was": m.path,
+                "matched_by": "name without build hash",
+                "same_structure": x.fingerprint.is_some() && x.fingerprint == m.fingerprint,
+                "bytes": [m.bytes, x.bytes],
+                "exports": export_diff(m, x),
+                "functions": diff(&set(m.functions.iter().map(String::as_str)), &set(x.functions.iter().map(String::as_str))),
+            })),
+            Some((x, ModuleMatch::Structure)) => renamed.push(json!({"from": m.path, "to": &x.path, "matched_by": "structure"})),
+            None => removed.push(m.path.clone()),
         }
-        if let Some(i) = r.iter().enumerate().position(|(i, x)| !used.contains(&i) && x.sha256 == m.sha256 && !m.sha256.is_empty()) {
-            used.insert(i);
-            moved.push(json!({"from": m.path, "to": r.get(i).map(|x| &x.path)}));
-            continue;
-        }
-        let hashless = without_build_hash(&m.path).filter(|k| unique_l.contains(k) && unique_r.contains(k));
-        if let Some(i) = hashless.and_then(|k| r.iter().enumerate().position(|(i, x)| !used.contains(&i) && without_build_hash(&x.path).as_ref() == Some(&k))) {
-            used.insert(i);
-            if let Some(x) = r.get(i) {
-                changed.push(json!({
-                    "path": x.path,
-                    "was": m.path,
-                    "matched_by": "name without build hash",
-                    "same_structure": x.fingerprint.is_some() && x.fingerprint == m.fingerprint,
-                    "bytes": [m.bytes, x.bytes],
-                    "exports": export_diff(m, x),
-                    "functions": diff(&set(m.functions.iter().map(String::as_str)), &set(x.functions.iter().map(String::as_str))),
-                }));
-            }
-            continue;
-        }
-        if let Some(i) = r.iter().enumerate().position(|(i, x)| !used.contains(&i) && x.fingerprint.is_some() && x.fingerprint == m.fingerprint) {
-            used.insert(i);
-            renamed.push(json!({"from": m.path, "to": r.get(i).map(|x| &x.path), "matched_by": "structure"}));
-            continue;
-        }
-        removed.push(m.path.clone());
     }
     let added: Vec<&String> = r.iter().enumerate().filter(|(i, _)| !used.contains(i)).map(|(_, x)| &x.path).collect();
     let rows_capped =
@@ -148,28 +166,25 @@ fn export_diff(a: &ModuleSummary, b: &ModuleSummary) -> Value {
     v
 }
 
-/// Bundle modules across both graphs: by content, then structure, then id.
+/// Bundle modules across both graphs: by content, then structure, then id across priority passes.
 fn match_bundle_modules(l: &AppGraph, r: &AppGraph) -> Value {
     let lm: Vec<(&str, &crate::js_app::BundleModuleSummary)> =
         l.modules.iter().flat_map(|m| m.bundle_modules.iter().map(move |b| (m.path.as_str(), b))).collect();
     let rm: Vec<(&str, &crate::js_app::BundleModuleSummary)> =
         r.modules.iter().flat_map(|m| m.bundle_modules.iter().map(move |b| (m.path.as_str(), b))).collect();
     let mut used = BTreeSet::new();
+    let mut matched = vec![None; lm.len()];
+    claim_pass(&lm, &rm, &mut matched, &mut used, "content", |(_, b), (_, x)| x.sha256 == b.sha256);
+    claim_pass(&lm, &rm, &mut matched, &mut used, "structure", |(_, b), (_, x)| x.fingerprint == b.fingerprint);
+    claim_pass(&lm, &rm, &mut matched, &mut used, "id", |(_, b), (_, x)| x.id == b.id);
+
     let mut tiers: BTreeMap<&str, usize> = BTreeMap::new();
     let mut changed = Vec::new();
     let mut changed_total = 0usize;
     let mut removed = Vec::new();
-    for (lp, b) in &lm {
-        let tier = [
-            ("content", rm.iter().enumerate().position(|(i, (_, x))| !used.contains(&i) && x.sha256 == b.sha256)),
-            ("structure", rm.iter().enumerate().position(|(i, (_, x))| !used.contains(&i) && x.fingerprint == b.fingerprint)),
-            ("id", rm.iter().enumerate().position(|(i, (_, x))| !used.contains(&i) && x.id == b.id)),
-        ]
-        .into_iter()
-        .find_map(|(t, i)| i.map(|i| (t, i)));
-        match tier {
-            Some((t, i)) => {
-                used.insert(i);
+    for ((lp, b), hit) in lm.iter().zip(matched) {
+        match hit {
+            Some((_i, t)) => {
                 *tiers.entry(t).or_default() += 1;
                 if t == "id" {
                     changed_total += 1;
@@ -201,6 +216,20 @@ fn str_field<'a>(v: &'a [Value], key: &'a str) -> impl Iterator<Item = &'a str> 
     v.iter().filter_map(move |x| x.get(key).and_then(Value::as_str))
 }
 
+/// Aggregate observed vendor versions by package name without letting trailing empty markers or
+/// duplicate entries erase known versions.
+fn collect_vendors(vendors: &[Value]) -> BTreeMap<String, String> {
+    let mut by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for v in vendors {
+        let Some(name) = v.get("name").and_then(Value::as_str) else { continue };
+        let versions = by_name.entry(name.to_string()).or_default();
+        if let Some(version) = v.get("version").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+            versions.insert(version.to_string());
+        }
+    }
+    by_name.into_iter().map(|(name, versions)| (name, versions.into_iter().collect::<Vec<_>>().join(", "))).collect()
+}
+
 /// The full version comparison.
 pub fn compare_versions(l: &AppGraph, r: &AppGraph) -> Value {
     let pkg = |g: &AppGraph, k: &str| g.package.as_ref().and_then(|p| p.get(k)).cloned().unwrap_or(Value::Null);
@@ -229,13 +258,7 @@ pub fn compare_versions(l: &AppGraph, r: &AppGraph) -> Value {
             })
             .collect::<BTreeSet<_>>()
     };
-    let vendors = |g: &AppGraph| {
-        g.vendors
-            .iter()
-            .filter_map(|v| Some((v.get("name")?.as_str()?.to_string(), v.get("version").and_then(Value::as_str).unwrap_or("").to_string())))
-            .collect::<BTreeMap<_, _>>()
-    };
-    let (lv, rv) = (vendors(l), vendors(r));
+    let (lv, rv) = (collect_vendors(&l.vendors), collect_vendors(&r.vendors));
     let vendor_changes: Vec<Value> = lv
         .iter()
         .filter_map(|(n, v)| rv.get(n).filter(|w| *w != v).map(|w| json!({"name": n, "from": v, "to": w})))
@@ -332,21 +355,21 @@ pub fn compare_versions(l: &AppGraph, r: &AppGraph) -> Value {
     })
 }
 
-/// Export outlines module by module (matched by path, then by structure).
+/// Export outlines module by module (matched by path, then by structure, each right script used once).
 pub fn compare_export_outlines(l: &AppGraph, r: &AppGraph) -> Value {
-    let mut rows = Vec::new();
+    let ls: Vec<&ModuleSummary> = l.modules.iter().filter(|m| m.kind == "script").collect();
+    let rs: Vec<&ModuleSummary> = r.modules.iter().filter(|x| x.kind == "script").collect();
     let mut used = BTreeSet::new();
+    let mut matched = vec![None; ls.len()];
+    claim_pass(&ls, &rs, &mut matched, &mut used, (), |m, x| x.path == m.path);
+    claim_pass(&ls, &rs, &mut matched, &mut used, (), |m, x| m.fingerprint.is_some() && x.fingerprint == m.fingerprint);
+
+    let mut rows = Vec::new();
     let mut changed = 0usize;
     let mut rows_capped = false;
-    for m in l.modules.iter().filter(|m| m.kind == "script") {
-        let idx = r
-            .modules
-            .iter()
-            .position(|x| x.path == m.path)
-            .or_else(|| r.modules.iter().position(|x| x.fingerprint.is_some() && x.fingerprint == m.fingerprint));
-        match idx.and_then(|i| r.modules.get(i).map(|x| (i, x))) {
-            Some((i, x)) => {
-                used.insert(i);
+    for (m, hit) in ls.iter().zip(matched) {
+        match hit.and_then(|(i, _)| rs.get(i).copied()) {
+            Some(x) => {
                 let d = export_diff(m, x);
                 rows_capped |= d["rows_capped"].as_bool().unwrap_or(false);
                 let same =
@@ -359,7 +382,7 @@ pub fn compare_export_outlines(l: &AppGraph, r: &AppGraph) -> Value {
             None => rows.push(json!({"left": m.path, "right": null, "removed": true, "left_outline": m.exports})),
         }
     }
-    for (i, x) in r.modules.iter().enumerate().filter(|(_, x)| x.kind == "script") {
+    for (i, x) in rs.iter().enumerate() {
         if !used.contains(&i) {
             rows.push(json!({"left": null, "right": x.path, "added": true, "right_outline": x.exports}));
         }

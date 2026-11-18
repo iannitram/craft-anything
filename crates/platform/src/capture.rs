@@ -13,11 +13,11 @@
 //! - nothing ever blocks forever: every wait is bounded.
 //!
 //! Capture executes foreign code, so the engine gates the tool that calls this behind consent.
-//! On Windows there is no terminal to render into: the program runs through [`crate::process`]
-//! (its Job Object ends every process in it on timeout, cancel or drop) and its output is read
+//! On Windows there is no terminal to render into, and on other hosts (FreeBSD) the terminal loses
+//! a short program's output: there the program runs through [`crate::process`] (its Job Object or
+//! process group ends every process in it on timeout, cancel or drop) and its output is read
 //! through pipes, which the result says; scripted events and watched files need the terminal
-//! capture and are refused there. On other hosts (FreeBSD) [`capture`] returns a clear error
-//! rather than pretending.
+//! capture and are refused there.
 #![cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code, unused_imports))]
 
 use crate::process::Cancel;
@@ -314,18 +314,13 @@ pub fn capture(spec: Spec, cancel: Cancel) -> Result<Capture, ToolError> {
     unix::capture(spec, cancel)
 }
 
-/// On Windows: through pipes, under the program's Job Object ([`piped`]).
-#[cfg(windows)]
+/// Elsewhere through pipes ([`piped`]), under the program's Job Object (Windows) or process group.
+/// Windows has no terminal to render into; on FreeBSD the kernel discards terminal output the
+/// reader has not read yet when the program (the session leader) exits, so a short program's
+/// output was lost under a terminal, while a pipe keeps it until it is read.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn capture(spec: Spec, cancel: Cancel) -> Result<Capture, ToolError> {
     piped::capture(spec, cancel)
-}
-
-/// Elsewhere capture is unavailable: on FreeBSD the kernel discards output the reader has not
-/// read yet when the program (the session leader) exits, so a short program's output was lost.
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-pub fn capture(_spec: Spec, _cancel: Cancel) -> Result<Capture, ToolError> {
-    Err(ToolError::new(ErrorCode::FeatureMissing, "Process capture is only available on Linux and macOS.")
-        .with_remediation("Run the capture on a Linux or macOS host."))
 }
 
 /// Run a program that crashes without a real console (it asks the console for its size, which
@@ -502,16 +497,27 @@ mod console_tests {
     }
 }
 
-/// A capture without a terminal: the program's output read through pipes. Its Job Object ends
-/// every process it started when the run ends, times out or is cancelled.
-#[cfg(any(windows, test))]
+/// A capture without a terminal: the program's output read through pipes. Its Job Object
+/// (Windows) or process group ends every process it started when the run ends, times out or is
+/// cancelled.
+#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
 mod piped {
     use super::*;
     use crate::process::Process;
     use serde_json::Value;
 
     /// Why a capture on this host has no terminal, recorded with every result.
+    #[cfg(windows)]
     pub const NO_TERMINAL: &str = "There's no terminal capture on Windows: the output was read through pipes, so a program that draws a full-screen terminal interface or colours its output looks different, and its error output follows its normal output instead of being interleaved.";
+    #[cfg(not(windows))]
+    pub const NO_TERMINAL: &str = "There's no terminal capture on this system, whose terminal loses what a short program wrote when it exits: the output was read through pipes, so a program that draws a full-screen terminal interface or colours its output looks different, and its error output follows its normal output instead of being interleaved.";
+
+    /// How everything the program started was ended, recorded with every result.
+    #[cfg(windows)]
+    const ENDED: (&str, &str) = ("job_object", "Every process the program started was ended with its Job Object, which the system empties when the run ends.");
+    #[cfg(not(windows))]
+    const ENDED: (&str, &str) =
+        ("process_group", "Every process the program started in its process group was ended with it when the run ended, timed out or was cancelled.");
 
     pub fn capture(spec: Spec, cancel: Cancel) -> Result<Capture, ToolError> {
         if !spec.events.is_empty() || !spec.observation_paths.is_empty() {
@@ -586,10 +592,7 @@ mod piped {
             cleanup: Cleanup { process_group: "verified".into(), temporary_root: "none" },
             limitations: vec![
                 Limitation { code: "no_terminal".into(), message: NO_TERMINAL.into() },
-                Limitation {
-                    code: "job_object".into(),
-                    message: "Every process the program started was ended with its Job Object, which the system empties when the run ends.".into(),
-                },
+                Limitation { code: ENDED.0.into(), message: ENDED.1.into() },
             ],
             still_unknown: Vec::new(),
             truncated,
@@ -616,6 +619,33 @@ mod piped {
             assert_eq!(screen("a\r\nb  \r\nhalf\rdone\n\n\n", 24), ["a", "b", "done"]);
             assert_eq!(screen("1\n2\n3\n4\n", 2), ["3", "4"]);
             assert!(screen("", 24).is_empty());
+        }
+
+        /// FreeBSD captures this way: a short program's output and exit code, all of them, and
+        /// the process-group limitation rather than the Job Object one.
+        #[cfg(unix)]
+        #[test]
+        fn a_unix_program_is_captured_through_pipes() {
+            let spec = Spec {
+                executable: "/bin/sh".into(),
+                args: ["-c", "echo $CRAFT_TEST_WORD; exit 3"].iter().map(Into::into).collect(),
+                cwd: None,
+                env: vec![("CRAFT_TEST_WORD".into(), "first".into())],
+                terminal: Terminal::default(),
+                events: Vec::new(),
+                timeout: Duration::from_secs(10),
+                idle_timeout: Duration::from_secs(10),
+                settle: Duration::ZERO,
+                finalization: Duration::ZERO,
+                observation_paths: Vec::new(),
+                limits: Limits::default(),
+                sandbox: SandboxRequest::Off,
+            };
+            let c = capture(spec, std::sync::Arc::new(|| false)).unwrap();
+            assert_eq!((c.exit.reason.as_str(), c.exit.code), ("exited", Some(3)));
+            assert_eq!(c.terminal.lines, ["first"]);
+            assert_eq!(c.manifest.pty_backend, "pipes");
+            assert!(c.limitations.iter().any(|l| l.code == "process_group"), "{:?}", c.limitations);
         }
 
         #[test]

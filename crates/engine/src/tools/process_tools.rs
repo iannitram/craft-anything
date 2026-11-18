@@ -635,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), ignore)]
+    #[cfg_attr(windows, ignore)]
     fn capture_and_compare_echo() {
         if craft_anything_platform::which::which("sh").is_none() {
             return;

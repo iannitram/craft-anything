@@ -251,17 +251,28 @@ pub struct RecoveredModule {
     pub note: Option<String>,
 }
 
-/// A safe relative path for a module id: no `..`, no absolute roots, no odd characters.
+/// Whether `path`'s final segment already ends with a known script, stylesheet, component, or data
+/// extension (case-insensitively, with a non-empty stem).
+fn has_known_module_ext(path: &str) -> bool {
+    let leaf = path.rsplit('/').next().unwrap_or(path);
+    leaf.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && ["js", "mjs", "cjs", "ts", "tsx", "jsx", "json", "css", "vue", "svelte"].iter().any(|known| ext.eq_ignore_ascii_case(known))
+    })
+}
+
+/// A safe relative path for a module id: no `..`, no absolute roots, no leading or trailing segment
+/// dots, no odd characters, and case-insensitive known-extension preservation.
 pub fn safe_module_path(id: &str, fallback_ext: &str) -> String {
-    let trimmed = id.trim_start_matches("webpack://").trim_start_matches("webpack:").trim_start_matches("file://");
+    let trimmed = id.strip_prefix("webpack://").or_else(|| id.strip_prefix("webpack:")).or_else(|| id.strip_prefix("file://")).unwrap_or(id);
     let mut parts = Vec::new();
     for p in trimmed.split(['/', '\\']) {
         let p = p.trim();
-        if p.is_empty() || p == "." || p == ".." || p.ends_with(':') {
+        let is_drive = matches!(p.as_bytes(), [c, b':'] if c.is_ascii_alphabetic());
+        if p.is_empty() || p == "." || p == ".." || is_drive {
             continue;
         }
         let clean: String = p.chars().map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '@' | '+') { c } else { '_' }).take(120).collect();
-        let clean = clean.trim_start_matches('.').to_string();
+        let clean = clean.trim_matches('.').to_string();
         if !clean.is_empty() {
             parts.push(clean);
         }
@@ -273,18 +284,62 @@ pub fn safe_module_path(id: &str, fallback_ext: &str) -> String {
         parts.push("module".into());
     }
     let mut path = parts.join("/");
-    let has_ext = [".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".json", ".css", ".vue", ".svelte"].iter().any(|e| path.ends_with(e));
-    if !has_ext {
+    if !has_known_module_ext(&path) {
         path.push_str(fallback_ext);
     }
     path
 }
 
+/// Decompose a precomposed Hangul syllable (`U+AC00..=U+D7A3`) into canonical Jamo (`L`, `V`, optional `T`).
+fn decompose_hangul(c: char) -> [Option<char>; 3] {
+    let u = u32::from(c);
+    if !(0xAC00..=0xD7A3).contains(&u) {
+        return [Some(c), None, None];
+    }
+    let s = u - 0xAC00;
+    let l = char::from_u32(0x1100 + s / 588);
+    let v = char::from_u32(0x1161 + (s % 588) / 28);
+    let t = match s % 28 {
+        0 => None,
+        rem => char::from_u32(0x11A7 + rem),
+    };
+    [l, v, t]
+}
+
+/// Build a case-folded deduplication key for relative output paths across case-insensitive
+/// filesystems (Windows NTFS and macOS APFS).
+///
+/// Decomposes Hangul syllables (`가` U+AC00 → `가` U+1100 U+1161) and chains `char::to_lowercase`
+/// into `char::to_uppercase` so Greek final and medial sigma (`ς`/`σ` → `Σ`), singleton
+/// decompositions (`K` U+212A → `K`, `Å` U+212B → `Å`, `Ω` U+2126 → `Ω`), Turkish `İ`/`ı`, and
+/// APFS multi-character case foldings (`ß`/`ẞ` → `SS`, `ﬁ` → `FI`) map to one key while callers
+/// preserve the first file's original spelling on disk.
+pub fn module_path_key(path: &str) -> String {
+    path.chars().flat_map(decompose_hangul).flatten().flat_map(char::to_lowercase).flat_map(char::to_uppercase).collect()
+}
+
+/// Return [`module_path_key`] for every strict parent directory prefix of a `/`-separated
+/// relative file path so callers can prevent file/directory collisions in either input order.
+pub fn ancestor_dir_keys(path: &str) -> Vec<String> {
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+    let mut out = Vec::new();
+    let mut prefix = String::new();
+    for seg in segs.iter().take(segs.len().saturating_sub(1)) {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(seg);
+        out.push(module_path_key(&prefix));
+    }
+    out
+}
+
 /// Cut the modules found in `src` into files, pretty-printing each.
 pub fn recover_modules(src: &str, modules: &[BundleModule], level: RewriteLevel, limits: &Limits) -> Vec<RecoveredModule> {
     let mut out = Vec::new();
-    let mut names = std::collections::HashSet::new();
-    for (module_index, m) in modules.iter().enumerate() {
+    let initial_paths: Vec<String> = modules.iter().map(|m| safe_module_path(&m.id, ".js")).collect();
+    let mut names: std::collections::HashSet<String> = initial_paths.iter().flat_map(|p| ancestor_dir_keys(p)).collect();
+    for (module_index, (m, mut file_name)) in modules.iter().zip(initial_paths).enumerate() {
         let original = slice(src, m.start, m.end);
         let mut renamed = Vec::new();
         let mut note = None;
@@ -312,14 +367,16 @@ pub fn recover_modules(src: &str, modules: &[BundleModule], level: RewriteLevel,
                 (body, 0, false)
             }
         };
-        let mut file_name = safe_module_path(&m.id, ".js");
-        if !names.insert(file_name.clone()) {
-            let stem = file_name.trim_end_matches(".js").to_string();
+        if !names.insert(module_path_key(&file_name)) {
+            let (stem, ext) = match file_name.rsplit_once('.') {
+                Some((stem, ext)) if !stem.is_empty() && !stem.ends_with('/') && !ext.is_empty() => (stem.to_string(), format!(".{ext}")),
+                _ => (file_name.clone(), ".js".to_string()),
+            };
             let hash = m.sha256.get(..8).unwrap_or("dup");
-            file_name = format!("{stem}.{hash}.js");
+            file_name = format!("{stem}.{hash}{ext}");
             let mut occurrence = module_index;
-            while !names.insert(file_name.clone()) {
-                file_name = format!("{stem}.{hash}.{occurrence}.js");
+            while !names.insert(module_path_key(&file_name)) {
+                file_name = format!("{stem}.{hash}.{occurrence}{ext}");
                 occurrence += 1;
             }
         }
@@ -401,6 +458,9 @@ mod tests {
         assert_eq!(safe_module_path("..", ".js"), "module.js");
         assert_eq!(safe_module_path("12", ".js"), "12.js");
         assert_eq!(safe_module_path(".hidden", ".js"), "hidden.js");
+        assert!(!has_known_module_ext(".JS"));
+        assert!(!has_known_module_ext("src/.TS"));
+        assert!(has_known_module_ext("src/a.TS"));
     }
 }
 

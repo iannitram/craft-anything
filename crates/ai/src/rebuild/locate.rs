@@ -66,7 +66,14 @@ pub(super) fn script_program(script: &Path) -> Option<PathBuf> {
         .map(|w| w.trim_start_matches("%~dp0").trim_start_matches("$(dirname \"$0\")/").trim_start_matches("./"))
         .filter(|w| !w.is_empty() && !w.starts_with('-'))
         .map(|w| dir.join(w.replace('\\', std::path::MAIN_SEPARATOR_STR)))
-        .find(|p| p.is_file() && p.as_path() != script && is_program(p))
+        .find(|p| p.is_file() && p.as_path() != script && studies_as_program(p))
+}
+
+/// Whether `p` is a program to study: one this computer can start, or a Windows program on any
+/// system. A Windows game copied to Linux or macOS has no executable bits, and is still the program
+/// to decompile; whether it can be started here is a separate question ([`is_program`]).
+pub(super) fn studies_as_program(p: &Path) -> bool {
+    is_program(p) || p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))
 }
 
 /// The biggest program in a folder (3 levels deep), skipping installers, servers and helpers.
@@ -85,7 +92,7 @@ pub(super) fn main_program(dir: &Path) -> Option<PathBuf> {
             }
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_ascii_lowercase();
             let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-            if is_program(&p) && !SKIP.iter().any(|s| name.contains(s)) && best.as_ref().is_none_or(|(b, _)| size > *b) {
+            if studies_as_program(&p) && !SKIP.iter().any(|s| name.contains(s)) && best.as_ref().is_none_or(|(b, _)| size > *b) {
                 best = Some((size, p));
             }
         }

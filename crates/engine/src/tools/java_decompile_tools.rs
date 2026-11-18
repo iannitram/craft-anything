@@ -207,6 +207,28 @@ mod tests {
         assert!(find_class(&s, "Foo2").is_none());
     }
 
+    /// A Java path set to a folder with no Java in it: the error says what's wrong with that
+    /// folder, not that Java isn't installed and should be given a path.
+    #[test]
+    fn a_java_folder_without_java_is_named_in_the_error() {
+        let d = tempfile::tempdir().unwrap();
+        let store = d.path().join("engines");
+        std::fs::create_dir_all(store.join("vineflower")).unwrap();
+        std::fs::write(store.join("vineflower").join("vineflower.jar"), "x").unwrap();
+        let empty = d.path().join("jdk");
+        std::fs::create_dir_all(&empty).unwrap();
+        let jar = d.path().join("app.jar");
+        std::fs::write(&jar, craft_anything_testkit::electron::zip_stored(&[("META-INF/MANIFEST.MF", b"x".as_slice())])).unwrap();
+        let mut s = crate::testing::session();
+        s.settings.deep_mode = true;
+        s.settings.engines.store_dir = Some(store);
+        s.settings.engines.tools.java = Some(empty.clone());
+        let e = Engine::new(s);
+        let err = e.call("java_vineflower_decompile", json!({"path": jar}), CallOptions::new(Caller::Mcp)).unwrap_err();
+        assert!(err.message.contains(&empty.display().to_string()) && err.message.contains("has no"), "{}", err.message);
+        assert!(err.remediation.as_deref().is_some_and(|r| r.starts_with("Correct the path")), "{:?}", err.remediation);
+    }
+
     #[test]
     fn needs_vineflower_and_an_input() {
         let e = Engine::new(crate::testing::session());

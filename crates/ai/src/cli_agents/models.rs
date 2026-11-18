@@ -4,8 +4,10 @@
 use crate::model::{Effort, Stop};
 use crate::{BackendConfig, BackendEntry, BackendOptions};
 use craft_anything_evidence::{ErrorCode, ToolError};
-use craft_anything_platform::Process;
+use craft_anything_platform::{Output, Process, process};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -149,13 +151,7 @@ pub(crate) fn query_process(config: &BackendConfig, options: &BackendOptions, di
 
 /// Query the selected installation, propagating cancellation, process failures and invalid catalogue errors.
 pub(crate) fn discover(config: &BackendConfig, options: &BackendOptions, directory: Option<&Path>, stop: &Stop) -> Result<Vec<AgentModel>, ToolError> {
-    let query = || {
-        let stop = stop.clone();
-        query_process(config, options, directory)?
-            .cancel_when(move || stop.is_stopped())
-            .remediation("Check OpenCode V2 and its provider setup on the selected computer, then reload the models.")
-            .run_checked()
-    };
+    let query = || query_once(config, options, directory, stop);
     let out = match query() {
         // A private server can answer before its plugins have started (#1859): ask once more.
         Err(e) if still_starting(&e) => {
@@ -170,10 +166,52 @@ pub(crate) fn discover(config: &BackendConfig, options: &BackendOptions, directo
 /// How long to give OpenCode's plugins before asking again (#1859).
 const STARTING_PAUSE: Duration = Duration::from_secs(2);
 
+/// Ask for the model list once. OpenCode prints its typed error (`{"_tag":…,"message":…}`) on
+/// stdout but only `HTTP 503 Service Unavailable` on stderr, and a failed run's error keeps only
+/// stderr (#1859), so the typed answer is read here, named in the message and kept in the details.
+fn query_once(config: &BackendConfig, options: &BackendOptions, directory: Option<&Path>, stop: &Stop) -> Result<Output, ToolError> {
+    let (program, args) = query_command(config, options, directory)?;
+    let stop = stop.clone();
+    let out = query_process(config, options, directory)?
+        .cancel_when(move || stop.is_stopped())
+        .remediation("Check OpenCode V2 and its provider setup on the selected computer, then reload the models.")
+        .run()?;
+    if out.success {
+        return Ok(out);
+    }
+    let name = Path::new(&program).file_name().map_or_else(|| program.clone(), |n| n.to_string_lossy().into_owned());
+    let mut err = process::nonzero_error_with(&name, &out, Some(&process::printable_command(OsStr::new(&program), &args)));
+    if let Some((tag, message)) = typed_error(&out.stdout).or_else(|| typed_error(&out.stderr)) {
+        let code = out.code.map_or_else(|| "a signal".into(), |c| c.to_string());
+        err.message = format!("{name} stopped with exit code {code}: {message}");
+        if tag == STARTING_TAG {
+            let rest = err.remediation.take().unwrap_or_default();
+            err.remediation = Some(format!("OpenCode's plugins hadn't finished starting. Try again in a moment.\n\n{rest}"));
+        }
+        if let Some(serde_json::Value::Object(d)) = err.details.as_mut() {
+            d.insert("opencode_error".into(), json!({"tag": tag, "message": message}));
+        }
+    }
+    Err(err)
+}
+
+/// OpenCode's tag for a server that is still starting its plugins.
+const STARTING_TAG: &str = "ServiceUnavailableError";
+
+/// The last `{"_tag":…,"message":…}` line OpenCode printed, as (tag, message).
+fn typed_error(output: &[u8]) -> Option<(String, String)> {
+    String::from_utf8_lossy(output).lines().rev().find_map(|line| {
+        let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        let tag = v.get("_tag")?.as_str()?;
+        let message = v.get("message").and_then(serde_json::Value::as_str).unwrap_or(tag);
+        Some((tag.chars().take(100).collect(), message.chars().take(500).collect()))
+    })
+}
+
 /// OpenCode's typed answer while it's still starting: `{"_tag":"ServiceUnavailableError",…}`.
 fn still_starting(e: &ToolError) -> bool {
     e.code == ErrorCode::ProgramFailed
-        && e.details.as_ref().and_then(|d| d.get("output_tail")).and_then(serde_json::Value::as_str).is_some_and(|t| t.contains("\"ServiceUnavailableError\""))
+        && e.details.as_ref().and_then(|d| d.pointer("/opencode_error/tag")).and_then(serde_json::Value::as_str) == Some(STARTING_TAG)
 }
 
 /// Wait `total`, ending early with the stop's error when it's stopped.
@@ -232,7 +270,6 @@ pub fn select_with_stop(context: &ModelContext, model: Option<&str>, thinking: O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     /// An owner's cancellation survives reset and prevents model-selection I/O.
     #[test]
@@ -392,7 +429,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("opencode");
         let busy = r#"{"_tag":"ServiceUnavailableError","message":"Location plugins did not finish activating","service":"plugin"}"#;
-        let script = format!("#!/bin/sh\nprintf x >> tries\nif [ ! -f started ]; then touch started; echo '{busy}'; exit 1; fi\ncat models.json\n");
+        let script = format!(
+            "#!/bin/sh\nprintf x >> tries\nif [ ! -f started ]; then touch started; echo '{busy}'; echo 'HTTP 503 Service Unavailable' >&2; exit 1; fi\ncat models.json\n"
+        );
         std::fs::write(&program, script).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         let options = BackendOptions { command: Some(program.display().to_string()), ..Default::default() };
@@ -401,19 +440,28 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.path().join("tries")).unwrap(), "xx", "asked twice");
         // Still starting the second time: that answer is the error, and it isn't asked a third time.
         std::fs::write(dir.path().join("tries"), "").unwrap();
-        std::fs::write(&program, format!("#!/bin/sh\nprintf x >> tries\necho '{busy}'\nexit 1\n")).unwrap();
+        std::fs::write(&program, format!("#!/bin/sh\nprintf x >> tries\necho '{busy}'\necho 'HTTP 503 Service Unavailable' >&2\nexit 1\n")).unwrap();
         let err = discover(&config(), &options, Some(dir.path()), &Stop::default()).unwrap_err();
         assert!(still_starting(&err), "{err:?}");
+        assert!(err.message.ends_with(": Location plugins did not finish activating"), "OpenCode's reason, not the HTTP status: {}", err.message);
+        assert!(err.remediation.as_deref().unwrap_or_default().starts_with("OpenCode's plugins hadn't finished starting."), "{err:?}");
         assert_eq!(std::fs::read_to_string(dir.path().join("tries")).unwrap(), "xx");
     }
 
     /// Only OpenCode's typed "still starting" answer is asked again, not any failure.
     #[test]
     fn only_a_server_still_starting_is_asked_again() {
-        let failed = |tail: &str| ToolError::new(ErrorCode::ProgramFailed, "opencode stopped with exit code 1.").with_details(json!({"output_tail": tail}));
-        assert!(still_starting(&failed(r#"{"_tag":"ServiceUnavailableError","message":"Location plugins did not finish activating"}"#)));
-        assert!(!still_starting(&failed(r#"{"_tag":"ProviderAuthError","message":"bad key"}"#)));
-        assert!(!still_starting(&failed("ServiceUnavailableError in some prose")), "the typed tag, not the word");
+        let failed = |tag: &str| {
+            ToolError::new(ErrorCode::ProgramFailed, "opencode stopped with exit code 1.").with_details(json!({"opencode_error": {"tag": tag, "message": "m"}}))
+        };
+        assert!(still_starting(&failed("ServiceUnavailableError")));
+        assert!(!still_starting(&failed("ProviderAuthError")));
+        let prose = ToolError::new(ErrorCode::ProgramFailed, "x").with_details(json!({"output_tail": "ServiceUnavailableError in some prose"}));
+        assert!(!still_starting(&prose), "the typed tag, not the word");
+        // The typed line is found among log lines, and prose or untagged JSON isn't taken for one.
+        let printed = b"level=INFO message=x\n{\"_tag\":\"ServiceUnavailableError\",\"message\":\"Location plugins did not finish activating\"}\n\n";
+        assert_eq!(typed_error(printed), Some(("ServiceUnavailableError".into(), "Location plugins did not finish activating".into())));
+        assert_eq!(typed_error(b"HTTP 503 Service Unavailable\n[1,2]\n{\"message\":\"no tag\"}\n"), None);
         assert!(!still_starting(&ToolError::new(ErrorCode::TimedOut, "timed out")));
         // A stop during the pause ends it with the stop's error.
         let stop = Stop::default();

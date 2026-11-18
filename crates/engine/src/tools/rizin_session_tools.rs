@@ -167,9 +167,7 @@ fn target(p: &StartParams) -> Result<Target, ToolError> {
 }
 
 fn locate_rizin(ctx: &Ctx<'_>) -> Result<PathBuf, ToolError> {
-    let s = &ctx.session.settings;
-    craft_anything_engines::locate("rizin", &s.engines.tools, &s.engine_store_dir())
-        .ok_or_else(|| ToolError::unavailable("Rizin is not installed.").with_remediation("Install Rizin and set its path in Settings → Engines."))
+    super::external_disasm_tools::locate(ctx, "rizin")
 }
 
 /// The session's status with its id.

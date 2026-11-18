@@ -3,7 +3,7 @@
 //! and dynamic-library resolution inside app bundles. No Apple tooling is needed, so all of it
 //! works on any host.
 
-use super::artifact_tools::{WalkOptions, rel_to, walk_dir};
+use super::artifact_tools::{WalkOptions, rel_to, unlisted_limitation, walk_dir};
 use super::native_common::{page, spec};
 use super::static_input::{self, Input, builder, format_err};
 use crate::target::TargetKind;
@@ -787,10 +787,13 @@ fn apple_nib_decode(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     let mut storyboards = Vec::new();
     let mut truncated = false;
+    let mut unlisted = Vec::new();
     if root.is_dir() {
         let skip = |_: &str| false;
-        let walked = walk_dir(&root, &WalkOptions { max_files: 50_000, max_depth: 24, skip_dir: &skip, gitignore: false, include_hidden: false }, &ctx.cancel)?;
+        let mut walked =
+            walk_dir(&root, &WalkOptions { max_files: 50_000, max_depth: 24, skip_dir: &skip, gitignore: false, include_hidden: false }, &ctx.cancel)?;
         truncated |= walked.truncated;
+        unlisted = std::mem::take(&mut walked.unlisted);
         for f in &walked.files {
             if is_nib_path(&f.rel) {
                 // A .nib folder holding several variants: keep the first one only.
@@ -866,9 +869,11 @@ fn apple_nib_decode(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
     if capped {
         lims.push(Limitation::new(
             "truncated",
-            "A document, object or connection limit (or the folder walk limit) cut the listing short; raise the max_* parameters.",
+            "A document, object or connection limit cut the listing short (raise the max_* parameters), or the folder walk was cut short by its own limits or by entries that couldn't be read.",
         ));
     }
+    // Interface files in a folder that couldn't be listed were never looked for.
+    lims.extend(unlisted_limitation(&unlisted));
     if !failures.is_empty() {
         lims.push(Limitation::new("unreadable_documents", format!("{} document(s) could not be decoded", failures.len())));
     }
@@ -1359,8 +1364,21 @@ fn apple_dylibs_resolve(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, 
         ),
     ];
     if walked.truncated {
-        lims.push(Limitation::new("truncated", "The bundle walk hit its file or depth limit; some programs were not considered."));
+        lims.push(Limitation::new(
+            "truncated",
+            "The bundle walk was cut short by a file, entry or depth limit, or by entries that couldn't be read; some programs were not considered.",
+        ));
     }
+    // Programs in a folder that couldn't be listed were never looked for.
+    lims.extend(unlisted_limitation(&walked.unlisted));
+    // A walk cut by any limit, or by a folder it couldn't list, may have missed a program, so the
+    // trace isn't complete. Partial counts the images whose loading was attempted (`images`, which
+    // records failures too); `loaded` also holds a dependency queued before `max_images` stopped it.
+    let coverage = if !walked.truncated && walked.unlisted.is_empty() {
+        Coverage::complete(t.loaded.len() as u64)
+    } else {
+        Coverage { status: CoverageStatus::Partial, examined: Some(t.images.len() as u64), total: None, next_offset: None }
+    };
     let name = bundle.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let ev = builder(
         ctx,
@@ -1376,7 +1394,7 @@ fn apple_dylibs_resolve(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, 
     .confidence(Confidence::Derived)
     .authority(Authority::OriginalFiles)
     .limitations(lims)
-    .coverage(Coverage::complete(t.loaded.len() as u64))
+    .coverage(coverage)
     .location(Location::new("path", bundle.display().to_string()))
     .build()?;
     Ok(ToolOutput::evidence(ev))
@@ -1683,6 +1701,43 @@ mod tests {
         // The bundle tools also accept the bundle folder.
         let m = call(&e, "apple_macho_show", json!({"path": app}));
         assert_eq!(m["result"]["selected"]["arch"], "arm64");
+    }
+
+    /// Both bundle walks read only `truncated`: a folder that couldn't be listed was "a limit",
+    /// with neither its name nor the reason, and the dylib trace still said it was complete.
+    #[test]
+    fn a_bundle_folder_that_cant_be_listed_is_named_with_its_reason() {
+        use super::super::artifact_tools::walk_testing::{assert_names_unlisted, close, unlisted_message};
+        let e = Engine::new(crate::testing::session());
+        let dir = tempfile::tempdir().unwrap();
+        let ui = dir.path().join("Interface");
+        std::fs::create_dir_all(ui.join("Closed")).unwrap();
+        std::fs::write(ui.join("Window.nib"), fx::keyed_nib()).unwrap();
+        std::fs::write(ui.join("Closed/Second.nib"), fx::keyed_nib()).unwrap();
+        let app = fx::write_app_bundle(dir.path());
+        std::fs::create_dir_all(app.join("Contents/Closed")).unwrap();
+        std::fs::write(app.join("Contents/Closed/Tool"), fx::macho_min(fx::CPU_ARM64, 2, &[], &[])).unwrap();
+
+        let nibs = call(&e, "apple_nib_decode", json!({"path": ui}));
+        assert_eq!(
+            (nibs["result"]["documents_total"].clone(), nibs["coverage"]["status"].clone(), unlisted_message(&nibs)),
+            (json!(2), json!("complete"), None)
+        );
+        let dylibs = call(&e, "apple_dylibs_resolve", json!({"path": app}));
+        assert_eq!((dylibs["coverage"]["status"].clone(), unlisted_message(&dylibs)), (json!("complete"), None));
+        assert!(dylibs["result"]["images"].as_array().unwrap().iter().any(|i| i["path"] == "Contents/Closed/Tool"), "{}", dylibs["result"]);
+
+        let Some(closed_ui) = close(&ui.join("Closed")) else { return };
+        let Some(closed_app) = close(&app.join("Contents/Closed")) else { return };
+        let nibs = e.call("apple_nib_decode", json!({"path": ui}), crate::CallOptions::new(crate::Caller::Mcp));
+        let dylibs = e.call("apple_dylibs_resolve", json!({"path": app}), crate::CallOptions::new(crate::Caller::Mcp));
+        drop((closed_ui, closed_app));
+        let (nibs, dylibs) = (nibs.unwrap().to_json(), dylibs.unwrap().to_json());
+        assert_eq!(nibs["result"]["documents_total"], 1, "{nibs}");
+        assert_names_unlisted(&nibs, "Closed");
+        assert!(!dylibs["result"]["images"].as_array().unwrap().iter().any(|i| i["path"] == "Contents/Closed/Tool"));
+        assert_names_unlisted(&dylibs, "Contents/Closed");
+        assert!(dylibs["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "truncated"), "{dylibs}");
     }
 
     #[test]

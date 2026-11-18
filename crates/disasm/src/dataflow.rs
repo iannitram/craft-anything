@@ -49,8 +49,11 @@ pub struct DefUse {
     pub truncated: bool,
 }
 
-fn ignored(r: &str) -> bool {
+/// True when `r` is stack-pointer, frame-pointer, program-counter, or flag bookkeeping for `mode`
+/// rather than a tracked data register (`r13`/`r15` are SP/PC only on 32-bit ARM and Thumb).
+fn ignored(mode: Mode, r: &str) -> bool {
     matches!(r, "rsp" | "esp" | "sp" | "rip" | "rflags" | "eflags" | "flags" | "x30" | "x29" | "rbp")
+        || (matches!(mode, Mode::A32 | Mode::T32) && matches!(r, "r13" | "r15"))
 }
 
 /// Build the def-use graph of `f`.
@@ -68,7 +71,7 @@ pub fn def_use(img: &Image, prog: &Program, f: &Function, max_nodes: usize, max_
         Mode::X64 => &["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"],
         Mode::A64 => &["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17"],
         Mode::A32 | Mode::T32 => &["r0", "r1", "r2", "r3", "r12"],
-        _ => &["rax", "rcx", "rdx", "eax", "ecx", "edx"],
+        _ => &["rax", "rcx", "rdx"],
     };
     let ret = match mode {
         Mode::A64 => "x0",
@@ -141,7 +144,7 @@ pub fn def_use(img: &Image, prog: &Program, f: &Function, max_nodes: usize, max_
                 kind: "instruction",
                 addr: Some(i.addr),
                 text: i.text(),
-                defines: i.writes.iter().filter(|w| !ignored(w)).cloned().collect(),
+                defines: i.writes.iter().filter(|w| !ignored(mode, w)).cloned().collect(),
             });
         }
     }
@@ -178,7 +181,7 @@ pub fn def_use(img: &Image, prog: &Program, f: &Function, max_nodes: usize, max_
             return;
         }
         for w in &i.writes {
-            if !ignored(w) {
+            if !ignored(mode, w) {
                 let definitions = cur.entry(w.clone()).or_default();
                 // A skipped call keeps the earlier value; an unconditional write replaces it.
                 if !conditional_call {
@@ -235,7 +238,7 @@ pub fn def_use(img: &Image, prog: &Program, f: &Function, max_nodes: usize, max_
         for i in v {
             let Some(&me) = node_of.get(&i.addr) else { continue };
             for r in &i.reads {
-                if ignored(r) {
+                if ignored(mode, r) {
                     continue;
                 }
                 for &d in cur.get(r).map(|s| s.iter().copied().collect::<Vec<_>>()).unwrap_or_default().iter() {
@@ -254,7 +257,12 @@ pub fn def_use(img: &Image, prog: &Program, f: &Function, max_nodes: usize, max_
             }
             let is_store = matches!(i.kind, Kind::Store | Kind::StorePair) || (i.mode_writes_memory());
             if is_store && out.effects.len() < 4096 {
-                out.effects.push(Effect { addr: i.addr, kind: "store", text: i.text(), inputs: i.reads.iter().filter(|r| !ignored(r)).cloned().collect() });
+                out.effects.push(Effect {
+                    addr: i.addr,
+                    kind: "store",
+                    text: i.text(),
+                    inputs: i.reads.iter().filter(|r| !ignored(mode, r)).cloned().collect(),
+                });
             }
             if matches!(i.flow, Flow::Call { .. } | Flow::IndirectCall { .. }) && out.effects.len() < 4096 {
                 let name = match i.flow {

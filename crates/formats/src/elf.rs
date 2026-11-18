@@ -9,8 +9,6 @@ use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAX_PHDRS: usize = 4096;
-const MAX_DYN: usize = 65_536;
 const MAX_NOTES: usize = 100_000;
 const MAX_FILE_MAPPINGS: usize = 65_536;
 
@@ -52,155 +50,25 @@ impl<'a> E<'a> {
     }
 }
 
-/// One program header.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ProgramHeader {
-    pub kind: String,
-    pub flags: String,
-    pub offset: u64,
-    #[serde(with = "hex_addr")]
-    pub vaddr: u64,
-    pub file_size: u64,
-    pub mem_size: u64,
-    pub align: u64,
-    #[serde(skip)]
-    pub p_type: u32,
-    #[serde(skip)]
-    pub p_flags: u32,
-}
+pub use craft_elf::ProgramHeader;
+use craft_elf::{dynamic_tag_name as dyn_name, va_to_off};
 
-fn phdr_name(t: u32) -> String {
-    match t {
-        0 => "NULL".into(),
-        1 => "LOAD".into(),
-        2 => "DYNAMIC".into(),
-        3 => "INTERP".into(),
-        4 => "NOTE".into(),
-        5 => "SHLIB".into(),
-        6 => "PHDR".into(),
-        7 => "TLS".into(),
-        0x6474_e550 => "GNU_EH_FRAME".into(),
-        0x6474_e551 => "GNU_STACK".into(),
-        0x6474_e552 => "GNU_RELRO".into(),
-        0x6474_e553 => "GNU_PROPERTY".into(),
-        0x7000_0001 => "ARM_EXIDX".into(),
-        other => format!("{other:#x}"),
-    }
-}
-
-fn perm_string(f: u32) -> String {
-    format!("{}{}{}", if f & 4 != 0 { 'r' } else { '-' }, if f & 2 != 0 { 'w' } else { '-' }, if f & 1 != 0 { 'x' } else { '-' })
-}
-
-/// The program headers of an ELF file.
+/// The program headers of an ELF file, preserving the app's error contract.
 pub fn program_headers(data: &[u8]) -> Result<Vec<ProgramHeader>, FormatError> {
-    let e = E::new(data)?;
-    let (phoff, phentsize, phnum) = if e.is64 { (e.u64(32), e.u16(54), e.u16(56)) } else { (e.u32(28).map(u64::from), e.u16(42), e.u16(44)) };
-    let phoff = usize::try_from(phoff.ok_or_else(|| FormatError::Truncated("ELF header".into()))?).map_err(|_| FormatError::Malformed("phoff".into()))?;
-    let phentsize = usize::from(phentsize.unwrap_or(0));
-    let phnum = usize::from(phnum.unwrap_or(0)).min(MAX_PHDRS);
-    let min = if e.is64 { 56 } else { 32 };
-    if phnum > 0 && phentsize < min {
-        return Err(FormatError::Malformed("program header entry too small".into()));
-    }
-    let mut out = Vec::new();
-    for i in 0..phnum {
-        // The fields below sit within `phentsize` bytes of `o`, so their offsets can't overflow either.
-        let Some(o) = i.checked_mul(phentsize).and_then(|x| x.checked_add(phoff)).filter(|&o| o.checked_add(phentsize).is_some()) else { break };
-        let ph = if e.is64 {
-            (e.u32(o), e.u32(o + 4), e.u64(o + 8), e.u64(o + 16), e.u64(o + 32), e.u64(o + 40), e.u64(o + 48))
-        } else {
-            (
-                e.u32(o),
-                e.u32(o + 24),
-                e.u32(o + 4).map(u64::from),
-                e.u32(o + 8).map(u64::from),
-                e.u32(o + 16).map(u64::from),
-                e.u32(o + 20).map(u64::from),
-                e.u32(o + 28).map(u64::from),
-            )
-        };
-        let (Some(t), Some(f), Some(off), Some(va), Some(fs), Some(ms), Some(al)) = ph else { break };
-        out.push(ProgramHeader {
-            kind: phdr_name(t),
-            flags: perm_string(f),
-            offset: off,
-            vaddr: va,
-            file_size: fs,
-            mem_size: ms,
-            align: al,
-            p_type: t,
-            p_flags: f,
-        });
-    }
-    Ok(out)
+    craft_elf::program_headers(data).map_err(|error| match error {
+        craft_elf::ElfError::Truncated(context) => FormatError::Truncated(context.into()),
+        craft_elf::ElfError::Malformed(context) => FormatError::Malformed(context),
+    })
 }
 
-fn dyn_name(tag: u64) -> String {
-    match tag {
-        0 => "NULL",
-        1 => "NEEDED",
-        2 => "PLTRELSZ",
-        3 => "PLTGOT",
-        4 => "HASH",
-        5 => "STRTAB",
-        6 => "SYMTAB",
-        7 => "RELA",
-        8 => "RELASZ",
-        9 => "RELAENT",
-        10 => "STRSZ",
-        11 => "SYMENT",
-        12 => "INIT",
-        13 => "FINI",
-        14 => "SONAME",
-        15 => "RPATH",
-        16 => "SYMBOLIC",
-        17 => "REL",
-        18 => "RELSZ",
-        19 => "RELENT",
-        20 => "PLTREL",
-        21 => "DEBUG",
-        22 => "TEXTREL",
-        23 => "JMPREL",
-        24 => "BIND_NOW",
-        25 => "INIT_ARRAY",
-        26 => "FINI_ARRAY",
-        27 => "INIT_ARRAYSZ",
-        28 => "FINI_ARRAYSZ",
-        29 => "RUNPATH",
-        30 => "FLAGS",
-        0x6fff_fef5 => "GNU_HASH",
-        0x6fff_fffb => "FLAGS_1",
-        0x6fff_fff0 => "VERSYM",
-        0x6fff_fffe => "VERNEED",
-        0x6fff_ffff => "VERNEEDNUM",
-        _ => return format!("{tag:#x}"),
-    }
-    .into()
-}
-
-/// Map a virtual address to a file offset using PT_LOAD headers.
-fn va_to_off(phdrs: &[ProgramHeader], va: u64) -> Option<u64> {
-    phdrs.iter().filter(|p| p.p_type == 1).find(|p| va >= p.vaddr && va - p.vaddr < p.file_size).and_then(|p| p.offset.checked_add(va - p.vaddr))
-}
-
-/// The (tag, value) pairs of the dynamic section, up to its `DT_NULL`.
 fn dynamic_entries(e: &E<'_>, phdrs: &[ProgramHeader]) -> Vec<(u64, u64)> {
-    let mut out = Vec::new();
-    let Some(d) = phdrs.iter().find(|p| p.p_type == 2) else { return out };
-    let ent = 2 * e.word_size();
-    let n = usize::try_from(d.file_size).unwrap_or(0) / ent;
-    let start = usize::try_from(d.offset).unwrap_or(usize::MAX);
-    for i in 0..n.min(MAX_DYN) {
-        let Some(o) = i.checked_mul(ent).and_then(|x| start.checked_add(x)) else { break };
-        let (Some(tag), Some(val)) = (e.word(o), o.checked_add(e.word_size()).and_then(|v| e.word(v))) else { break };
-        if tag == 0 {
-            break;
-        }
-        out.push((tag, val));
-    }
-    out
+    // E::new already validated the same immutable ELF ident.
+    craft_elf::dynamic_entries(e.r.data(), phdrs).unwrap_or_default()
 }
+
+#[cfg(test)]
+#[path = "elf_legacy.rs"]
+mod legacy;
 
 /// Add ELF facts to a parsed binary: image base, interpreter, needed libraries, RELRO, NX, PIE.
 pub fn enrich(data: &[u8], file: &object::File<'_>, b: &mut Binary) {
@@ -1240,5 +1108,110 @@ mod sectionless_tests {
         let ds = dynamic_symbols(&d, &b).unwrap();
         assert!(ds.truncated && !ds.warnings.is_empty());
         assert_eq!(ds.exports.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod shared_parity {
+    use super::*;
+    fn compare(data: &[u8]) {
+        let old = legacy::program_headers(data);
+        let new = program_headers(data);
+        match (old, new) {
+            (Ok(old), Ok(new)) => {
+                assert_eq!(serde_json::to_value(&old).unwrap(), serde_json::to_value(&new).unwrap());
+                assert_eq!(old.iter().map(|p| (p.p_type, p.p_flags)).collect::<Vec<_>>(), new.iter().map(|p| (p.p_type, p.p_flags)).collect::<Vec<_>>());
+                assert_eq!(legacy::dynamic(data, &old), craft_elf::dynamic_entries(data, &new).unwrap());
+            }
+            (Err(old), Err(new)) => assert_eq!(format!("{old:?}"), format!("{new:?}")),
+            other => panic!("ELF parity mismatch: {other:?}"),
+        }
+    }
+    #[test]
+    fn shared_dynamic_count_termination_and_overflow_match() {
+        for class in [1u8, 2] {
+            for endian in [1u8, 2] {
+                let width = if class == 1 { 4 } else { 8 };
+                let mut data = vec![0; 64 + width * 2 * 70_000];
+                data[..4].copy_from_slice(b"\x7fELF");
+                data[4] = class;
+                data[5] = endian;
+                for i in 0..70_000 {
+                    data[64 + i * width * 2 + if endian == 1 { 0 } else { width - 1 }] = 1;
+                }
+                let old = legacy::ProgramHeader {
+                    kind: "DYNAMIC".into(),
+                    flags: "---".into(),
+                    offset: 64,
+                    vaddr: 0,
+                    file_size: (width * 2 * 70_000) as u64,
+                    mem_size: 0,
+                    align: 0,
+                    p_type: 2,
+                    p_flags: 0,
+                };
+                let new = ProgramHeader {
+                    kind: old.kind.clone(),
+                    flags: old.flags.clone(),
+                    offset: old.offset,
+                    vaddr: 0,
+                    file_size: old.file_size,
+                    mem_size: 0,
+                    align: 0,
+                    p_type: 2,
+                    p_flags: 0,
+                };
+                for (offset, size) in [(64, old.file_size), (u64::MAX, u64::MAX), (64, 3), (64, u64::MAX)] {
+                    let old = legacy::ProgramHeader { offset, file_size: size, ..old.clone() };
+                    let new = ProgramHeader { offset, file_size: size, ..new.clone() };
+                    assert_eq!(legacy::dynamic(&data, &[old]), dynamic_entries(&E::new(&data).unwrap(), &[new]));
+                }
+                assert_eq!(dynamic_entries(&E::new(&data).unwrap(), std::slice::from_ref(&new)).len(), 65_536);
+                data[64..64 + width].fill(0);
+                assert!(dynamic_entries(&E::new(&data).unwrap(), &[new]).is_empty());
+            }
+        }
+    }
+    #[test]
+    fn shared_header_errors_serialization_and_caps_match() {
+        for class in [1u8, 2] {
+            for endian in [1u8, 2] {
+                let mut data = vec![0; 64 + 56 * 5000];
+                data[..4].copy_from_slice(b"\x7fELF");
+                data[4] = class;
+                data[5] = endian;
+                let put16 = |data: &mut [u8], off: usize, v: u16| {
+                    data[off..off + 2].copy_from_slice(&if endian == 1 { v.to_le_bytes() } else { v.to_be_bytes() });
+                };
+                let put32 = |data: &mut [u8], off: usize, v: u32| {
+                    data[off..off + 4].copy_from_slice(&if endian == 1 { v.to_le_bytes() } else { v.to_be_bytes() });
+                };
+                if class == 1 {
+                    put32(&mut data, 28, 64);
+                    put16(&mut data, 42, 32);
+                    put16(&mut data, 44, 5000);
+                } else {
+                    data[if endian == 1 { 32 } else { 39 }] = 64;
+                    put16(&mut data, 54, 56);
+                    put16(&mut data, 56, 5000);
+                }
+                for i in 0..5000 {
+                    let off = 64 + i * if class == 1 { 32 } else { 56 };
+                    put32(&mut data, off, 1);
+                }
+                compare(&data);
+                assert_eq!(program_headers(&data).unwrap().len(), 4096);
+                for len in 0..200 {
+                    compare(&data[..len]);
+                }
+                for pos in 0..128 {
+                    let old = data[pos];
+                    data[pos] = 255;
+                    compare(&data);
+                    data[pos] = old;
+                }
+            }
+        }
+        compare(b"not elf");
     }
 }

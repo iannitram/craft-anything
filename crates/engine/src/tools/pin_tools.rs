@@ -223,11 +223,11 @@ fn start_program(ctx: &mut Ctx<'_>, app: &Path, log: &Path, another: bool, label
 
 fn project_pin_create(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
     let p: CreateParams = parse_params(params)?;
-    let ws = open_project(&p.project)?;
+    let ws = open_project(&p.project).map_err(|e| e.with_details(json!({"project": &p.project, "estimate": p.estimate})))?;
     let godot = godot(ctx);
     if p.estimate {
-        let size = pins::estimate(&ws, godot.as_deref())?;
-        return Ok(ToolOutput::Value(json!({"estimate": size})));
+        let size = pins::estimate(&ws, godot.as_deref()).map_err(|e| e.with_details(json!({"project": &ws.root, "estimate": true})))?;
+        return Ok(ToolOutput::Value(json!({"project": &ws.root, "estimate": size})));
     }
     let cancel = ctx.cancel.clone();
     let mut last = std::time::Instant::now();
@@ -239,7 +239,7 @@ fn project_pin_create(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, To
         }
         !cancel.is_cancelled()
     };
-    let pin = pins::create(&ws, p.mode, p.name.as_deref(), godot.as_deref(), &mut progress)?;
+    let pin = pins::create(&ws, p.mode, p.name.as_deref(), godot.as_deref(), &mut progress).map_err(|e| e.with_details(json!({"project": &ws.root})))?;
     Ok(ToolOutput::Value(json!({"pin": pin, "folder": pin.dir(&ws).display().to_string()})))
 }
 
@@ -415,6 +415,7 @@ mod tests {
         let call = |id: &str, p: Value| e.call(id, p, CallOptions::new(Caller::Cli).with_consent(Consent::Granted)).map(|o| o.to_json()["result"].clone());
 
         let est = call("project_pin_create", json!({"project": ws.root, "estimate": true})).unwrap();
+        assert_eq!(est["project"].as_str(), ws.root.to_str(), "an estimate names the project it was for");
         assert!(est["estimate"]["bytes"].as_u64().unwrap() > 0);
         assert!(pins::list(&ws).is_empty(), "an estimate pins nothing");
         let made = call("project_pin_create", json!({"project": ws.root})).unwrap();
@@ -434,5 +435,31 @@ mod tests {
         assert_eq!(list["count"], 1);
         assert_eq!(list["copied_bytes"], light["pin"]["bytes"]);
         assert_eq!(call("project_pin_open", json!({"project": ws.root, "pin": 1})).unwrap_err().code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn an_estimate_error_names_the_project_it_was_for() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = Workspace::create(d.path(), "Empty", "nothing built", TargetRef::None).unwrap();
+        let e = Engine::new(crate::testing::session());
+        let err = e
+            .call("project_pin_create", json!({"project": &ws.root, "estimate": true}), CallOptions::new(Caller::Cli).with_consent(Consent::Granted))
+            .unwrap_err();
+        let details = err.details.as_ref().expect("an estimate error names its project");
+        assert_eq!(details["project"].as_str(), ws.root.to_str());
+        assert_eq!(details["estimate"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn an_open_project_error_on_an_estimate_names_the_project() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("missing");
+        let e = Engine::new(crate::testing::session());
+        let err = e
+            .call("project_pin_create", json!({"project": &root, "estimate": true}), CallOptions::new(Caller::Cli).with_consent(Consent::Granted))
+            .unwrap_err();
+        let details = err.details.as_ref().expect("an estimate open error names its project");
+        assert_eq!(details["project"].as_str(), root.to_str());
+        assert_eq!(details["estimate"].as_bool(), Some(true));
     }
 }

@@ -1,7 +1,7 @@
 //! JavaScript applications: static analysis of Electron apps (ASAR or unpacked), web bundles and
 //! Node packages into an application graph, and reconciling that graph with runtime captures.
 
-use super::artifact_tools::{WalkOptions, abs_path, env, is_path_input, read_capped, resolve_evidence_input, walk_dir};
+use super::artifact_tools::{WALK_CUT_NOTE, WalkOptions, abs_path, env, is_path_input, read_capped, resolve_evidence_input, walk_dir};
 use crate::tool::{Ctx, Effects, Requires, ToolOutput, ToolSpec, Toolset, parse_params, schema_of};
 use craft_anything_analysis::js_app::{AppFile, AppGraph, AppInput, AppOptions, analyze_application, is_script};
 use craft_anything_analysis::js_trace::{RuntimeScript, reconcile, runtime_scripts_from};
@@ -205,7 +205,7 @@ pub(crate) fn load_app_input(ctx: &Ctx<'_>, p: &AnalyzeParams) -> Result<(AppInp
                 &ctx.cancel,
             )?;
             if walked.truncated {
-                input.notes.push("the folder listing was cut short by the file-count or depth limit".into());
+                input.notes.push(WALK_CUT_NOTE.into());
             }
             listing_truncated |= walked.truncated;
             unlisted.extend(walked.unlisted.iter().cloned());
@@ -339,7 +339,7 @@ pub(crate) fn load_app_input(ctx: &Ctx<'_>, p: &AnalyzeParams) -> Result<(AppInp
                 walk_dir(&ep, &WalkOptions { max_files: p.max_files, max_depth: 48, skip_dir: &skip, gitignore: false, include_hidden: false }, &ctx.cancel)?;
             listing_truncated |= walked.truncated;
             if walked.truncated {
-                input.notes.push(format!("{base}: the folder listing was cut short by the file-count or depth limit"));
+                input.notes.push(format!("{base}: {WALK_CUT_NOTE}"));
             }
             unlisted.extend(walked.unlisted.iter().map(|(rel, e)| (format!("{base}/{rel}"), e.clone())));
             for f in &walked.files {

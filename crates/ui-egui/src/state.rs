@@ -331,6 +331,8 @@ pub enum SettingsTab {
     Builds,
     Plugins,
     Safety,
+    /// The app's name and version.
+    About,
 }
 
 /// A list or view that a tool fills.
@@ -497,6 +499,50 @@ pub struct GameFiles {
     /// What the game is made of (triage's result for its folder).
     #[serde(default)]
     pub profile: Option<Value>,
+    /// The Game files jobs still in flight, by job id. A job a newer pick replaced stays here,
+    /// marked not current, so its failure is logged without being shown.
+    #[serde(default)]
+    pub jobs: BTreeMap<u64, PendingGameJob>,
+}
+
+/// What a Game files job will settle when it finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GameJob {
+    /// `game_archives_list`: the folder's archives; settles `looking`.
+    FolderScan,
+    /// `core_target_triage`: what the game is made of; settles no spinner.
+    Triage,
+    /// An archive listing; settles `loading`.
+    Listing,
+}
+
+/// A Game files job in flight, and whether the screen still waits for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingGameJob {
+    pub kind: GameJob,
+    /// A newer request of the same kind replaces this one: its answer is ignored, and its
+    /// failure is logged but not shown.
+    pub current: bool,
+}
+
+impl GameFiles {
+    /// A job the screen started, whose answer it still waits for.
+    pub fn start(&mut self, job: u64, kind: GameJob) {
+        self.jobs.insert(job, PendingGameJob { kind, current: true });
+    }
+
+    /// A newer request of `kind` replaces the older ones: they may still answer, but the screen
+    /// no longer waits for them.
+    pub fn supersede(&mut self, kind: GameJob) {
+        for pending in self.jobs.values_mut().filter(|pending| pending.kind == kind) {
+            pending.current = false;
+        }
+    }
+
+    /// Take a finished job out, saying whether the screen was still waiting for it.
+    pub fn finish(&mut self, job: u64) -> Option<PendingGameJob> {
+        self.jobs.remove(&job)
+    }
 }
 
 /// A picture waiting for where to be saved.

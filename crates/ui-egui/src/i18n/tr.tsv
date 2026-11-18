@@ -305,6 +305,7 @@ Couldn't look through that folder.	O klasöre bakılamadı.
 Couldn't open it.	Açılamadı.
 Couldn't open the folder.	Klasör açılamadı.
 Couldn't open {}: {}	{} açılamadı: {}
+Couldn't save your settings.	Ayarlar kaydedilemedi.
 Couldn't start a worker thread: {e}	İşçi iş parçacığı başlatılamadı: {e}
 Couldn't start it.	Başlatılamadı.
 Coverage unknown	Kapsam bilinmiyor
@@ -987,6 +988,7 @@ Saved in	Kaydedileceği yer
 Saves space: copies the program and code, and shares dependencies and media with the project. A shared file rewritten in place changes here too.	Yer kazandırır: programı ve kodu kopyalar, bağımlılıkları ve medyayı projeyle paylaşır. Yerinde yeniden yazılan paylaşılan bir dosya burada da değişir.
 Say what you want	Ne istediğinizi yazın
 Say what you want first.	Önce ne istediğinizi yazın.
+This applies once you choose something to recreate above.	Bu, yukarıda yeniden oluşturulacak bir şey seçtiğinizde geçerli olur.
 Say what you want to make, or drop an app or file on the window to look inside it. Everything runs in Clean room mode unless you switch on Deep.	Ne yapmak istediğinizi yazın ya da içine bakmak için pencereye bir uygulama veya dosya bırakın. Derin'i açmazsanız her şey Temiz oda modunda çalışır.
 Screenshot	Ekran görüntüsü
 Screenshot a page	Bir sayfanın ekran görüntüsünü al
@@ -1192,6 +1194,7 @@ Use the projects folder	Projeler klasörünü kullan
 Use this	Bunu kullan
 Use {name}	{name} kullan
 Value flow	Değer akışı
+About	Hakkında
 Version	Sürüm
 Waiting	Bekliyor
 Waiting for another build to finish: this one starts next.	Başka bir derlemenin bitmesini bekliyor: bu ondan sonra başlayacak.
@@ -1447,6 +1450,7 @@ Zoom	Yakınlaştır
 Bring all to front	Tümünü öne getir
 Drag to give the plan more or less room; double-click to reset	Plana daha fazla veya daha az yer vermek için sürükleyin; sıfırlamak için çift tıklayın
 Copy the message	Mesajı kopyala
+Copy the version	Sürümü kopyala
 Choose what the builder's approvals get	Oluşturucunun onaylarına ne olacağını seç
 Reading the web	Web'i okuma
 Other commands	Diğer komutlar
@@ -1493,3 +1497,8 @@ You're up to date.	En güncel sürümdesiniz.
 Forget a website sign-in	Bir web sitesinin oturumunu unut
 Sign in to a website	Bir web sitesinde oturum aç
 Some shared files could not be hard-linked and were copied instead ({size}).	Bazı paylaşılan dosyalar sabit bağlantıyla bağlanamadı ve kopyalandı ({size}).
+This server lists several chat models. Choose one:	Bu sunucuda birden fazla sohbet modeli var. Birini seçin:
+Choose a model	Bir model seçin
+
+# Saved-builder notice: reviewed by native Turkish speaker @MacallanTheRoot.
+The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	Bu proje için seçilen yapay zekâ ({saved}) devre dışı bırakılmış veya artık yapılandırılmamış. Projeyi bunun yerine {used} oluşturacak.

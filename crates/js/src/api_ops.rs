@@ -32,12 +32,260 @@ pub struct Document {
     pub open_ended: bool,
 }
 
+/// Keywords that may open a top-level GraphQL executable or type-system definition.
+const DOC_KEYWORDS: &[&str] =
+    &["query", "mutation", "subscription", "fragment", "type", "schema", "extend", "input", "interface", "union", "enum", "scalar", "directive"];
+
 fn is_name_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
 
 fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Skip GraphQL ignored tokens (`Whitespace`, `,`, BOM, `#` comments) and optionally [`HOLE`]s.
+/// Returns `true` when at least one [`HOLE`] was skipped.
+fn skip_trivia(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>, allow_hole: bool) -> bool {
+    let mut saw_hole = false;
+    while let Some(&(_, c)) = chars.peek() {
+        if allow_hole && c == HOLE {
+            saw_hole = true;
+            chars.next();
+        } else if c == '#' {
+            for (_, d) in chars.by_ref() {
+                if d == '\n' || d == '\r' {
+                    break;
+                }
+            }
+        } else if c.is_whitespace() || c == ',' || c == '\u{feff}' {
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    saw_hole
+}
+
+/// Read a GraphQL `Name` token starting at the current cursor position.
+fn read_name<'a>(chars: &mut std::iter::Peekable<std::str::CharIndices<'a>>, text: &'a str) -> Option<&'a str> {
+    let &(start, first) = chars.peek()?;
+    if !is_name_start(first) {
+        return None;
+    }
+    let mut end = start;
+    while let Some(&(i, c)) = chars.peek() {
+        if !is_name_char(c) {
+            break;
+        }
+        end = i + c.len_utf8();
+        chars.next();
+    }
+    text.get(start..end)
+}
+
+/// Step over a balanced `(...)` argument list, skipping strings and comments inside.
+fn skip_parens(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>, text: &str) -> Option<()> {
+    chars.peek().filter(|&&(_, c)| c == '(')?;
+    let mut depth = 0usize;
+    while let Some(&(_, c)) = chars.peek() {
+        match c {
+            '(' => {
+                depth = depth.checked_add(1)?;
+                chars.next();
+            }
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                chars.next();
+                if depth == 0 {
+                    return Some(());
+                }
+            }
+            '"' => skip_string(chars, text)?,
+            '#' => {
+                for (_, d) in chars.by_ref() {
+                    if d == '\n' || d == '\r' {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                chars.next();
+            }
+        }
+    }
+    None
+}
+
+/// Step over zero or more `@directive(...)` annotations, returning how many were read.
+fn skip_directives<'a>(chars: &mut std::iter::Peekable<std::str::CharIndices<'a>>, text: &'a str) -> Option<usize> {
+    let mut count = 0usize;
+    loop {
+        let _ = skip_trivia(chars, false);
+        let Some(&(_, '@')) = chars.peek() else { return Some(count) };
+        chars.next();
+        let _ = skip_trivia(chars, false);
+        read_name(chars, text)?;
+        let _ = skip_trivia(chars, false);
+        if chars.peek().is_some_and(|&(_, c)| c == '(') {
+            skip_parens(chars, text)?;
+        }
+        count += 1;
+    }
+}
+
+/// Step over a `{ ... }` selection or field block; requires closing `}` and at least one named member/hole.
+fn skip_braced_block<'a>(chars: &mut std::iter::Peekable<std::str::CharIndices<'a>>, text: &'a str) -> Option<()> {
+    chars.peek().filter(|&&(_, c)| c == '{')?;
+    let mut depth = 0usize;
+    let mut selected = false;
+    while let Some(&(_, c)) = chars.peek() {
+        match c {
+            '{' => depth = depth.checked_add(1)?,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    chars.next();
+                    return selected.then_some(());
+                }
+            }
+            '"' => {
+                skip_string(chars, text)?;
+                continue;
+            }
+            '#' => {
+                for (_, d) in chars.by_ref() {
+                    if d == '\n' || d == '\r' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            c if is_name_start(c) || c == HOLE => selected = true,
+            _ => {}
+        }
+        chars.next();
+    }
+    None
+}
+
+/// Step over a `scalar Name Directives?` tail after the `scalar` keyword.
+fn skip_scalar_def<'a>(chars: &mut std::iter::Peekable<std::str::CharIndices<'a>>, text: &'a str) -> Option<()> {
+    let _ = skip_trivia(chars, false);
+    read_name(chars, text)?;
+    skip_directives(chars, text).map(|_| ())
+}
+
+/// Step over a `union Name Directives? (= |? Type (| Type)*)?` tail after the `union` keyword.
+fn skip_union_def<'a>(chars: &mut std::iter::Peekable<std::str::CharIndices<'a>>, text: &'a str) -> Option<()> {
+    let _ = skip_trivia(chars, false);
+    read_name(chars, text)?;
+    skip_directives(chars, text)?;
+    let _ = skip_trivia(chars, false);
+    if chars.peek().is_some_and(|&(_, c)| c == '=') {
+        chars.next();
+        let _ = skip_trivia(chars, false);
+        if chars.peek().is_some_and(|&(_, c)| c == '|') {
+            chars.next();
+            let _ = skip_trivia(chars, false);
+        }
+        read_name(chars, text)?;
+        loop {
+            let _ = skip_trivia(chars, false);
+            if chars.peek().is_some_and(|&(_, c)| c == '|') {
+                chars.next();
+                let _ = skip_trivia(chars, false);
+                read_name(chars, text)?;
+            } else {
+                break;
+            }
+        }
+    }
+    Some(())
+}
+
+/// Step over a `directive @Name (Args)? repeatable? on |? Loc (| Loc)*` tail after `directive`.
+fn skip_directive_def<'a>(chars: &mut std::iter::Peekable<std::str::CharIndices<'a>>, text: &'a str) -> Option<()> {
+    let _ = skip_trivia(chars, false);
+    chars.peek().filter(|&&(_, c)| c == '@')?;
+    chars.next();
+    let _ = skip_trivia(chars, false);
+    read_name(chars, text)?;
+    let _ = skip_trivia(chars, false);
+    if chars.peek().is_some_and(|&(_, c)| c == '(') {
+        skip_parens(chars, text)?;
+        let _ = skip_trivia(chars, false);
+    }
+    let mut word = read_name(chars, text)?;
+    if word == "repeatable" {
+        let _ = skip_trivia(chars, false);
+        word = read_name(chars, text)?;
+    }
+    if word != "on" {
+        return None;
+    }
+    let _ = skip_trivia(chars, false);
+    if chars.peek().is_some_and(|&(_, c)| c == '|') {
+        chars.next();
+        let _ = skip_trivia(chars, false);
+    }
+    read_name(chars, text)?;
+    loop {
+        let _ = skip_trivia(chars, false);
+        if chars.peek().is_some_and(|&(_, c)| c == '|') {
+            chars.next();
+            let _ = skip_trivia(chars, false);
+            read_name(chars, text)?;
+        } else {
+            break;
+        }
+    }
+    Some(())
+}
+
+/// Step over an `extend ...` type-system extension after the `extend` keyword.
+fn skip_extend_def<'a>(chars: &mut std::iter::Peekable<std::str::CharIndices<'a>>, text: &'a str) -> Option<()> {
+    let _ = skip_trivia(chars, false);
+    match read_name(chars, text)? {
+        "scalar" => skip_scalar_def(chars, text),
+        "union" => skip_union_def(chars, text),
+        "schema" => {
+            let dirs = skip_directives(chars, text)?;
+            let _ = skip_trivia(chars, false);
+            if chars.peek().is_some_and(|&(_, c)| c == '{') { skip_braced_block(chars, text) } else { (dirs > 0).then_some(()) }
+        }
+        "type" | "interface" | "input" | "enum" => {
+            let _ = skip_trivia(chars, false);
+            read_name(chars, text)?;
+            let _ = skip_trivia(chars, false);
+            let mut has_clause = false;
+            let mut lookahead = chars.clone();
+            if read_name(&mut lookahead, text) == Some("implements") {
+                *chars = lookahead;
+                has_clause = true;
+                let _ = skip_trivia(chars, false);
+                if chars.peek().is_some_and(|&(_, c)| c == '&') {
+                    chars.next();
+                    let _ = skip_trivia(chars, false);
+                }
+                read_name(chars, text)?;
+                loop {
+                    let _ = skip_trivia(chars, false);
+                    if chars.peek().is_some_and(|&(_, c)| c == '&') {
+                        chars.next();
+                        let _ = skip_trivia(chars, false);
+                        read_name(chars, text)?;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            let dirs = skip_directives(chars, text)?;
+            let _ = skip_trivia(chars, false);
+            if chars.peek().is_some_and(|&(_, c)| c == '{') { skip_braced_block(chars, text) } else { (has_clause || dirs > 0).then_some(()) }
+        }
+        _ => None,
+    }
 }
 
 /// Read the definitions of a GraphQL document. `None` when the text isn't one: it must start with a
@@ -52,49 +300,51 @@ pub fn read_document(text: &str, allow_shorthand: bool) -> Option<Document> {
     let mut chars = text.char_indices().peekable();
     let mut definitions = 0usize;
     loop {
-        // Between definitions.
-        let mut hole_here = false;
-        while let Some(&(_, c)) = chars.peek() {
-            if c == HOLE {
-                hole_here = true;
-                chars.next();
-            } else if c == '#' {
-                for (_, c) in chars.by_ref() {
-                    if c == '\n' || c == '\r' {
-                        break;
-                    }
-                }
-            } else if c.is_whitespace() || c == ',' || c == '\u{feff}' {
-                chars.next();
-            } else {
-                break;
-            }
-        }
-        if hole_here {
+        if skip_trivia(&mut chars, true) {
             doc.open_ended = true;
         }
-        let Some(&(start, first)) = chars.peek() else { break };
+        let Some(&(_, first)) = chars.peek() else { break };
+        let had_description = if first == '"' {
+            skip_string(&mut chars, text)?;
+            let _ = skip_trivia(&mut chars, false);
+            true
+        } else {
+            false
+        };
+        let &(_, first) = chars.peek()?;
         let (kind, is_operation) = if first == '{' {
-            if !allow_shorthand {
+            if !allow_shorthand || had_description {
                 return None;
             }
             ("query", true)
         } else if is_name_start(first) {
-            let mut end = start;
-            while let Some(&(i, c)) = chars.peek() {
-                if !is_name_char(c) {
-                    break;
-                }
-                end = i + c.len_utf8();
-                chars.next();
-            }
-            match text.get(start..end)? {
+            match read_name(&mut chars, text)? {
                 "query" => ("query", true),
                 "mutation" => ("mutation", true),
                 "subscription" => ("subscription", true),
                 "fragment" => ("fragment", false),
-                // Type definitions and the like are GraphQL too, but say nothing a client calls.
-                "type" | "schema" | "extend" | "input" | "interface" | "union" | "enum" | "scalar" | "directive" => ("other", false),
+                "scalar" => {
+                    skip_scalar_def(&mut chars, text)?;
+                    definitions += 1;
+                    continue;
+                }
+                "union" => {
+                    skip_union_def(&mut chars, text)?;
+                    definitions += 1;
+                    continue;
+                }
+                "directive" => {
+                    skip_directive_def(&mut chars, text)?;
+                    definitions += 1;
+                    continue;
+                }
+                "extend" if !had_description => {
+                    skip_extend_def(&mut chars, text)?;
+                    definitions += 1;
+                    continue;
+                }
+                // Braced type-system definitions are GraphQL too, though they name no client operation.
+                "type" | "schema" | "input" | "interface" | "enum" => ("other", false),
                 _ => return None,
             }
         } else {
@@ -106,7 +356,7 @@ pub fn read_document(text: &str, allow_shorthand: bool) -> Option<Document> {
         let mut name_is_hole = false;
         let mut saw_anything = false;
         let mut parens = 0usize;
-        while let Some(&(i, c)) = chars.peek() {
+        while let Some(&(_, c)) = chars.peek() {
             // Ignored tokens may separate any header tokens, including the name.
             if c == '#' {
                 for (_, d) in chars.by_ref() {
@@ -135,15 +385,7 @@ pub fn read_document(text: &str, allow_shorthand: bool) -> Option<Document> {
                 _ => {}
             }
             if !saw_anything && is_name_start(c) && is_operation {
-                let mut end = i;
-                while let Some(&(j, d)) = chars.peek() {
-                    if !is_name_char(d) {
-                        break;
-                    }
-                    end = j + d.len_utf8();
-                    chars.next();
-                }
-                name = text.get(i..end).map(String::from);
+                name = read_name(&mut chars, text).map(String::from);
                 saw_anything = true;
                 // A name running straight into run-time text isn't all of the name.
                 if chars.peek().is_some_and(|&(_, d)| d == HOLE) {
@@ -157,42 +399,7 @@ pub fn read_document(text: &str, allow_shorthand: bool) -> Option<Document> {
             }
             chars.next();
         }
-        // The selection set: it must close, and must select something.
-        chars.peek().filter(|&&(_, c)| c == '{')?;
-        let mut depth = 0usize;
-        let mut selected = false;
-        let mut closed = false;
-        while let Some(&(_, c)) = chars.peek() {
-            match c {
-                '{' => depth = depth.checked_add(1)?,
-                '}' => {
-                    depth = depth.checked_sub(1)?;
-                    if depth == 0 {
-                        chars.next();
-                        closed = true;
-                        break;
-                    }
-                }
-                '"' => {
-                    skip_string(&mut chars, text)?;
-                    continue;
-                }
-                '#' => {
-                    for (_, d) in chars.by_ref() {
-                        if d == '\n' || d == '\r' {
-                            break;
-                        }
-                    }
-                    continue;
-                }
-                c if is_name_start(c) || c == HOLE => selected = true,
-                _ => {}
-            }
-            chars.next();
-        }
-        if !closed || !selected {
-            return None;
-        }
+        skip_braced_block(&mut chars, text)?;
         definitions += 1;
         if is_operation && doc.operations.len() < MAX_DOC_OPERATIONS {
             doc.operations.push(DocOperation { kind, literal: !name_is_hole, name: if name_is_hole { None } else { name } });
@@ -208,7 +415,12 @@ fn skip_string(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>, text:
         chars.next();
         chars.next();
         let mut quotes = 0;
-        for (_, c) in chars.by_ref() {
+        while let Some((i, c)) = chars.next() {
+            if c == '\\' && text.get(i..).is_some_and(|rest| rest.starts_with("\\\"\"\"")) {
+                chars.nth(2);
+                quotes = 0;
+                continue;
+            }
             quotes = if c == '"' { quotes + 1 } else { 0 };
             if quotes == 3 {
                 return Some(());
@@ -219,10 +431,10 @@ fn skip_string(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>, text:
     let mut escaped = false;
     for (_, c) in chars.by_ref() {
         match c {
+            '\r' | '\n' => return None,
             _ if escaped => escaped = false,
             '\\' => escaped = true,
             '"' => return Some(()),
-            '\n' => return None,
             _ => {}
         }
     }
@@ -241,10 +453,21 @@ fn document_start(text: &str) -> &str {
 }
 
 /// Could this text be a whole document? A quick test before the real read, on every string.
-/// A document may begin with a comment, as a generated client often writes one.
+/// A document may begin with a comment or GraphQL description string.
 pub fn may_be_document(text: &str) -> bool {
-    let t = document_start(text);
-    (t.starts_with("query") || t.starts_with("mutation") || t.starts_with("subscription") || t.starts_with("fragment")) && t.contains('{')
+    if !text.contains('{') {
+        return false;
+    }
+    let mut t = document_start(text);
+    if t.starts_with('"') {
+        let mut chars = t.char_indices().peekable();
+        if skip_string(&mut chars, t).is_none() {
+            return false;
+        }
+        let after = chars.peek().map_or(t.len(), |&(i, _)| i);
+        t = document_start(t.get(after..).unwrap_or(""));
+    }
+    DOC_KEYWORDS.iter().any(|kw| t.strip_prefix(kw).is_some_and(|rest| !rest.chars().next().is_some_and(is_name_char)))
 }
 
 /// What a URL says about an API, as `(protocol, procedures)`: a GraphQL endpoint, or a tRPC one with

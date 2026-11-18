@@ -89,8 +89,11 @@ fn target_dir_of(run: craft_anything_platform::process::Process) -> Option<PathB
     meta.get("target_directory")?.as_str().map(PathBuf::from)
 }
 
-/// The program `app`'s manifests name (see [`built_program`]) in the first of `targets` that has
-/// it; with no name, the newest program in a target directory inside `app`.
+/// The program `app`'s manifests name (see [`built_program`]): its newest build in `targets`.
+/// A target directory outside `app` (`CARGO_TARGET_DIR`, a shared or parent folder) holds other
+/// projects' programs too, so a program there counts only when Cargo's record of its build names
+/// `app`'s sources ([`built_from`]). With no name, the newest program in a target directory inside
+/// `app`.
 fn program_in(app: &Path, targets: &[PathBuf]) -> Option<PathBuf> {
     let built = |target: &Path| -> Vec<PathBuf> {
         ["release", "debug"]
@@ -114,7 +117,75 @@ fn program_in(app: &Path, targets: &[PathBuf]) -> Option<PathBuf> {
         // project's own target directories may supply one.
         return targets.iter().filter(|target| inside_app(app, target)).find_map(|target| newest(built(target), None));
     }
-    wanted.iter().find_map(|name| targets.iter().find_map(|target| newest(built(target), Some(name.as_str()))))
+    wanted.iter().find_map(|name| {
+        let named = |p: &PathBuf| p.file_stem().and_then(|s| s.to_str()) == Some(name.as_str());
+        // The name first: a shared folder may hold many projects' programs, and only one with
+        // this name needs its record read.
+        let ours: Vec<PathBuf> = targets
+            .iter()
+            .flat_map(|target| {
+                let inside = inside_app(app, target);
+                built(target).into_iter().filter(named).filter(move |p| inside || built_from(app, p))
+            })
+            .collect();
+        newest(ours, Some(name.as_str()))
+    })
+}
+
+/// Cargo's dep-info file beside a program it built (`<target>/<profile>/<name>.d`).
+fn dep_info_of(program: &Path) -> Option<PathBuf> {
+    let name = if cfg!(windows) { program.file_stem()? } else { program.file_name()? };
+    let mut file = name.to_os_string();
+    file.push(".d");
+    Some(program.with_file_name(file))
+}
+
+/// Largest dep-info file read; a big workspace's lists a few hundred KiB of paths.
+const MAX_DEP_INFO: u64 = 8 << 20;
+
+/// Whether `program` was built from `app`: Cargo's dep-info file beside it lists the sources it
+/// was built from, by absolute path, and one of them is in `app`. A program with no such file (or
+/// one listing another project's sources) isn't taken for `app`'s.
+fn built_from(app: &Path, program: &Path) -> bool {
+    let Some(file) = dep_info_of(program) else { return false };
+    use std::io::Read;
+    if !std::fs::metadata(&file).is_ok_and(|m| m.is_file()) {
+        return false;
+    }
+    let mut bytes = Vec::new();
+    let read = std::fs::File::open(&file).and_then(|f| f.take(MAX_DEP_INFO + 1).read_to_end(&mut bytes));
+    if read.is_err() || bytes.len() as u64 > MAX_DEP_INFO {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let fold = |s: &str| if cfg!(windows) { s.to_lowercase().replace('/', "\\") } else { s.to_string() };
+    let text = fold(&text);
+    let mut roots = vec![crate::workspace::normalized(&crate::workspace::absolute(app))];
+    if let Ok(real) = app.canonicalize() {
+        roots.push(real);
+    }
+    roots.iter().any(|root| {
+        let root = root.display().to_string();
+        let root = fold(root.strip_prefix(r"\\?\").unwrap_or(&root));
+        let root = root.trim_end_matches(['/', '\\']);
+        // Make writes a space in a path as `\ `.
+        !root.is_empty()
+            && [root.to_string(), root.replace(' ', "\\ ")].iter().any(|r| {
+                text.match_indices(r.as_str())
+                    .any(|(at, _)| starts_a_path(&text, at) && text.get(at + r.len()..).is_some_and(|rest| rest.starts_with(['/', '\\'])))
+            })
+    })
+}
+
+/// Whether a path in a dep-info file starts at byte `at`: at the start of a line, or after a space
+/// that separates paths (not one escaped as `\ ` inside a path).
+fn starts_a_path(text: &str, at: usize) -> bool {
+    let Some(before) = text.get(..at) else { return false };
+    match before.chars().next_back() {
+        None | Some('\n' | '\r' | '\t') => true,
+        Some(' ') => before.strip_suffix(' ').is_some_and(|b| !b.ends_with('\\')),
+        _ => false,
+    }
 }
 
 /// Whether `path` is inside `app`, after resolving both against the working directory.
@@ -278,6 +349,21 @@ pub fn absolute_program(program: &Path) -> PathBuf {
 /// Other toolchains may declare an interpreted/runner launch when no packaged program exists.
 pub fn launch(app: &Path, godot: Option<&Path>) -> Option<(PathBuf, Vec<String>)> {
     launch_with(app, godot, built_program)
+}
+
+/// [`launch`] for a copy of a build (a pin): a Rust program is looked for only in target
+/// directories inside `app`, never in `CARGO_TARGET_DIR` or a Cargo setting above the copy, which
+/// name where the project builds now, not what was copied.
+pub fn launch_inside(app: &Path, godot: Option<&Path>) -> Option<(PathBuf, Vec<String>)> {
+    launch_with(app, godot, built_program_inside)
+}
+
+fn built_program_inside(app: &Path) -> Option<PathBuf> {
+    if !app.join("Cargo.toml").is_file() {
+        return None;
+    }
+    let targets: Vec<PathBuf> = cargo_target_dirs(app, None).into_iter().filter(|t| inside_app(app, t)).collect();
+    program_in(app, &targets)
 }
 
 /// [`launch`] for the moment of starting: a Rust build's program is found with
@@ -533,6 +619,7 @@ mod target_dir_tests {
         std::fs::create_dir_all(shared.join("debug")).unwrap();
         let program = shared.join("debug").join(exe("cargo-target-probe"));
         make_program(&program);
+        dep_info(&program, &[&app.join("src/main.rs")]);
         assert_eq!(built_program_in(&app, Some(shared.as_os_str())), Some(program));
     }
 
@@ -551,6 +638,7 @@ mod target_dir_tests {
         std::fs::create_dir_all(&debug).unwrap();
         let program = debug.join(exe("cargo-target-probe"));
         make_program(&program);
+        dep_info(&program, &[&app.join("src/main.rs")]);
         assert_eq!(cargo_target_dirs(&app, None).first(), Some(&d.path().join("out")), "the config above the relative app is found");
         assert_eq!(built_program_in(&app, None), Some(program), "and its program is found");
     }
@@ -616,6 +704,7 @@ mod target_dir_tests {
         assert_eq!(real(answer.clone()), real(Some(from_env.clone())));
         let program = from_env.join("debug").join(exe("snake"));
         make_program(&program);
+        dep_info(&program, &[&app.join("src/main.rs")]);
         assert_eq!(built_program_in(&app, None), None, "the file lookup doesn't see it");
         assert_eq!(real(built_program_from(&app, answer, None)), real(Some(program)));
 
@@ -641,6 +730,7 @@ mod target_dir_tests {
         assert_eq!(real(answer.clone()), real(Some(root.join("target"))));
         let program = debug.join(exe("snake"));
         make_program(&program);
+        dep_info(&program, &[&app.join("src/main.rs")]);
         assert_eq!(built_program_in(&app, None), None, "the file lookup doesn't look above the project");
         assert_eq!(real(built_program_from(&app, answer, None)), real(Some(program)));
     }
@@ -692,5 +782,52 @@ mod target_dir_tests {
         let cargo_says = target.canonicalize().unwrap().join("target");
         assert_eq!(under_app(&link, cargo_says.clone()), crate::workspace::normalized(&link.join("target")));
         assert_eq!(built_program_from(&link, Some(cargo_says), None), Some(crate::workspace::normalized(&link.join("target/debug/mine"))));
+    }
+
+    /// What Cargo writes beside a program it builds (`<name>.d`): the program, then its sources.
+    fn dep_info(program: &Path, sources: &[&Path]) {
+        let list: Vec<String> = sources.iter().map(|s| std::path::absolute(s).unwrap().display().to_string().replace(' ', "\\ ")).collect();
+        std::fs::write(program.with_extension("d"), format!("{}: {}\n", program.display(), list.join(" "))).unwrap();
+    }
+
+    fn age(path: &Path, secs_ago: u64) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(when).unwrap();
+    }
+
+    /// A build folder shared by several projects (`CARGO_TARGET_DIR`) holds every project's
+    /// programs. One with the project's name counts only when Cargo's record of it names the
+    /// project's sources; of the programs that count, the newest is started.
+    #[test]
+    fn a_shared_target_directory_gives_only_this_projects_program() {
+        let d = tempfile::tempdir().unwrap();
+        let app = d.path().join("my app");
+        package(&app, "snake");
+        let own = app.join("target").join("release").join(exe("snake"));
+        std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+        make_program(&own);
+        age(&own, 600);
+        let shared = d.path().join("shared");
+        std::fs::create_dir_all(shared.join("debug")).unwrap();
+        let other = shared.join("debug").join(exe("snake"));
+        make_program(&other);
+        let env = Some(shared.as_os_str());
+        assert_eq!(built_program_in(&app, env), Some(own.clone()), "another build of that name, with no record, isn't ours");
+        assert_eq!(built_program_from(&app, Some(shared.clone()), None), Some(own.clone()), "nor when Cargo names that folder");
+        let elsewhere = d.path().join("my app2");
+        package(&elsewhere, "snake");
+        dep_info(&other, &[&elsewhere.join("src/main.rs")]);
+        assert_eq!(built_program_in(&app, env), Some(own.clone()), "a record of another project's sources");
+        // The app's path without its root or drive, so it stays relative on every system.
+        let suffix: PathBuf = std::path::absolute(&app).unwrap().components().filter(|c| matches!(c, std::path::Component::Normal(_))).collect();
+        let copy_elsewhere = d.path().join("backup").join(suffix).join("src/main.rs");
+        dep_info(&other, &[&copy_elsewhere]);
+        assert_eq!(built_program_in(&app, env), Some(own.clone()), "the same path under another folder isn't the project");
+        dep_info(&other, &[&app.join("src/main.rs")]);
+        assert_eq!(built_program_in(&app, env), Some(other.clone()), "the project's own newer build");
+        age(&other, 1200);
+        assert_eq!(built_program_in(&app, env), Some(own.clone()), "the newer build wins, wherever it is");
+        std::fs::remove_file(&own).unwrap();
+        assert_eq!(built_program_in(&app, env), Some(other), "an older build of its own is still its own");
     }
 }

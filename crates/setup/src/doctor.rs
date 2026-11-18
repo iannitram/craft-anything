@@ -118,15 +118,15 @@ pub fn doctor(host: &Host, req: &DoctorRequest) -> DoctorReport {
             skill_dirs.push(c.skills_dir.clone());
         }
         let setup_cmd = format!("craft-anything-cli setup --client {}", c.id);
-        let text = match std::fs::read_to_string(&c.config) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        let text = match crate::plan::read_text(&c.config) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
                 let st = if explicit { CheckStatus::Fail } else { CheckStatus::Info };
                 checks.push(Check::new(name, st, format!("{} is installed but not connected.", c.display)).fix(setup_cmd));
                 continue;
             }
             Err(e) => {
-                checks.push(Check::new(name, CheckStatus::Fail, format!("Can't read {}: {e}", c.config.display())).fix("Check the file's permissions."));
+                checks.push(Check::new(name, CheckStatus::Fail, e.reason(&c.config)).fix(e.fix(&c.config, &format!("run {setup_cmd}"))));
                 continue;
             }
         };
@@ -373,8 +373,8 @@ mod engine_check_tests {
         let check = ghidra_java(&c).unwrap();
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.message.contains(&set.display().to_string()), "{}", check.message);
-        // engine:java still reports the Java on PATH (here: none, as only configured paths count).
-        assert!(c.iter().any(|x| x.name == "engine:java" && x.status == CheckStatus::Info));
+        // The other Java tools run on it too, so engine:java finds it.
+        assert!(c.iter().any(|x| x.name == "engine:java" && x.status == CheckStatus::Ok), "{c:?}");
 
         // None set: the JAVA_HOME this program has.
         s.engines.ghidra.java_home = None;

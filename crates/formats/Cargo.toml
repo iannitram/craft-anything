@@ -10,7 +10,21 @@ publish = false
 workspace = true
 
 [dependencies]
+craft-evm = { workspace = true }
+craft-java-class = { workspace = true }
+craft-pcap = { workspace = true }
+craft-wasm = { workspace = true }
+craft-dex = { workspace = true }
+craft-har = { workspace = true }
+craft-jsonc = { workspace = true }
+craft-sourcemap = { workspace = true }
+craft-pe = { workspace = true }
+craft-elf = { workspace = true }
+craft-macho = { workspace = true }
+craft-mime = { workspace = true }
 craft-plist = { workspace = true }
+craft-zip = { workspace = true }
+craft-tar = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -19,8 +33,6 @@ object = { workspace = true }
 rustc-demangle = { workspace = true }
 semver = "1"
 sha2 = { workspace = true }
-wasmparser = { workspace = true }
-wasmprinter = { workspace = true }
 # Signature verification (pure Rust, verified wasm32-unknown-unknown-safe).
 rsa = { version = "0.9", default-features = false, features = ["sha2"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "sha256"] }
@@ -32,4 +44,6 @@ bzip2-rs = "0.1"
 ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+wasmparser = { workspace = true }
+wasmprinter = { workspace = true }
 craft-anything-testkit = { workspace = true }

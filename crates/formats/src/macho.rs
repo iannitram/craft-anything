@@ -14,68 +14,21 @@ const MAX_INDIRECT: usize = 500_000;
 const MAX_OBJC: usize = 50_000;
 const MAX_METHODS: usize = 4096;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FatSlice {
-    pub arch: String,
-    pub cputype: u32,
-    pub cpusubtype: u32,
-    pub offset: u64,
-    pub size: u64,
-    pub align: u32,
-}
+pub(crate) use craft_macho::load_command_min_size;
+pub use craft_macho::{FatSlice, cpu_name, load_command_name};
+use craft_macho::{nibble_version, unixthread_pc};
 
-pub fn cpu_name(cputype: u32, sub: u32) -> String {
-    match cputype {
-        7 => "i386".into(),
-        0x0100_0007 if sub & 0x00ff_ffff == 8 => "x86_64h".into(),
-        0x0100_0007 => "x86_64".into(),
-        12 => "arm".into(),
-        0x0100_000c => {
-            if sub & 0xff == 2 {
-                "arm64e".into()
-            } else {
-                "arm64".into()
-            }
-        }
-        0x0200_000c => "arm64_32".into(),
-        18 => "ppc".into(),
-        0x0100_0012 => "ppc64".into(),
-        other => format!("cpu{other:#x}"),
-    }
-}
-
-/// The slices of a universal (fat) binary.
+/// The slices of a universal binary, preserving the app error contract.
 pub fn fat_slices(data: &[u8]) -> Result<Vec<FatSlice>, FormatError> {
-    let r = Reader::new(data);
-    let magic = r.u32_be(0).ok_or_else(|| FormatError::Truncated("fat header".into()))?;
-    let wide = match magic {
-        0xcafe_babe => false,
-        0xcafe_babf => true,
-        _ => return Err(FormatError::Malformed("not a universal binary".into())),
-    };
-    let n = r.u32_be(4).ok_or_else(|| FormatError::Truncated("fat header".into()))? as usize;
-    if n == 0 || n > 64 {
-        return Err(FormatError::Malformed(format!("{n} slices (Java class files share this magic)")));
-    }
-    let mut out = Vec::new();
-    for i in 0..n {
-        let s = if wide {
-            let o = 8 + i * 32;
-            (r.u32_be(o), r.u32_be(o + 4), r.u64_be(o + 8), r.u64_be(o + 16), r.u32_be(o + 24))
-        } else {
-            let o = 8 + i * 20;
-            (r.u32_be(o), r.u32_be(o + 4), r.u32_be(o + 8).map(u64::from), r.u32_be(o + 12).map(u64::from), r.u32_be(o + 16))
-        };
-        let (Some(cpu), Some(sub), Some(offset), Some(size), Some(align)) = s else {
-            return Err(FormatError::Truncated("fat arch table".into()));
-        };
-        if offset.checked_add(size).is_none_or(|end| end > data.len() as u64) {
-            return Err(FormatError::Truncated(format!("slice {i} runs past the end of the file")));
-        }
-        out.push(FatSlice { arch: cpu_name(cpu, sub), cputype: cpu, cpusubtype: sub, offset, size, align });
-    }
-    Ok(out)
+    craft_macho::fat_slices(data).map_err(|error| match error {
+        craft_macho::MachoError::Truncated(context) => FormatError::Truncated(context),
+        craft_macho::MachoError::Malformed(context) => FormatError::Malformed(context),
+    })
 }
+
+#[cfg(test)]
+#[path = "macho_legacy.rs"]
+mod legacy;
 
 #[derive(Debug, Clone)]
 struct MSection {
@@ -93,86 +46,6 @@ struct MSegment {
     vmaddr: u64,
     fileoff: u64,
     filesize: u64,
-}
-
-pub fn load_command_name(cmd: u32) -> String {
-    match cmd {
-        0x1 => "LC_SEGMENT",
-        0x2 => "LC_SYMTAB",
-        0x5 => "LC_UNIXTHREAD",
-        0xb => "LC_DYSYMTAB",
-        0xc => "LC_LOAD_DYLIB",
-        0xd => "LC_ID_DYLIB",
-        0xe => "LC_LOAD_DYLINKER",
-        0x19 => "LC_SEGMENT_64",
-        0x1b => "LC_UUID",
-        0x1d => "LC_CODE_SIGNATURE",
-        0x1e => "LC_SEGMENT_SPLIT_INFO",
-        0x20 => "LC_LAZY_LOAD_DYLIB",
-        0x21 => "LC_ENCRYPTION_INFO",
-        0x22 => "LC_DYLD_INFO",
-        0x8000_0022 => "LC_DYLD_INFO_ONLY",
-        0x24 => "LC_VERSION_MIN_MACOSX",
-        0x25 => "LC_VERSION_MIN_IPHONEOS",
-        0x26 => "LC_FUNCTION_STARTS",
-        0x29 => "LC_DATA_IN_CODE",
-        0x2a => "LC_SOURCE_VERSION",
-        0x2c => "LC_ENCRYPTION_INFO_64",
-        0x32 => "LC_BUILD_VERSION",
-        0x8000_0018 => "LC_LOAD_WEAK_DYLIB",
-        0x8000_001c => "LC_RPATH",
-        0x8000_001f => "LC_REEXPORT_DYLIB",
-        0x8000_0028 => "LC_MAIN",
-        0x8000_0033 => "LC_DYLD_EXPORTS_TRIE",
-        0x8000_0034 => "LC_DYLD_CHAINED_FIXUPS",
-        other => return format!("{other:#x}"),
-    }
-    .into()
-}
-
-/// Fixed bytes required before decoding a known load command's fields.
-pub(crate) fn load_command_min_size(cmd: u32) -> usize {
-    match cmd {
-        0x1 => 56,
-        0x2 | 0x1b | 0x2c | 0x32 | 0x8000_0028 => 24,
-        0x5 => 16,
-        0xb => 80,
-        0xc | 0xd | 0x20 | 0x8000_0018 | 0x8000_001f | 0x8000_0023 => 24,
-        0xe | 0xf | 0x12 | 0x13 | 0x14 | 0x15 | 0x27 | 0x8000_001c => 12,
-        0x19 => 72,
-        0x1d | 0x1e | 0x24 | 0x25 | 0x26 | 0x29 | 0x2a | 0x2b | 0x2e | 0x2f | 0x30 | 0x8000_0033 | 0x8000_0034 => 16,
-        0x21 => 20,
-        0x22 | 0x8000_0022 => 48,
-        _ => 8,
-    }
-}
-
-fn nibble_version(v: u32) -> String {
-    format!("{}.{}.{}", v >> 16, (v >> 8) & 0xff, v & 0xff)
-}
-
-// A thread command can carry several flavor/count/state records. Counts are 32-bit words.
-fn unixthread_pc(data: &[u8], cpu: u32, is64: bool) -> Option<u64> {
-    let r = Reader::new(data);
-    let mut pos = 0usize;
-    for _ in 0..MAX_CMDS {
-        let flavor = r.u32_le(pos)?;
-        let count = r.u32_le(pos.checked_add(4)?)?;
-        let state = pos.checked_add(8)?;
-        let size = usize::try_from(count).ok()?.checked_mul(4)?;
-        let record = Reader::new(r.slice(state, size)?);
-        let pc = match (cpu, is64, flavor) {
-            (0x0100_0007, true, 4) if count >= 42 => record.u64_le(16 * 8),
-            (0x0100_000c, true, 6) if count >= 68 => record.u64_le(32 * 8),
-            (7, false, 1) if count >= 16 => record.u32_le(10 * 4).map(u64::from),
-            _ => None,
-        };
-        if pc.is_some() {
-            return pc;
-        }
-        pos = state.checked_add(size)?;
-    }
-    None
 }
 
 /// Add Mach-O facts. `data` is the (thin) slice.
@@ -203,7 +76,8 @@ pub fn enrich(data: &[u8], b: &mut Binary) {
     let mut thread_pc = None;
     let mut fstarts = None;
     let mut cmds_json = Vec::new();
-    let mut libs = Vec::new();
+    // Preserve each dependency's ordinal even when its load command has no usable path.
+    let mut dylib_ordinals = Vec::new();
     for _ in 0..ncmds.min(MAX_CMDS) {
         if pos.checked_add(8).is_none_or(|end| end > limit) {
             b.warnings.push("load command header runs past sizeofcmds; stopped".into());
@@ -226,7 +100,11 @@ pub fn enrich(data: &[u8], b: &mut Binary) {
             cmds_json.push(json!({"cmd": load_command_name(cmd), "size": size}));
         }
         let minimum = load_command_min_size(cmd);
+        let is_dylib = matches!(cmd, 0xc | 0x20 | 0x8000_0018 | 0x8000_001f | 0x8000_0023);
         if size < minimum {
+            if is_dylib {
+                dylib_ordinals.push(None);
+            }
             b.warnings.push(format!("{} needs at least {minimum} bytes; skipped its fields", load_command_name(cmd)));
             pos = end;
             continue;
@@ -237,7 +115,7 @@ pub fn enrich(data: &[u8], b: &mut Binary) {
             if o < minimum || o >= size {
                 return None;
             }
-            r.cstr(pos + o, size - o)
+            Some(std::ffi::CStr::from_bytes_until_nul(r.slice(pos + o, size - o)?).ok()?.to_string_lossy().into_owned())
         };
         match cmd {
             0x19 | 0x1 => {
@@ -274,11 +152,7 @@ pub fn enrich(data: &[u8], b: &mut Binary) {
                     Some((r.u32_le(pos + 8).unwrap_or(0), r.u32_le(pos + 12).unwrap_or(0), r.u32_le(pos + 16).unwrap_or(0), r.u32_le(pos + 20).unwrap_or(0)))
             }
             0xb => indirect = Some((r.u32_le(pos + 56).unwrap_or(0), r.u32_le(pos + 60).unwrap_or(0))),
-            0xc | 0x20 | 0x8000_0018 | 0x8000_001f | 0x8000_0023 => {
-                if let Some(s) = str_at(8) {
-                    libs.push(s);
-                }
-            }
+            _ if is_dylib => dylib_ordinals.push(str_at(8)),
             0xd => {
                 if let Some(s) = str_at(8) {
                     b.info.insert("install_name".into(), s);
@@ -328,7 +202,6 @@ pub fn enrich(data: &[u8], b: &mut Binary) {
         }
         pos = end;
     }
-    b.libraries = libs;
     if b.mitigations.code_signature.is_none() {
         b.mitigations.code_signature = Some(false);
     }
@@ -415,12 +288,12 @@ pub fn enrich(data: &[u8], b: &mut Binary) {
                 }
                 let Some((name, desc)) = sym_name(sym) else { continue };
                 let ord = usize::from(desc >> 8);
-                let library = if ord > 0 && ord < 0xfe { b.libraries.get(ord - 1).cloned() } else { None };
+                let library = if ord > 0 && ord < 0xfe { dylib_ordinals.get(ord - 1).cloned().flatten() } else { None };
                 b.import_slots.push(ImportSlot { addr: s.addr.wrapping_add(i as u64 * entsize), name, library, kind });
             }
         }
     }
-    // Libraries for imports, by two-level namespace ordinal.
+    b.libraries = dylib_ordinals.into_iter().flatten().collect();
     b.details = json!({
         "file_type": match r.u32_le(12) { Some(1) => "object", Some(2) => "execute", Some(6) => "dylib", Some(8) => "bundle", Some(4) => "core", _ => "other" },
         "flags": format!("{header_flags:#x}"),
@@ -880,5 +753,67 @@ mod tests {
         assert!(writable.sections.iter().all(|s| s.read && s.write));
         assert!(writable.sections[1].exec);
         assert!(!writable.sections[2].exec);
+    }
+}
+
+#[cfg(test)]
+mod shared_parity {
+    use super::*;
+    fn compare(data: &[u8]) {
+        match (legacy::fat_slices(data), fat_slices(data)) {
+            (Ok(a), Ok(b)) => assert_eq!(serde_json::to_value(a).unwrap(), serde_json::to_value(b).unwrap()),
+            (Err(a), Err(b)) => assert_eq!(a, b),
+            other => panic!("fat parity mismatch: {other:?}"),
+        }
+    }
+    #[test]
+    fn shared_fat_errors_bounds_and_serialization_match() {
+        for wide in [false, true] {
+            for count in [0u32, 1, 64, 65, u32::MAX] {
+                let mut data = vec![0; 4096];
+                data[..4].copy_from_slice(&if wide { 0xcafe_babfu32 } else { 0xcafe_babeu32 }.to_be_bytes());
+                data[4..8].copy_from_slice(&count.to_be_bytes());
+                compare(&data);
+                for len in 0..150 {
+                    compare(&data[..len]);
+                }
+                for pos in 0..100 {
+                    let old = data[pos];
+                    data[pos] = 255;
+                    compare(&data);
+                    data[pos] = old;
+                }
+            }
+        }
+    }
+    #[test]
+    fn shared_names_and_thread_states_match() {
+        for n in 0..512u32 {
+            for v in [n, n | 0x8000_0000, u32::MAX] {
+                assert_eq!(legacy::load_command_name(v), load_command_name(v));
+                assert_eq!(legacy::load_command_min_size(v), load_command_min_size(v));
+                assert_eq!(legacy::nibble_version(v), nibble_version(v));
+                for cpu in [7, 12, 0x0100_0007, 0x0100_000c, 0x0200_000c, 18, 0x0100_0012, v] {
+                    assert_eq!(legacy::cpu_name(cpu, v), cpu_name(cpu, v));
+                }
+            }
+        }
+        for (cpu, wide, flavor, count) in [(7, false, 1u32, 16u32), (0x0100_0007, true, 4, 42), (0x0100_000c, true, 6, 68)] {
+            let mut data = vec![0; 8 + count as usize * 4];
+            data[..4].copy_from_slice(&flavor.to_le_bytes());
+            data[4..8].copy_from_slice(&count.to_le_bytes());
+            data[8..].fill(31);
+            for len in 0..=data.len() {
+                assert_eq!(legacy::unixthread_pc(&data[..len], cpu, wide), unixthread_pc(&data[..len], cpu, wide));
+            }
+            for records in [4095, 4096] {
+                let mut prefixed = vec![0; records * 8];
+                prefixed.extend_from_slice(&data);
+                assert_eq!(legacy::unixthread_pc(&prefixed, cpu, wide), unixthread_pc(&prefixed, cpu, wide));
+                assert_eq!(unixthread_pc(&prefixed, cpu, wide).is_some(), records == 4095);
+            }
+            data[4..8].fill(255);
+            assert_eq!(legacy::unixthread_pc(&data, cpu, wide), unixthread_pc(&data, cpu, wide));
+        }
     }
 }

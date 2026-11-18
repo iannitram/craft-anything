@@ -16,6 +16,7 @@ Close window	ფანჯრის დახურვა
 Command palette	ბრძანებების პალიტრა
 Context window	კონტექსტის ფანჯარა
 Copy the message	შეტყობინების კოპირება
+Copy the version	ვერსიის კოპირება
 Craft Anything on GitHub	Craft Anything GitHub-ზე
 Default	ნაგულისხმევი
 Drag to give the plan more or less room; double-click to reset	გადაათრიეთ, რომ გეგმას მეტი ან ნაკლები ადგილი დაუთმოთ; ორმაგი დაწკაპუნებით — ჩამოყრა
@@ -338,6 +339,7 @@ Couldn't look through that folder.	იმ საქაღალდის და�
 Couldn't open it.	გახსნა ვერ მოხერხდა.
 Couldn't open the folder.	საქაღალდის გახსნა ვერ მოხერხდა.
 Couldn't open {}: {}	{}-ის გახსნა ვერ მოხერხდა: {}
+Couldn't save your settings.	პარამეტრების შენახვა ვერ მოხერხდა.
 Couldn't start a worker thread: {e}	სამუშაო ნაკადის გაშვება ვერ მოხერხდა: {e}
 Couldn't start it.	გაშვება ვერ მოხერხდა.
 Coverage unknown	დაფარვა უცნობია
@@ -1005,6 +1007,7 @@ Saved in	შენახულია:
 Saves space: copies the program and code, and shares dependencies and media with the project. A shared file rewritten in place changes here too.	ზოგავს ადგილს: აკოპირებს პროგრამასა და კოდს, ხოლო დამოკიდებულებებსა და მედიას პროექტთან იზიარებს. ადგილზე გადაწერილი საერთო ფაილი აქაც შეიცვლება.
 Say what you want	თქვით, რა გინდათ
 Say what you want first.	ჯერ თქვით, რა გინდათ.
+This applies once you choose something to recreate above.	ეს მოქმედებს, როცა ზემოთ აირჩევთ, რისი ხელახლა შექმნა გსურთ.
 Say what you want to make, or drop an app or file on the window to look inside it. Everything runs in Clean room mode unless you switch on Deep.	თქვით, რისი შექმნა გსურთ, ან ჩააგდეთ აპი ან ფაილი ფანჯარაზე, რომ მის შიგნით ჩაიხედოთ. ყველაფერი სუფთა ოთახის რეჟიმში მუშაობს, სანამ ღრმა რეჟიმს არ ჩართავთ.
 Screenshot	ეკრანის ანაბეჭდი
 Screenshot a page	გვერდის ეკრანის ანაბეჭდი
@@ -1208,6 +1211,7 @@ Use the projects folder	პროექტების საქაღალდ�
 Use this	ამის გამოყენება
 Use {name}	{name}-ის გამოყენება
 Value flow	მნიშვნელობების ნაკადი
+About	შესახებ
 Version	ვერსია
 View	ხედი
 Waiting	ელოდება
@@ -1493,3 +1497,8 @@ You're up to date.	უახლეს ვერსიას იყენებ�
 Forget a website sign-in	ვებსაიტზე შესვლის დავიწყება
 Sign in to a website	ვებსაიტზე შესვლა
 Some shared files could not be hard-linked and were copied instead ({size}).	ზოგიერთი საერთო ფაილი მყარი ბმულით ვერ დაკავშირდა და დაკოპირდა ({size}).
+This server lists several chat models. Choose one:	ეს სერვერი რამდენიმე ჩატის მოდელს გვთავაზობს. აირჩიეთ ერთი:
+Choose a model	აირჩიეთ მოდელი
+
+# Saved-builder notice: English until native-speaker review.
+The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

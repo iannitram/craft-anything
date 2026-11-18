@@ -5,7 +5,7 @@
 use super::cil::{self, Instr, Operand, OperandKind};
 use super::meta::{Metadata, t};
 use super::pe::{self, PeImage};
-use super::sig::{Cur, GenCtx, Names};
+use super::sig::{Cur, GenCtx, Names, TypeSpecParent};
 use crate::FormatError;
 use crate::bytes::Reader;
 use serde::Serialize;
@@ -663,20 +663,37 @@ impl<'m, 'a> Resolver<'m, 'a> {
     }
 
     pub fn type_token(&self, tok: u32) -> String {
+        self.type_token_in(tok, &GenCtx::default())
+    }
+
+    /// Resolve a `TypeDef`, `TypeRef`, or `TypeSpec` token within an active generic context.
+    fn type_token_in(&self, tok: u32, caller_g: &GenCtx<'_>) -> String {
         let tb = (tok >> 24) as u8;
-        self.names.type_name(tb, tok & 0x00ff_ffff, &GenCtx::default(), 0)
+        self.names.type_name(tb, tok & 0x00ff_ffff, caller_g, 0)
     }
 
     pub fn method_token(&self, tok: u32, depth: u32) -> String {
+        self.method_token_in(tok, depth, &GenCtx::default(), &[])
+    }
+
+    /// Resolve a method or field token within `caller_g`, optionally supplying instantiated
+    /// method-type arguments from an enclosing `MethodSpec`.
+    fn method_token_in(&self, tok: u32, depth: u32, caller_g: &GenCtx<'_>, spec_method_args: &[String]) -> String {
         let md = self.md();
         let tb = (tok >> 24) as u8;
         let row = tok & 0x00ff_ffff;
         match tb {
             t::METHOD_DEF => method_display(self.a, &self.names, &self.owners, row),
             t::MEMBER_REF => {
-                let g = GenCtx::default();
-                let parent = match md.coded(t::MEMBER_REF, row, 0) {
-                    Some((tb @ (t::TYPE_REF | t::TYPE_DEF | t::TYPE_SPEC), r)) => self.names.type_name(tb, r, &g, 0),
+                let mut ts_kind = TypeSpecParent::Other;
+                let coded_parent = md.coded(t::MEMBER_REF, row, 0);
+                let parent = match coded_parent {
+                    Some((t::TYPE_SPEC, r)) => {
+                        let (display, kind) = self.names.typespec_parent(r, caller_g);
+                        ts_kind = kind;
+                        display
+                    }
+                    Some((tb @ (t::TYPE_REF | t::TYPE_DEF), r)) => self.names.type_name(tb, r, caller_g, 0),
                     Some((t::MODULE_REF, r)) => format!("[{}]", md.str_cell(t::MODULE_REF, r, 0)),
                     Some((t::METHOD_DEF, r)) => return method_display(self.a, &self.names, &self.owners, r),
                     _ => "?".into(),
@@ -686,15 +703,33 @@ impl<'m, 'a> Resolver<'m, 'a> {
                 if blob.first() == Some(&0x06) {
                     return format!("{parent}::{name}");
                 }
-                let params = self.names.method_sig(blob, &g).map(|s| s.param_list()).unwrap_or_else(|| "(?)".into());
+                let is_generic_method = blob.first().is_some_and(|f| f & 0x10 != 0);
+                let method_args = if is_generic_method { spec_method_args } else { &[] };
+                let owned_args;
+                let sig_g = match coded_parent {
+                    Some((t::TYPE_SPEC, _)) => match ts_kind {
+                        TypeSpecParent::GenericInst(args) => {
+                            owned_args = args;
+                            GenCtx { type_params: &owned_args, method_params: method_args }
+                        }
+                        TypeSpecParent::Array => GenCtx {
+                            type_params: caller_g.type_params,
+                            method_params: if is_generic_method { spec_method_args } else { caller_g.method_params },
+                        },
+                        TypeSpecParent::Other => GenCtx { type_params: &[], method_params: method_args },
+                    },
+                    Some((t::TYPE_DEF, r)) => GenCtx { type_params: self.names.type_generics(r), method_params: method_args },
+                    _ => GenCtx { type_params: &[], method_params: method_args },
+                };
+                let params = self.names.method_ref_sig(blob, &sig_g, caller_g).map(|s| s.param_list()).unwrap_or_else(|| "(?)".into());
                 format!("{parent}::{name}{params}")
             }
             t::METHOD_SPEC if depth < 2 => {
+                let args = self.names.method_spec_args(md.blob_cell(t::METHOD_SPEC, row, 1), caller_g).unwrap_or_default();
                 let base = match md.coded(t::METHOD_SPEC, row, 0) {
-                    Some((tb, r)) => self.method_token((u32::from(tb) << 24) | r, depth + 1),
+                    Some((tb, r)) => self.method_token_in((u32::from(tb) << 24) | r, depth + 1, caller_g, &args),
                     None => "?".into(),
                 };
-                let args = self.names.method_spec_args(md.blob_cell(t::METHOD_SPEC, row, 1), &GenCtx::default()).unwrap_or_default();
                 format!("{base}<{}>", args.join(", "))
             }
             t::FIELD => {
@@ -706,22 +741,27 @@ impl<'m, 'a> Resolver<'m, 'a> {
     }
 
     pub fn any_token(&self, tok: u32) -> String {
+        self.any_token_in(tok, &GenCtx::default())
+    }
+
+    /// Resolve any metadata token operand within an active generic context.
+    fn any_token_in(&self, tok: u32, caller_g: &GenCtx<'_>) -> String {
         match (tok >> 24) as u8 {
-            t::TYPE_DEF | t::TYPE_REF | t::TYPE_SPEC => self.type_token(tok),
-            t::METHOD_DEF | t::MEMBER_REF | t::METHOD_SPEC | t::FIELD => self.method_token(tok, 0),
+            t::TYPE_DEF | t::TYPE_REF | t::TYPE_SPEC => self.type_token_in(tok, caller_g),
+            t::METHOD_DEF | t::MEMBER_REF | t::METHOD_SPEC | t::FIELD => self.method_token_in(tok, 0, caller_g, &[]),
             t::STAND_ALONE_SIG => format!("signature 0x{tok:08x}"),
             0x70 => self.md().user_string(tok & 0x00ff_ffff, 256).map(|s| format!("{s:?}")).unwrap_or_else(|| "?".into()),
             _ => format!("token 0x{tok:08x}"),
         }
     }
 
-    fn instr_text(&self, i: &Instr) -> String {
+    fn instr_text(&self, i: &Instr, caller_g: &GenCtx<'_>) -> String {
         let op = match &i.operand {
             Operand::None => String::new(),
             Operand::Int(v) => format!(" {v}"),
             Operand::Float(f) => format!(" {f}"),
             Operand::Targets(ts) => format!(" {}", ts.iter().map(|x| format!("IL_{x:04x}")).collect::<Vec<_>>().join(", ")),
-            Operand::Token(tok) => format!(" {}", self.any_token(*tok)),
+            Operand::Token(tok) => format!(" {}", self.any_token_in(*tok, caller_g)),
         };
         format!("IL_{:04x}: {}{op}", i.offset, i.opcode)
     }
@@ -763,11 +803,14 @@ impl<'m, 'a> Resolver<'m, 'a> {
             if let Operand::Token(tok) = i.operand {
                 match i.kind {
                     OperandKind::Method if calls.len() < 4096 => {
-                        calls.push(CodeRef { offset: i.offset, opcode: i.opcode, token: format!("0x{tok:08x}"), target: self.method_token(tok, 0) })
+                        calls.push(CodeRef { offset: i.offset, opcode: i.opcode, token: format!("0x{tok:08x}"), target: self.method_token_in(tok, 0, g, &[]) })
                     }
-                    OperandKind::Field if field_accesses.len() < 4096 => {
-                        field_accesses.push(CodeRef { offset: i.offset, opcode: i.opcode, token: format!("0x{tok:08x}"), target: self.method_token(tok, 0) })
-                    }
+                    OperandKind::Field if field_accesses.len() < 4096 => field_accesses.push(CodeRef {
+                        offset: i.offset,
+                        opcode: i.opcode,
+                        token: format!("0x{tok:08x}"),
+                        target: self.method_token_in(tok, 0, g, &[]),
+                    }),
                     OperandKind::String if strings.len() < 256 => {
                         if let Some(s) = md.user_string(tok & 0x00ff_ffff, 512) {
                             strings.push(s);
@@ -777,7 +820,7 @@ impl<'m, 'a> Resolver<'m, 'a> {
                 }
             }
         }
-        let il = opts.include_il.then(|| instrs.iter().map(|i| self.instr_text(i)).collect());
+        let il = opts.include_il.then(|| instrs.iter().map(|i| self.instr_text(i, g)).collect());
         Some(BodyInfo {
             header: b.header,
             max_stack: b.max_stack,
@@ -917,8 +960,9 @@ pub fn members(a: &Assembly<'_>, opts: &MemberOptions) -> Members {
     let mut events: BTreeMap<u32, Vec<PropertyInfo>> = BTreeMap::new();
     for r in 1..=md.rows(t::EVENT_MAP).min(1_000_000) {
         let owner = md.cell(t::EVENT_MAP, r, 0);
+        let g = GenCtx { type_params: names.type_generics(owner), method_params: &[] };
         for e in md.list(t::EVENT_MAP, r, 1, t::EVENT, 65_536) {
-            let ty = md.coded(t::EVENT, e, 2).map(|(tb, row)| names.type_name(tb, row, &GenCtx::default(), 0)).unwrap_or_default();
+            let ty = md.coded(t::EVENT, e, 2).map(|(tb, row)| names.type_name(tb, row, &g, 0)).unwrap_or_default();
             events.entry(owner).or_default().push(PropertyInfo { name: md.str_cell(t::EVENT, e, 1), ty });
         }
     }

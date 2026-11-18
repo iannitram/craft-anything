@@ -149,6 +149,7 @@ Couldn't attach the pictures:	画像を添付できませんでした:
 Couldn't look through that folder.	そのフォルダを調べられませんでした。
 Couldn't open it.	開けませんでした。
 Couldn't open the folder.	フォルダを開けませんでした。
+Couldn't save your settings.	設定を保存できませんでした。
 Couldn't start it.	起動できませんでした。
 Coverage unknown	確認範囲は不明
 Craft Anything can't build with {engine}, so Unity is the closest match.	Craft Anything は {engine} でビルドできないため、最も近い選択肢として Unity を使います。
@@ -595,6 +596,7 @@ Saved in	保存先
 Saves space: copies the program and code, and shares dependencies and media with the project. A shared file rewritten in place changes here too.	容量を節約します。プログラムとコードはコピーし、依存関係とメディアはプロジェクトと共有します。共有ファイルをその場で書き換えると、こちらにも反映されます。
 Say what you want	欲しいものを伝える
 Say what you want first.	まず欲しいものを伝えてください。
+This applies once you choose something to recreate above.	上で再現するものを選ぶと、この設定が適用されます。
 Say what you want to make, or drop an app or file on the window to look inside it. Everything runs in Clean room mode unless you switch on Deep.	作りたいものを伝えるか、アプリやファイルをウィンドウにドロップして中を見られます。中まで解析モードをオンにしない限り、すべて外から観察モードで動きます。
 Screenshots of how it should look. The builder opens each one and matches it.	どう見えるべきかのスクリーンショット。ビルダーが 1 枚ずつ開いて合わせます。
 Sections	セクション
@@ -725,6 +727,7 @@ Use as a goal	目標として使う
 Use the projects folder	プロジェクトフォルダを使う
 Use this	これを使う
 Use {name}	{name} を使う
+About	情報
 Version	バージョン
 Waiting	待機中
 Waiting for another build to finish: this one starts next.	別のビルドの完了待ちです。次にこれが始まります。
@@ -882,6 +885,7 @@ Zoom	拡大/縮小
 Bring all to front	すべてを手前に移動
 Drag to give the plan more or less room; double-click to reset	ドラッグでプランの高さを変更、ダブルクリックで元に戻す
 Copy the message	メッセージをコピー
+Copy the version	バージョンをコピー
 Choose what the builder's approvals get	ビルダーの承認の扱いを選ぶ
 Reading the web	Web の閲覧
 Other commands	その他のコマンド
@@ -948,3 +952,8 @@ yesterday	昨日
 … {n} older	… 古いもの {n} 件
 Connecting to {name}… {seconds} s	{name} に接続中… {seconds} 秒
 Some shared files could not be hard-linked and were copied instead ({size}).	共有ファイルの一部はハードリンクできず、コピーしました（{size}）。
+This server lists several chat models. Choose one:	このサーバーには複数のチャットモデルがあります。1 つ選んでください:
+Choose a model	モデルを選ぶ
+
+# Saved-builder notice: English until native-speaker review.
+The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

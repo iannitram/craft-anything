@@ -327,9 +327,10 @@ mod macos {
         if !exe.is_absolute() {
             return Err(ToolError::invalid("executable must be an absolute path"));
         }
-        let lldb = craft_anything_engines::locate("lldb", &ctx.session.settings.engines.tools, &ctx.session.settings.engine_store_dir()).ok_or_else(|| {
-            ToolError::new(ErrorCode::EngineMissing, "lldb was not found.")
-                .with_remediation("Install the macOS command-line developer tools (xcode-select --install).")
+        let lldb = super::super::external_disasm_tools::locate_as(ctx, "lldb", ErrorCode::EngineMissing).map_err(|e| {
+            let fix =
+                format!("{} LLDB comes with the macOS command-line developer tools (xcode-select --install).", e.remediation.as_deref().unwrap_or_default());
+            e.with_remediation(fix)
         })?;
 
         single_line(&p)?;

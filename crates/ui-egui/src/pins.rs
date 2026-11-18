@@ -19,6 +19,26 @@ const POLL: Duration = Duration::from_secs(3);
 /// Above this, the pin dialog points out that a frozen copy is big.
 const BIG_COPY: u64 = 1_000_000_000;
 
+/// Whether two project paths name the same folder after resolving `.` and `..`.
+fn same_project(named: &str, project: &Path) -> bool {
+    craft_anything_engine::workspace::normalized(Path::new(named)) == craft_anything_engine::workspace::normalized(project)
+}
+
+/// Whether an estimate result names the project whose dialog is open. A missing name is another
+/// project's (an older engine's estimate) and must not fill this dialog.
+fn estimate_for(value: &Value, project: &Path) -> bool {
+    value.get("project").and_then(Value::as_str).is_some_and(|named| same_project(named, project))
+}
+
+/// Whether a pin create error names the project whose dialog is open. Errors that carry no project
+/// (a malformed request, a lock) keep the existing modal guard.
+fn error_for_project(error: &ToolError, project: &Path) -> bool {
+    match error.details.as_ref().and_then(|d| d.get("project")).and_then(Value::as_str) {
+        Some(named) => same_project(named, project),
+        None => true,
+    }
+}
+
 /// One pin as the sidebar shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinRow {
@@ -92,12 +112,19 @@ impl CraftApp {
             }
             ("project_pins_list", Err(e)) => log::warn!("pinned builds couldn't be read: {}", e.message),
             ("project_pin_create", Ok(v)) if v.get("estimate").is_some() => {
-                let bytes = |k: &str| v["estimate"][k].as_u64().unwrap_or(0);
-                self.state.pin_draft.size = Some(Ok((bytes("bytes"), bytes("light_bytes"))));
+                if self.state.modal == Some(Modal::Pin) && estimate_for(&v, &self.state.pin_draft.project) {
+                    let bytes = |k: &str| v["estimate"][k].as_u64().unwrap_or(0);
+                    self.state.pin_draft.size = Some(Ok((bytes("bytes"), bytes("light_bytes"))));
+                }
             }
-            ("project_pin_create", Err(e)) if self.state.modal == Some(Modal::Pin) && self.state.pin_draft.size.is_none() => {
+            ("project_pin_create", Err(e))
+                if self.state.modal == Some(Modal::Pin) && self.state.pin_draft.size.is_none() && error_for_project(&e, &self.state.pin_draft.project) =>
+            {
                 self.state.pin_draft.size = Some(Err(e.for_people()));
             }
+            // An estimate error the open dialog rejected: it is not this dialog's to show, and it
+            // is not a failed pin creation either, so it must not become a toast.
+            ("project_pin_create", Err(e)) if e.details.as_ref().and_then(|d| d.get("estimate")).and_then(Value::as_bool) == Some(true) => {}
             ("project_pin_create", Ok(v)) => {
                 let name = v["pin"]["name"].as_str().unwrap_or_default();
                 self.toast(trf("Pinned: {name}. Open it from the sidebar any time.", &[("name", name)]), false);
@@ -370,4 +397,63 @@ pub fn delete_modal(app: &mut CraftApp, ui: &mut Ui, project: &Path, id: u32, cl
             *close = true;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn draft(project: &str) -> PinDraft {
+        PinDraft { project: PathBuf::from(project), ..Default::default() }
+    }
+
+    fn app() -> CraftApp {
+        crate::demo::app(crate::demo::engine(craft_anything_engine::Mode::Beginner, true))
+    }
+
+    #[test]
+    fn a_late_estimate_for_another_project_is_ignored() {
+        let mut app = app();
+        app.state.modal = Some(Modal::Pin);
+        app.state.pin_draft = draft("/projects/b");
+        app.pin_done("project_pin_create", Ok(json!({"project": "/projects/a", "estimate": {"bytes": 10, "light_bytes": 5}})));
+        assert!(app.state.pin_draft.size.is_none(), "another project's estimate must not land in this dialog");
+        app.pin_done("project_pin_create", Ok(json!({"project": "/projects/b", "estimate": {"bytes": 10, "light_bytes": 5}})));
+        assert_eq!(app.state.pin_draft.size, Some(Ok((10, 5))));
+    }
+
+    #[test]
+    fn a_late_estimate_error_for_another_project_is_ignored() {
+        let mut app = app();
+        app.state.modal = Some(Modal::Pin);
+        app.state.pin_draft = draft("/projects/b");
+        let error = ToolError::invalid("nothing to pin").with_details(json!({"project": "/projects/a", "estimate": true}));
+        app.pin_done("project_pin_create", Err(error));
+        assert!(app.state.pin_draft.size.is_none(), "another project's error must not land in this dialog");
+        assert!(app.state.toasts.is_empty(), "an ignored estimate error must not become a toast: {:?}", app.state.toasts);
+        let error = ToolError::invalid("nothing to pin").with_details(json!({"project": "/projects/b", "estimate": true}));
+        app.pin_done("project_pin_create", Err(error));
+        assert!(matches!(app.state.pin_draft.size, Some(Err(_))));
+    }
+
+    #[test]
+    fn a_failed_pin_creation_still_tells_the_person() {
+        let mut app = app();
+        app.state.modal = Some(Modal::Pin);
+        app.state.pin_draft = draft("/projects/b");
+        let error = ToolError::invalid("copy failed").with_details(json!({"project": "/projects/a"}));
+        app.pin_done("project_pin_create", Err(error));
+        assert!(app.state.pin_draft.size.is_none(), "another project's creation error isn't this dialog's");
+        assert!(app.state.toasts.iter().any(|(text, error)| *error && text.contains("copy failed")), "{:?}", app.state.toasts);
+    }
+
+    #[test]
+    fn an_estimate_does_not_land_after_the_dialog_closed() {
+        let mut app = app();
+        app.state.modal = None;
+        app.state.pin_draft = draft("/projects/b");
+        app.pin_done("project_pin_create", Ok(json!({"project": "/projects/b", "estimate": {"bytes": 10, "light_bytes": 5}})));
+        assert!(app.state.pin_draft.size.is_none());
+    }
 }

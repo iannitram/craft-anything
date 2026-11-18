@@ -571,10 +571,11 @@ been run live.
       and unloaded the one in use (#1434). Prefer a chat model the server says is loaded
       (`/api/ps`, which Ollama and FastFlowLM answer) before the list
       — claimed: jgt87, branch bugfix/r5.4-add-server-loaded-model — PR #1435
-- [ ] **decision** When nothing says which model is loaded and a server lists more than one chat
+- [x] **decision** When nothing says which model is loaded and a server lists more than one chat
       model, ask the person to pick one (the list in the address form's model field) instead of
       taking the first (#1434): `/api/ps` helps only while a model is loaded, and LM Studio and
       llama.cpp routers don't answer it
+      — claimed: jgt87, branch feature/r5.4-pick-server-model (a draft for the maintainers to decide on) — PR #1436
 - [x] The first run's AI step can add a model server on another computer by its address (llama.cpp,
       Ollama or LM Studio on a home server), the same form as Settings → AI
 - [ ] A chat sent while a llama.cpp router is still loading the model ended after 31 s with "The
@@ -616,8 +617,13 @@ Owner: open · Status: todo
       saved builder that is off or gone and the AI building instead: the CLI prints it before the
       run, `rebuild_start` adds `builder_notice`, and an answered question carries it
       — claimed: AlexJoaquimPereira, branch `bugfix/r5.5-headless-builder-notice`
-- [ ] The saved-builder replacement notice is English only for now; add it to the catalogs after a
-      native speaker checks the wording
+- [x] Add the saved-builder replacement notice on Make and at build starts to the UI catalogs;
+      Turkish wording reviewed and approved by native speaker @MacallanTheRoot, English unchanged
+      — claimed: MacallanTheRoot, branch fix/r5.5-localize-builder-replacement-notice
+- [ ] Native-speaker reviews of the saved-builder replacement notice in the other UI languages;
+      their catalog entries retain the existing English wording until reviewed
+- [ ] Localize the replacement notice shown after Just ask using typed replacement names from the
+      answer; its current `builder_notice` is formatted English for headless callers, not a UI key
 - [x] Bound accumulated data across all lines of one server-sent event, so short lines cannot
       grow a streamed API response without limit
       — claimed: Afloat16, branch bugfix/r5.5-bounded-sse-events-20261103
@@ -744,6 +750,15 @@ yet, and the quick start is how every new person begins.
       612, `only_left` 29746, `only_right` 32342); it ran the line-up once and every browse
       call asked for `pairs`, none failed (22 calls, $1.06)
       — claimed: chordpli, branch bugfix/r5.7-browse-list-names
+- [x] Count only names that `find_result_key` resolves to arrays toward `result_lists`'s 64-list
+      cap and collect shallower object levels before deeper ones so shadowed or nested sub-lists
+      never crowd out top-level pageable lists (`crates/evidence/src/lib.rs`).
+      — claimed: Plastic-time, branch bugfix/r5.7-evidence-result-lists
+- [x] Find what every name reaches in one walk instead of one `find_result_key` from the root
+      per array name, so `result_lists` stays linear in the result's size (#2107 follow-up)
+      — claimed: Plastic-time, branch bugfix/r5.7-result-lists-first-match-map
+- [x] Stop `result_lists` before indexing nested names when 64 root arrays fill the summary (#2116 follow-up).
+      — claimed: Plastic-time, branch bugfix/r5.7-result-lists-cap-before-index
 - [x] `app_builds_line_up` paired 1,448 of ~36,000 functions across two Rust toolchains: every
       v0 crate hash (`Cs<hash>_`) changed, so exact names rarely match, and some masked-bytes
       pairs are unrelated functions (`hex_encode` → `_git_oid_tostr`). Compare Rust names with
@@ -781,8 +796,23 @@ yet, and the quick start is how every new person begins.
       and the lookup and installs use it. Live in Debian 13 after `engines_install ghidra`: Vineflower
       decompiled a jar with that Java (before: "Java runtime is not installed")
       — claimed: Fadlalla-ai, branch bugfix/r5.7-managed-java-found
-- [ ] A Java set for Ghidra (Settings → Engines, `engines.ghidra.java_home`) isn't used as the Java
-      runtime either, so Vineflower still says Java isn't installed with only that set
+- [x] A path set in Settings → Engines (`engines.tools.<id>`) that names a folder, such as a JDK's
+      folder for the Java runtime, counts as found: `engines_list`, `doctor` and `Requires::Engine`
+      say it's there, and running it then fails with "permission denied". Look for the program in
+      the folder, as an install folder holds it, and say so plainly when it isn't there. The
+      program is now looked for in the folder; one without it isn't found, and the message names
+      the folder. Live in Debian 13 with Java set to a JDK's folder: Vineflower decompiled (before:
+      "permission denied")
+      — claimed: Fadlalla-ai, branch bugfix/r5.7-engine-path-folder
+- [x] gdb, rizin sessions, adb, JADX, Apktool, Frida, tshark, lldb and the browser look up their program with
+      `engines::locate` and their own not-found message, so a folder set as their path without the
+      program says it isn't installed rather than that the folder has no such program; use
+      `Settings::engine_not_found` as the Java and disassembler tools do
+      — claimed: justinjohn0306, branch bugfix/r5.5-engine-not-found-words
+- [x] A Java set for Ghidra (Settings → Engines, `engines.ghidra.java_home`) isn't used as the Java
+      runtime either, so Vineflower still says Java isn't installed with only that set. It now is
+      (`Settings::java_set_for_ghidra`), for JADX too, unless a path is set for Java itself
+      — claimed: justinjohn0306, branch bugfix/r5.7-ghidra-java-for-java-tools
 - [x] JADX doesn't use the Java runtime engine (the Java Ghidra's setup brings, or a Java path set in
       Settings → Engines): its launcher script finds Java only through `JAVA_HOME` or PATH, and
       neither is passed, so with no system Java, Java source of an Android class fails although
@@ -835,6 +865,19 @@ yet, and the quick start is how every new person begins.
       and a parent workspace's `target/`; the Project screen keeps the file lookup. Checked on a
       workspace member and a `CARGO_BUILD_TARGET_DIR` build that the file lookup doesn't find
       — claimed: Fadlalla-ai, branch fix/cargo-target-dir-at-start
+- [x] With `CARGO_TARGET_DIR` set (a build folder shared by several projects), a program of the
+      same name built by another project there is taken for the project's own: Play and a new pin
+      can start or copy it, and a pin made before programs were recorded looks outside its copy.
+      Take a program from a target directory outside the app only when Cargo's record of it
+      (`<name>.d`) names the app's sources, and start an older pin from its own copy only. Done:
+      the newest of the project's own builds is started; an older pin looks only inside its copy
+      — claimed: Fadlalla-ai, branch bugfix/r5.7-pin-own-program
+- [x] A saved Live pin (made before they were retired) starts the project's own app, not a copy,
+      but since the line above it looks only inside that folder: with the build in
+      `CARGO_TARGET_DIR` or a target directory set above the project it says there's nothing to
+      start. Keep the inside-only lookup for pins that keep a copy. Done: a Live pin finds the
+      build as Play's file lookup does; frozen and light pins still look only in their copy
+      — claimed: Fadlalla-ai, branch bugfix/r5.7-live-pin-external-build
 - [ ] Build the new DMG on a Mac (release dry run) and look at the window once
 - [ ] #490 on macOS: a real Deep build through Claude Code with the published 0.3.0 CLI, with
       2.1.179 and a current version. Windows passed; the Mac CLI was only checked to contain the
@@ -872,6 +915,11 @@ Owner: open · Status: in progress
       sandbox shares, since its /tmp is its own (#747). Unit-tested; not run on a real Flatpak
 - [x] Find browsers under their other Linux names, and say why one isn't found: a set path that
       isn't there, or a Flatpak's sandbox (#841). Unit-tested; not run on Linux or in a real Flatpak
+- [x] Escape control characters in GDB/MI C-strings, decode standard C and hex escapes (`\a`, `\b`,
+      `\f`, `\v`, `\xHH`), clamp unmatched closing delimiters in MI field tuples, and isolate
+      command results to the active request token (`crates/engines/src/gdb.rs`). Unit-tested with a
+      stand-in MI subprocess; not run against a live GDB install.
+      — claimed: Plastic-time, branch bugfix/r1.5-gdb-mi-framing
 - [ ] **decision** Let the Flatpak start browsers on the computer. It can't see system ones today;
       a per-user Flatpak browser in `~/.local/share/flatpak/exports/bin` is found, but its start
       script needs `flatpak`, which the sandbox doesn't have. `flatpak-spawn --host` would need
@@ -945,6 +993,8 @@ Owner: open · Status: in progress
 - [x] `doctor` looks a registration's bare command (`craft-anything-cli`, as a hand-made entry
       names it) up on PATH, as the app starting it does, instead of calling it missing.
       — claimed: Plastic-time, branch bugfix/r2.2-doctor-cli-on-path
+- [x] Follow `QODER_CONFIG_DIR` for Qoder's `skills` directory as well as `settings.json`, and expand leading `~\` backslash home prefixes in setup environment overrides on Windows.
+      — claimed: Plastic-time, branch bugfix/r2.2-qoder-skills-and-windows-tilde
 - [x] Settings says when a saved agent program is gone and which one runs in its place
       (`AiHub::replaced_programs`, read on a worker with the AI list), with "Use it" to save
       that one when it's a file of its own (#721, #1468)
@@ -993,6 +1043,9 @@ Owner: open · Status: in progress
       document functions touched by the OpenCode model-selection changes.
 - [x] Integrate the five-level `Effort` type from #395 for agent variants, and share a strict
       disk-based selection save between the hub and headless tools, preserving unrelated edits.
+- [x] Settings → AI offers no model choice for Codex, so its model can only be set by editing
+      config.toml (#2109): offer Codex's own listed models (`codex debug models`) and its default
+      — claimed: justinjohn0306, branch bugfix/r2.2-codex-model-picker
 - [x] Rebase onto main after #395's squash merge, preserve extra model arguments without a saved
       selection, and render the remote-host placeholder visibly in the setup instructions.
 - [x] Hold the UI settings worker's session guard through its disk save so it cannot overwrite
@@ -1061,6 +1114,11 @@ Owner: open · Status: in progress
       question or build stops before it begins (#1859). Ask once more after a short pause when
       that is what it said; a turn already retries OpenCode's 503s
       — claimed: FuryNocturn, branch bugfix/r2.2-opencode-models-503
+- [x] OpenCode prints that typed answer on stdout and `HTTP 503 Service Unavailable` on stderr,
+      and a failed run's error keeps only stderr, so the retry above never sees the answer and the
+      person is shown "HTTP 503" instead of OpenCode's reason (#1859). Read the typed answer from
+      stdout, retry on it, and name its message in the error
+      — claimed: justinjohn0306, branch bugfix/r2.2-opencode-503-stdout
 - [x] `docs/opencode.md` says "OpenCode V2" but not where to get it: OpenCode's install script
       and npm's `opencode-ai` give the 1.x line, whose `run` has no `--standalone` (npm's
       `@opencode/cli` is 2.x), so the check before a build
@@ -1186,6 +1244,12 @@ Owner: open · Status: in progress
 - [x] A Hermes `config.yaml` that starts with a byte-order mark gets our entry in its own
       `mcp_servers` table, not in a second one that hides the person's servers from Hermes.
       — claimed: Plastic-time, branch bugfix/r2.2-yaml-config-bom
+- [x] Match YAML block mapping keys across optional whitespace before the colon and require a mapping-indicator boundary after it, so `mcp_servers :` is updated in place and plain keys containing colons (`craft-anything:dev`) are left untouched.
+      — claimed: Plastic-time, branch bugfix/r2.2-yaml-mapping-key-boundaries
+- [x] Report dedicated `ActionKind::Invalid` uninstall diagnostics and remediations when a config blocks `setup::uninstall` (unremovable flow/escaped entries, malformed syntax, invalid UTF-8, or I/O errors), and distinguish invalid UTF-8 from permission errors across `plan`, `doctor`, and `uninstall`.
+      — claimed: Plastic-time, branch bugfix/r2.2-uninstall-blocking-diagnostics
+- [x] Keep each config read error's own advice (a folder at the config path, invalid UTF-8, the I/O error itself), advise fixing a blocked config where it is, and print each uninstall blocker's reason and fix in the CLI.
+      — claimed: Plastic-time, branch bugfix/r2.2-uninstall-blocker-advice
 - [ ] See whether Hermes still fails on 0.3.0 (#460: the fix its `fixed` label names was already in
       0.3.0 when it was filed, and it gives no version)
 
@@ -1308,6 +1372,14 @@ Owner: open · Status: in progress
 - [x] Codex's and Grok Build's `config.toml` keep their Windows line endings when setup adds or
       removes our entry.
       — claimed: Plastic-time, branch bugfix/r2.2-toml-config-crlf
+- [x] Codex's and Grok Build's `config.toml` accept an inline `mcp_servers` table (`mcp_servers = {}`
+      or `mcp_servers = { other = … }`) when adding, merging, or replacing our entry, keeping
+      comments, sibling entries, and line endings.
+      — claimed: Plastic-time, branch bugfix/r2.2-toml-inline-servers-table
+- [x] Hermes's `config.yaml` accepts spaced empty flow mappings (`{ }`) and YAML 1.2 null variants
+      (`Null`, `NULL`) on `mcp_servers`, keeps one-line flow entries and siblings intact, and
+      refuses automatic edits when a `mcp_servers` child entry spans multiple lines in flow style.
+      — claimed: Plastic-time, branch bugfix/r2.2-yaml-empty-and-flow-blocks
 - [x] "Just ask" says before a question is sent when the project's builder can't answer
       questions (Codex, OpenCode and the other agents that can't be held to reading), and which
       AIs can, instead of refusing only after it's sent (#1695)
@@ -1341,6 +1413,10 @@ Owner: maintainers · Status: in progress
 - [x] Since that fix, the console-run check reads an app bundle's `Info.plist` to name the original,
       in Clean room too (review on #1759). Clean room takes the picked path's own name
       — claimed: htcom-code, branch bugfix/r2.4-clean-room-bundle-name
+- [x] A Windows game's folder picked on Linux or macOS (a 1990s Windows game: `Game.exe`, no executable
+      bits) has no program to study: the folder search counts only programs this computer can
+      start, so Deep mode skips Ghidra. Count a Windows `.exe` as a program to study on every system
+      — claimed: youkaicountry, branch bugfix/r2.4-windows-program-in-folder
 
 ### R2.5 Behaviour checks for non-web builds
 Owner: open · Status: in progress
@@ -1440,6 +1516,14 @@ Owner: maintainers · Status: in progress
 ### R2.9 Everyday use: typing, projects, settings
 Owner: maintainers · Status: in progress
 Gaps found while using the app for real projects.
+- [x] `i18n::trf` filled placeholders with repeated replacements, so a value containing a later
+      placeholder was rewritten. It now fills them in one pass over the template: inserted names
+      and other values stay literal, and unknown names and stray braces are kept as written. The
+      R5.5 saved-builder notice uses it instead of its own split
+      — claimed: mansur-akhmadi, branch bugfix/r2.9-trf-literal-values
+- [ ] The Unity build steps (`rebuild::stacks`) still fill `{editor}`, `{player}` and `{ext}` with
+      chained `replace` calls, so an editor path holding `{ext}` or `{player}` is rewritten. The
+      AI layer can't call `i18n::trf` (L6): it needs a one-pass fill at a layer both can reach
 - [x] Each project chooses, per kind of action, what the builder's approvals get (allow, ask or
       refuse): reading the web, commands, files outside the project, pushing and publishing,
       deleting outside the project, system changes, other tools. Unset kinds follow Auto mode as
@@ -1534,6 +1618,18 @@ Gaps found while using the app for real projects.
 - [x] The shared investigation chat (`SharedConversation`) doesn't continue a Deep chat's agent
       session once the chat is in Clean room; Clean room to Deep still continues — claimed: rmsff,
       branch fix/r2.9-shared-chat-mode
+- [x] A session that opens a second project kept the first project's evidence and open questions:
+      `open_project` added the new project's records to the session ledger without clearing the old,
+      so `core_evidence_show`, a report and the evidence ledger mixed two projects. Opening a
+      different project now clears the ledger, order, open questions and unloaded count, then loads
+      the new project's store; reopening the same project still refreshes it in place. The
+      regression in `session.rs` covers the switch, the same-project refresh and returning to the
+      first project
+      — claimed: AlexJoaquimPereira, branch bugfix/r2.9-project-evidence-switch
+- [ ] A project opened after another keeps the session's open targets and their annotations: a
+      report for the new project can name the old project's target, and annotations saved after
+      the switch go to the new project's store. Decide whether opening a project closes the
+      targets or reloads their annotations from the new one
 - [x] A Clean room build or question must also not resume an API backend's kept transcript:
       `ws.transcript_path()` is loaded whenever it exists, so switching modes can carry what a Deep
       API build read. Clear it, or record its mode, when the mode changes; add a regression
@@ -1641,6 +1737,16 @@ Gaps found while using the app for real projects.
 - [x] `build_files_list` lists an edited-in-place project from the project folder itself, not a
       missing or nested `app/`, and leaves Craft Anything's own records out
       — claimed: AlexJoaquimPereira, branch `bugfix/r2.9-build-files-in-place`; commit 1ffeb40
+- [x] `build_file_read` read the whole project file into memory before paging, so a large
+      generated file under `app/` could freeze or kill the app; it now refuses a file over 16 MiB
+      with a plain error, while files at or under the cap page as before. The regression covers
+      the cap and the boundary
+      — claimed: AlexJoaquimPereira, branch bugfix/r2.9-build-file-read-cap
+- [x] `build_file_edit` read the whole project file into memory before replacing text; it now
+      uses the same 16 MiB cap as a read, refusing a larger file before it is loaded and leaving
+      it unchanged. A file at the cap still edits when the result fits the 8 MB write cap. Engine
+      regressions cover the over-cap refusal and the boundary
+      — claimed: AlexJoaquimPereira, branch bugfix/r2.9-build-file-edit-cap
 - [x] Choose Claude Code's folder (`CLAUDE_CONFIG_DIR`) per AI, so one computer can build with
       two Claude accounts; an app opened from the Dock never sees the shell's variable. Settings →
       AI (a typed folder, and Add another) and `ai folder`; live-checked from the CLI with an empty
@@ -1774,7 +1880,7 @@ Gaps found while using the app for real projects.
       UTF-8) loaded as defaults like a missing one, and the next save replaced it; one that couldn't
       be parsed was renamed aside with the rename's result ignored. Only "not found" is plain
       defaults now. A file that can't be understood (not TOML, not UTF-8) is set aside whole under
-      the first free name (`config.toml.broken`, `.broken.1`… up to 16). One that can't be read, or
+      the first free name (`config.toml.broken`, then `.broken.1` to `.broken.15`). One that can't be read, or
       can't be set aside, stays where it is, and the defaults standing in for it
       (`Settings::not_loaded`) refuse `save_to` and a deferred save, also after `settings_set`'s
       round trip. Tested on Windows with a file held without sharing; the Unix permission test
@@ -1783,10 +1889,25 @@ Gaps found while using the app for real projects.
 - [x] When config.toml wasn't loaded (`Settings::not_loaded`), the app says so at startup where
       the person is looking, with the file's name and why, and that nothing is saved over it
       (`settings_ui::not_loaded_warning`); English only for now, like the builder notice
+- [x] A settings save the app refused (config.toml wasn't loaded) said so in a toast in English
+      only, whatever the UI language, and left out the engine's remediation. The toast now leads
+      with "Couldn't save your settings." in the UI's language, then the engine's message and
+      what to do (`settings_ui::settings_not_saved`). The engine's own message is still English
+- [ ] The engine's messages about settings (why config.toml wasn't loaded, why a save was
+      refused) are English in every UI language: give them typed parts the UI can translate
+      — claimed: hichang4u, branch bugfix/r2.9-settings-save-toast
 - [x] A config.toml that can't be read for a moment at startup (a virus scan or another program
       holding it) isn't tried again, so the whole session runs on defaults and refuses every save:
       try the read again for a short while before giving up
       — claimed: NicolasBohn, branch bugfix/r2.9-config-read-retry
+- [x] A config.toml that is a link to a file that isn't there read as "not found", so it loaded as
+      plain defaults and the next save replaced the link; and the note on kept copies read as if
+      their names went up to `.broken.16` (they stop at `.broken.15`). "Not found" is a first
+      start now only when nothing is at the path itself (`symlink_metadata`); a link without its
+      target loads as defaults that refuse to be saved, naming where it points, and a deferred
+      save isn't recovered over it. The test through a real link skips itself on a Windows account
+      that can't create links (as here), so that path ran only from what the system answers
+      — claimed: hichang4u, branch bugfix/r2.9-config-link-no-target
 - [x] A website build has no `dev` or `start` script, since Craft Anything serves its built
       folder itself, so outside the app there was nothing to run (#1590): the builder writes
       app/README.md saying how to build it and which folder to serve
@@ -1853,6 +1974,22 @@ Gaps found while using the app for real projects.
       drawn in DM Sans and JetBrains Mono; dropdowns have no name for screen readers, only
       their value; fields and dropdowns have no 3:1 border at rest (WCAG 1.4.11), by choice,
       which wants a second look; a compact field is about a point taller than a button
+- [x] Theme gets a System choice, the new default, that follows the system's light or dark
+      appearance and changes with it (the switches' slide to a new choice landed with #1862)
+      — claimed: jgt87, branch feature/r2.9-sliding-switch-system-theme — PR #1234
+- [x] Make → "What do you want to recreate?" offers Simple / Advanced, and always shows Clean room /
+      Deep: Simple mode's title bar had no mode switch, so only Settings offered it, and the
+      Clean room / Deep tiles appeared only once an original was picked (the switch is now beside
+      the ways in on Make; with no original, the tiles show dimmed and say they apply once there
+      is one)
+      — claimed: jgt87, branch feature/r2.9-make-choices — PR #1286
+- [x] The app's version can be seen inside it on every system: only macOS's menu bar had an About,
+      and the About dialog in `home.rs` was never opened (#1300)
+      — claimed: jgt87, branch feature/r2.9-show-version — PR #1301
+- [ ] Settings fits a small window at high zoom: it's 680 points wide with a page up to 560 tall,
+      so at 2× zoom in the smallest window (760×520, 380×260 points) its tab list starts off the
+      left edge and the dialog runs off the bottom. Fit the dialog to the window, with the tab
+      list scrolling when it must (found in #1301's review)
 
 - [x] A build loop: a project can keep building run after run, each run a fresh builder (a clean
       context) that carries on from the investigation's handoff with the person's prompt, until a
@@ -1886,6 +2023,12 @@ to the project next.
       loaded machine could grow the file past the bound with nothing wrong. The stand-in now reads
       its own log and stops once it has seen a cut and written past it
       — claimed: muraa-p, branch test/r2.10-log-cap-waits-for-cut
+- [x] A slow pin size estimate that finished after the person cancelled or opened another
+      project's dialog was applied to the open dialog: the estimate and its errors now name their
+      project, and the dialog ignores a result for another project or a closed dialog. The result
+      and error detail carry the project; UI regressions cover a late estimate, a late error and a
+      closed dialog
+      — claimed: AlexJoaquimPereira, branch bugfix/r2.10-pin-estimate-project
 - [ ] Opening a pin that's already running brings its window to the front, instead of a message
 - [x] How much space pins take in Settings
       — claimed: Afloat16, branch feature/r2.10-pinned-copy-storage
@@ -1922,6 +2065,19 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch feature/r3.9-rgb9e5-textures-20261110
 - [ ] Unreal 5 and Oodle: IoStore packages, unversioned properties and Oodle-compressed paks
 - [ ] Game files: save pictures from IoStore containers (needs the Unreal 5 support above)
+- [x] A look at one game's folder or archive could land after the person picked another one, so
+      the old profile, archive list or file rows were shown under the new pick and a save could
+      name an item from the old game. Done: the button job carries its request, and a result for a
+      folder or archive no longer shown is ignored, including its error; UI regressions cover both
+      scopes and an ignored error
+      — claimed: AlexJoaquimPereira, branch bugfix/r3.9-game-files-stale-results
+- [x] Pick game A, B, then A again while the first A look is still running: the older A result can
+      still land after the newer one. Done: each look and listing carries the job that asked for
+      it, and only the jobs the screen still waits for are applied, so a repeated pick ignores the
+      older answer; a folder whose name isn't text is refused with a message before a look starts.
+      UI regressions cover the same-folder re-pick through the app's dispatch, the refusal, and a
+      failed or superseded worker settling only its own spinner
+      — claimed: AlexJoaquimPereira, branch bugfix/r3.9-game-files-request-ids
 - [x] Decode Unreal packed 10-bit normalized and 11-bit floating-point textures through the bounded picture exporter.
       — claimed: Afloat16, branch feature/r3.9-unreal-packed-textures-20261111
 - [x] Unreal: decode cooked half- and full-precision floating-point textures with the shared bounded pixel reader.
@@ -1942,6 +2098,8 @@ Owner: open · Status: in progress
 Owner: open · Status: in progress
 - [x] Bound native value-flow decoding and incoming parameter nodes by the requested graph node budget, and mark omitted code as partial.
       — claimed: Afloat16, branch bugfix/r3.11-value-flow-budget-20261110
+- [x] Filter ARM32 and Thumb stack-pointer (`r13`) and program-counter (`r15`) bookkeeping out of `dataflow::def_use` without hiding general-purpose `r13`/`r15` on x86-64, and clobber only canonical full-width scratch registers (`rax`, `rcx`, `rdx`) on 32-/16-bit x86 calls.
+      — claimed: Plastic-time, branch bugfix/r3.11-dataflow-mode-registers
 - [x] Resolve AArch64 address evidence only from known operands, with the right arithmetic width and retained writeback effects.
       — claimed: Afloat16, branch bugfix/r3.11-a64-address-proofs-20261110
 - [x] AArch64 shifted and extended register operands lose their shift: `sub w9, w9, w9, lsl #3` lifts
@@ -1989,10 +2147,39 @@ Owner: open · Status: in progress
       — claimed: muraa-p, branch feature/r3.11-standalone-pyz
 - [x] Collect native function evidence from every body block and infer parameters from its actual entry block.
       — claimed: Afloat16, branch bugfix/r3.11-native-function-block-evidence-20261110
+- [x] Discard stale overran-function cross-references once function boundaries settle while maintaining a strict global `max_xrefs` cap in function discovery order and backfilling clipped slots cleanly.
+      — claimed: Plastic-time, branch bugfix/r3.11-overran-function-xrefs
+- [x] Resolve known library argument counts across ELF symbol-version (`@GLIBC_…`, `@@GLIBC_…`) and Darwin symbol-variant (`$UNIX2003`, `$INODE64`) suffixes when lifting imported calls to pseudo-C.
+      — claimed: Plastic-time, branch bugfix/r3.11-disasm-versioned-import-arity
+- [x] Record full register-list and base-pointer read/write effects for ARM32 and Thumb `pop`, `push`,
+      `ldm`, and `stm` instructions (including writeback bases).
+      — claimed: Plastic-time, branch bugfix/r3.11-a32-reglist-reads-writes
+- [x] Select Thumb (`Mode::T32`) for entryless ARM shared libraries when executable symbols, exports,
+      or function starts predominantly carry the Thumb bit (`addr | 1`), and normalize Thumb code
+      addresses across `noreturn` symbols, exports, stripped entry points, code pointers, and data
+      pointer scans without cross-matching odd byte offsets on byte-addressed ISAs.
+      — claimed: Plastic-time, branch bugfix/r3.11-thumb-symbol-and-pointer-targets
+- [x] Record `Align(PC, 4) + disp` data/import references on ARM32 and Thumb `[pc, #off]` literal loads, populate `Flow::IndirectJump { slot }` on `ldr pc, [pc, #off]` GOT/IAT thunks, and keep 32-bit dereference widths in pseudo-C.
+      — claimed: Plastic-time, branch bugfix/r3.11-arm-pc-literal-refs
+- [x] Invalidate pending pseudo-C call, tail-call, and Win64 stack-argument expressions whenever any source register they read is overwritten before the call.
+      — claimed: Plastic-time, branch bugfix/r3.11-pseudo-call-arg-deps
+- [x] Keep assignments to indirect-call target, memory-base, and pointer-authentication modifier registers out of folded callee argument lists in pseudo-C.
+      — claimed: Plastic-time, branch bugfix/r3.11-pseudo-indirect-call-target
+- [x] Pass an argument register used as a memory-indirect call's base as the call's argument, keep the static address of A32 PC-relative stores, and give import tail calls through `ldr pc`/`jmp [slot]` their register arguments and a `Pseudo.calls` entry.
+      — claimed: Plastic-time, branch bugfix/r3.11-pseudo-call-args
+- [x] Keep a memory-indirect call's base argument after an earlier read of it, keep argument loads before stores that may overwrite what they read, stop recording a store's source register as an assignment in pseudo-C, and record A32 `STRB`/`STRH`/`STRD` source registers as read (#2114 follow-up, #2119).
+      — claimed: Plastic-time, branch bugfix/r3.11-pseudo-call-arg-followups
+- [x] In pseudo-C, keep argument loads before writes that may change them when the width is unknown, the frame slot is indexed, the segments differ, the instruction is not modelled or the load reads a literal, and stop a Win64 outgoing stack argument folding after a write to its slot (#2119 follow-up).
+      — claimed: Plastic-time, branch bugfix/r3.11-pseudo-memory-write-overlap
+- [x] Preserve argument loads across implicit and multi-register writes, and limit fixed-width Win64 slot invalidation to overlapping offsets (#2124 follow-up).
+      — claimed: Plastic-time, branch bugfix/r3.11-pseudo-write-footprints
 - [ ] `native_source_folder_write` uses the built-in decompiler only: use Ghidra in Deep mode when
       it's there
 - [x] Keep source registers alive when an AArch64 arithmetic result is discarded into the zero register.
       — claimed: Afloat16, branch bugfix/r3.11-a64-discarded-results-20261111
+- [x] Lift AArch64 `cmn` (`adds xzr/wzr, …`) branch conditions as `(a + b) <op> 0` and omit
+      discarded `xzr`/`wzr` assignments in pseudo-C.
+      — claimed: Plastic-time, branch bugfix/r3.11-a64-cmn-zero-destination
 - [x] Keep stand-in response samples distinct when headers, content types or body-availability metadata differ.
       Compare header names without case and ignore ordering between different names, preserving each name's value order.
       At the sample cap, a usable answer can replace an unavailable 304 for the same path, query and request key;
@@ -2025,6 +2212,10 @@ Owner: open · Status: in progress
 - [x] Fold an AArch64 MOVZ/MOVK sequence into one constant in pseudo-C: `mov w9, #0x2493` then
       `movk w9, #0x9249, lsl #16` reads as two statements, not `w9 = 0x92492493;`
       — claimed: Jensen-Yao, branch bugfix/r3.11-a64-movz-movk-constants
+- [x] Slice interior string literal references in pseudo-C by encoded byte offset for UTF-8 and UTF-16LE strings, rejecting misaligned interior addresses instead of skipping characters by byte count.
+      — claimed: Plastic-time, branch bugfix/r3.11-pseudo-string-slice-offsets
+- [x] Decode eBPF/sBPF `ja32` (`0x06`, RFC 9669 §4.3) as an unconditional jump using its 32-bit `imm` slot offset (`Flow::Jump`) and reject undefined `BPF_X` jump/exit encodings (`0x0d`, `0x0e`, and `V1` `0x9d`) as `Flow::Unknown` while keeping Solana `V2` `return` (`0x9d`).
+      — claimed: Plastic-time, branch bugfix/r3.11-sbpf-ja32-and-jump-opcodes
 - [x] Enforce stand-in per-body and total byte budgets on the text that is actually retained after redaction;
       deduplicate consecutive samples before charging the capture budget.
       — claimed: Afloat16, branch bugfix/r3.11-standin-redacted-budget-20261103b
@@ -2062,7 +2253,7 @@ Owner: open · Status: in progress
       kept every folder and link, so a tree of empty folders or links, or one huge folder, had no
       limit. `WalkLimits` bounds the entries examined and the path bytes held (from the file limit,
       4,000,000 entries at most); one folder is listed through a bounded first-names-in-order
-      selection, so a cut listing is the same every time; the walk stops at the first file or entry
+      selection (later read only as far as the limits, below); the walk stops at the first file or entry
       over a limit; cancel is checked while a folder is read. An ASAR's `.unpacked` folder and
       `source_paths` folders say when their listing was cut. The tree-of-links test skipped itself
       on the Windows account used (it can't create links); it needs a run on Linux or macOS
@@ -2072,9 +2263,59 @@ Owner: open · Status: in progress
       — claimed: AlexJoaquimPereira, branch bugfix/r3.11-gitignore-read-cap
 - [ ] The walk's limits are chosen, not measured (4,000,000 entries at most, 256 path bytes an
       entry): time a walk at the ceiling on a real disk and measure what it holds
+- [x] That walk still read a folder to its end to pick its first names in order (100,000 entries
+      read for a limit of 2), and skipped entries that failed to read in silence: 64 failures in a
+      row came back as an empty folder listed in full. A folder is now read only as far as the
+      walk's entry and path-byte limits go, and one entry more that says the folder holds more, so
+      a whole walk takes at most its entry limit plus one from the system; cancel is looked at
+      before every read. A cut listing holds the entries the system returned first, sorted by name
+      (no longer the folder's first names in order, so the same cut every time only where the
+      system lists an unchanged folder in the same order). Entries that couldn't be read, while
+      listing or when looked at, mark the walk as cut short and put their folder in `unlisted` with
+      a count and the first reason (`.` for the root). The notes that named only the file-count or
+      depth limit name every limit. An entry that is there but can't be looked at was run with a
+      made-up name only, not with a real permission failure
+- [x] Five calls of `walk_dir` (`apple_tools` twice, `application_tools`, `managed_tools`,
+      `web_tools`) read only `truncated`, so a folder with unreadable entries read there as "cut
+      short" without naming the folder or the reason. `app_source_import`, `js_source_bundle_compare`
+      (a source folder given as a path), `apple_nib_decode`, `apple_dylibs_resolve`,
+      `managed_reconstruction_check` and `js_sources_restore` now carry an `unlisted_folders`
+      limitation (or note) naming the first five such folders with the system's reason, and how many
+      more there are (it isn't a full list), and partial coverage; a folder below the root that can't
+      be listed at all marks the walk as cut short too. When nothing is found to work on (no `.cs`
+      files, no scripts), the error names the folders that couldn't be listed and says to make them
+      readable; inputs with the same folder name are told apart (`dist (input 2)`), and
+      `apple_dylibs_resolve` is partial whenever its walk was cut. Tested on Windows with a folder
+      held without sharing; the Unix path (no permission) runs in CI
+- [x] `managed_reconstruction_check` stops reading `.cs` files at its file or size budget and says so
+      in a note, but its coverage stays complete, so members declared only in an unread file read as
+      missing in a complete check (CodeRabbit on #2106): carry the cut into coverage, apart from the
+      unlisted-folder limitation. Coverage is now partial (no total) when the file or size budget
+      stops the reading, a `.cs` file can't be read, or the folder walk was cut short (a depth or
+      entry limit), as it already was for unlisted folders. The budget, size, depth and unreadable-file
+      cases are tested (the unreadable file through `walk_testing::close`, now also for a file; run
+      on macOS only, the Windows path is untried)
+      — claimed: mansur-akhmadi, branch bugfix/r3.11-reconstruction-check-cut-coverage
+- [x] `managed_reconstruction_check` caps actual source reads with the regular-file reader: a
+      single file gets 64 MiB, and each directory file gets only the remaining aggregate budget,
+      even if it grows after inventory or during the read. A size refusal stops reading and keeps
+      coverage partial. When no source is readable, the error carries the first five source-read
+      notes, a count of further notes, the walk cut and the existing unlisted-folder details.
+      Regression tests grow or remove real files after inventory and cover exact-limit/empty
+      files, oversized single files and bounded error details. Valid source handling is unchanged.
+      — claimed: MacallanTheRoot, branch bugfix/r3.11-bounded-managed-sources — PR #2144
+- [ ] `js_sources_restore` keeps every unlisted folder of every input in memory to name five of them:
+      keep the count and the first five (CodeRabbit on #2106)
+      — claimed: hichang4u, branch bugfix/r3.11-walk-gaps-named
+      — claimed: hichang4u, branch bugfix/r3.11-walk-entry-reads
 - [x] `core_archives_compare` reports `rows_capped` and a partial-coverage limitation when the
       added, removed, changed or moved lists are cut at `max_rows`, while its counts stay complete.
       — claimed: AlexJoaquimPereira, branch bugfix/r3.11-archive-compare-rows
+- [x] `core_archive_show` on a folder added every folder and link before any file, so when
+      `max_entries` cut the list, folders pushed files out: a folder with 5 files and 2,001
+      subfolders read "0 files in 100 entries". Folders, links and files are now one list in path
+      order before the cut, and no file after the cut is read
+      — claimed: hichang4u, branch bugfix/r3.11-inventory-path-order
 
 ### R3.12 Format parser correctness
 Owner: open · Status: in progress
@@ -2082,6 +2323,8 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch bugfix/r3.12-source-map-comparison-uncertainty-20261111
 - [x] Bound expanded source-map inventories by retained path bytes and entries before allocation, preserving bounded prefixes and reporting truncation.
       — claimed: Afloat16, branch bugfix/r3.12-source-inventory-budget-20261111
+- [x] Count embedded `sourcesContent` across nested inline sections in indexed source maps and strip only the literal `.map` suffix from stand-alone map paths.
+      — claimed: Plastic-time, branch bugfix/r3.12-indexed-sourcemap-content-counts
 - [x] Preserve readable ZIP64 end-record fields with framing warnings and classic fallback for unusable locators; reject undersized, overflowing or truncated fixed records.
       — claimed: Afloat16, branch bugfix/r3.12-zip64-record-extent
 - [x] Recover ZIP64 records shifted by prepended data with a bounded lookbehind and preserve the fallback for locator-shaped classic comments.
@@ -2092,6 +2335,10 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch bugfix/r3.12-pyc-truncated-text-evidence-20261110
 - [x] Keep worker, service-worker and utility-process entry modules in their own execution role instead of inheriting the parent role through spawn edges.
       — claimed: Afloat16, branch bugfix/r3.12-worker-role-boundaries
+- [x] Point `js_ledger` `storage`, methodless `endpoint`, and listed `.node` expectations at their actual `AppGraph` `source_node` IDs, deduplicate candidate expectations by `expectation_id`, and aggregate all `Binding` records from the same owner without dropping later cases or hiding a failing verifier.
+      — claimed: Plastic-time, branch bugfix/r3.12-js-ledger-storage-and-bindings
+- [x] Check each evidence id once per `js_ledger` build so a result published mid-build can't prove a row with no selected result, require a selected verifier result for `proven`, and break verifier ties by strength and status so gap messages don't depend on binding order.
+      — claimed: Plastic-time, branch bugfix/r3.12-js-ledger-verifier-ties
 - [x] Read the explicit module-format byte in current Node SEA blobs while retaining the older layouts;
       report the stored format and recover the main script, assets and execution arguments at their real offsets.
       — claimed: Afloat16, branch bugfix/r3.12-node-sea-module-format-20261110
@@ -2107,6 +2354,17 @@ Owner: open · Status: in progress
       limitation says a list was cut; resolve every retained import, report facts truncation, and
       make `js_app_map` coverage partial.
       — claimed: AlexJoaquimPereira, branch bugfix/r3.12-import-facts-truncation
+- [x] Exclude `.d.mts` and `.d.cts` declaration files from `js_app` script modules and import resolution, and resolve TypeScript `.js`/`.mjs`/`.cjs`/`.jsx` → `.ts`/`.tsx`/`.mts`/`.cts` source specifiers, `.mts`/`.cts` modules, directory `index` files, and Electron preload paths in unbuilt TypeScript trees.
+      — claimed: Plastic-time, branch bugfix/r3.12-js-app-typescript-resolution
+- [x] #2097 follow-up: in `js_app`, check exact (and ambiguous) tails before TypeScript source
+      fallbacks, strip `?query`/`#fragment` before tail lookups, skip scheme-relative HTML
+      references, keep local references whose query holds a URL, and stop turning unresolved
+      HTML script/preload paths into `external:*` packages.
+      — claimed: Plastic-time, branch bugfix/r3.12-js-app-tail-order-and-html-refs
+- [x] Treat any URL scheme of two or more characters (`data:`, `blob:`; one letter before `:` is read as a Windows drive) in `js_app` HTML refs and remote window loads as external, read HTML `src`/`href` without surrounding spaces, normalise exact tails before lookup, keep files in a `node_modules` directory segment out of tail matches, and look tails up in one index per analysis instead of scanning the inventory per reference (#2113).
+      — claimed: Plastic-time, branch bugfix/r3.12-js-app-tail-resolution
+- [x] Read `file://localhost/` window loads as `file:///`, and treat a final `.` or `..` segment as a folder for `resolve_path` callers and HTML modulepreload references (#2113 follow-up).
+      — claimed: Plastic-time, branch bugfix/r3.12-js-app-file-localhost-dot-folders
 - [x] Preserve webpack factory parameter names when direct eval can read them.
       — claimed: Plastic-time, branch bugfix/r3.12-js-eval-param-renaming-1115
 - [x] Preserve void zero expressions when a with statement can dynamically resolve undefined.
@@ -2119,12 +2377,33 @@ Owner: open · Status: in progress
       — claimed: Plastic-time, branch bugfix/r3.12-js-scoped-vendor-1115
 - [x] Allocate distinct recovered module paths after repeated content-hash collisions.
       — claimed: Plastic-time, branch rrfz/bugfix-r3.12-js-module-collisions
+- [x] Strip only literal URI scheme prefixes in `safe_module_path` and preserve module extensions when disambiguating duplicate recovered paths.
+      — claimed: Plastic-time, branch bugfix/r3.12-js-recover-module-paths
+- [x] Deduplicate recovered JavaScript module paths case-insensitively across base names, hash suffixes, and occurrence suffixes so case-only variants are not omitted on case-insensitive filesystems.
+      — claimed: Plastic-time, branch bugfix/r3.12-js-recover-case-collisions
+- [x] Strip trailing dots from recovered module and captured web-script path segments (including segments cut on `.` and FQDN trailing-dot hosts) so Windows does not fold them onto sibling paths, and match known module extensions case-insensitively in `safe_module_path`.
+      — claimed: Plastic-time, branch bugfix/r3.12-js-recover-trailing-dots-and-ext-case
 - [x] Bound the text JavaScript facts build from constant strings, so repeated concatenation of a constant with itself cannot grow without limit.
       — claimed: Plastic-time, branch bugfix/r3.12-js-constant-text-budget
 - [x] Read `.cts` files as CommonJS and `.mts` files as ES modules, as Node and TypeScript do, instead of guessing from the syntax.
       — claimed: Plastic-time, branch bugfix/r3.12-js-cts-commonjs
+- [x] Reject physical line breaks in regular GraphQL strings, including after a backslash.
+      — claimed: Plastic-time, branch bugfix/r3.12-graphql-string-line-breaks
+- [x] Keep escaped triple quotes inside GraphQL block strings when reading operations.
+      — claimed: Plastic-time, branch bugfix/r3.12-graphql-block-strings
+- [x] Keep GraphQL operations in documents that also declare braceless type-system definitions (`scalar`, `union`, `directive`, `extend`) or leading descriptions.
+      — claimed: Plastic-time, branch bugfix/r3.12-graphql-type-system-definitions
+- [x] Skip GraphQL ignored tokens between `@` and directive names in `api_ops` annotations and directive definitions. — claimed: Plastic-time, branch bugfix/r3.12-graphql-directive-trivia
 - [x] Read `+` in JavaScript constant text as JavaScript does: numbers add (`'/v' + (1 + 2)` is `/v3`, not `/v12`) and number literals read as their value (`0x10` is `16`).
       — claimed: Plastic-time, branch bugfix/r3.12-js-numeric-addition
+- [x] Read cooked values of untagged no-substitution template literals across JavaScript fact and bundle extraction (and reject invalid-escape untagged templates instead of reporting raw source text).
+      — claimed: Plastic-time, branch bugfix/r3.12-js-cooked-template-literals
+- [x] Preserve module identity when awaiting a comma sequence ending in dynamic `import(...)` without aliasing unawaited sequences.
+      — claimed: Plastic-time, branch bugfix/r3.12-js-await-sequence-import
+- [x] Walk past the old GNU sparse extension blocks to list the next TAR member.
+      — claimed: Plastic-time, branch bugfix/r3.12-gnu-sparse-extensions
+- [x] Accept the zero checksum placeholder on GNU-style CRC cpio symbolic links.
+      — claimed: Plastic-time, branch bugfix/r3.12-cpio-symlink-crc
 - [x] Refuse oversized GNU tar long names and link targets instead of silently truncating member identities.
       — claimed: Afloat16, branch bugfix/r3.12-tar-long-identities-20261109
       Source [`de2c6390`](https://github.com/Afloat16/craft-anything/commit/de2c63908909cab675887103921ed2601b1bae9b) passed [formats tests, fmt and clippy](https://github.com/Afloat16/claude-mem/actions/runs/42640688213/job/129240669663)
@@ -2184,6 +2463,11 @@ Owner: open · Status: in progress
       — tests cover a UTF-8 character, a UTF-16 surrogate pair and a UTF-16 continuation-like
       byte at the cut; invalid bytes keep their lossy prefix. Claimed: AlexJoaquimPereira,
       branch bugfix/r3.12-sqlite-text-cap
+- [x] Read parenthesized column names in SQLite WITHOUT ROWID primary keys.
+      — claimed: Plastic-time, branch bugfix/r3.12-sqlite-parenthesized-primary-key
+- [x] Read SQLite primary keys across comma-omitted adjacent table constraints and parenthesized rowid aliases. — claimed: Plastic-time, branch bugfix/r3.12-sqlite-adjacent-table-constraints
+- [x] Count SQLite WITHOUT ROWID primary-key fields by column and effective collation.
+      — claimed: Plastic-time, branch bugfix/r3.12-sqlite-key-collations
 - [x] WITHOUT ROWID rows stored before ALTER TABLE ADD COLUMN show the added columns' defaults,
       as rowid tables already do, instead of NULL.
       — claimed: Plastic-time, branch bugfix/r3.12-sqlite-without-rowid-added-columns
@@ -2220,6 +2504,8 @@ Owner: open · Status: in progress
       part as an integer and turns it back into a REAL when it reads the column, so a REAL, FLOAT
       or DOUBLE column holding 1.0 shows 1.0 instead of 1.
       — claimed: Chr0mium24, branch bugfix/r3.12-sqlite-real-affinity
+- [x] Tokenize tight SQLite `CREATE TABLE` identifiers, declared type spans, adjacent column constraints, signed or leading-dot `DEFAULT` clauses (`DEFAULT-5`, `DEFAULT.5`), and semicolon-terminated table options (`STRICT;`, `WITHOUT ROWID;`) without whitespace (#2108). — claimed: Plastic-time, branch bugfix/r3.12-sqlite-tight-type-and-clause-tokens
+- [x] Read `DEFAULT+X'41'` as the blob, and bare `DEFAULT` words with non-ASCII characters or a later `$` as their text, as SQLite does for rows written before the column was added, and skip a byte order mark where a token starts; the `--` after `e` fixture is DDL SQLite creates (#2108 follow-up). — claimed: Plastic-time, branch bugfix/r3.12-sqlite-default-followups
 - [x] Require a complete DNS question's type and class fields before retaining it, and keep
       truncated questions out of packet inventories while reporting the incomplete message
       — claimed: Afloat16, branch bugfix/r3.12-dns-question-class-review-20261104
@@ -2227,6 +2513,8 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch bugfix/r3.12-capture-evidence
 - [x] Reject impossible IPv4 header and total lengths.
       — claimed: Afloat16, branch bugfix/r3.12-ipv4-header-lengths-20261105
+- [x] Stop IPv6 transport decoding at No Next Header.
+      — claimed: Plastic-time, branch bugfix/r3.12-ipv6-no-next-header
 - [x] Validate the version in IPv6 frames.
       — claimed: Afloat16, branch bugfix/r3.12-ipv6-version-20261105
 - [x] Decode VLAN-encapsulated network packets in Linux cooked v1 and v2 captures.
@@ -2240,6 +2528,8 @@ Owner: open · Status: in progress
       The [unchanged-code baseline](https://github.com/Afloat16/claude-mem/actions/runs/42636776430/job/129226895582) reproduces the new regression cases.
 - [x] Recognize ZIP directories from DOS directory attributes and Unix file-type metadata when the entry name has no trailing slash.
       — claimed: Afloat16, branch bugfix/r3.12-zip-directory-attributes
+- [x] Recognize legacy Zstandard ZIP method 20 in archive reading and firmware discovery.
+      — claimed: Plastic-time, branch bugfix/r3.12-zip-legacy-zstd
 - [x] Read ZIP bzip2 and XZ members through the existing bounded pure-Rust decompressors.
       — claimed: Afloat16, branch feature/r3.12-zip-bzip2-xz-20261109
       Source [`4cac3638`](https://github.com/Afloat16/craft-anything/commit/4cac36386e426e332bd89cb2cfa63894f3a367a5) passed [formats tests, fmt and clippy](https://github.com/Afloat16/claude-mem/actions/runs/42636776430/job/129226892219)
@@ -2252,6 +2542,8 @@ Owner: open · Status: in progress
       Source [`61fdab39`](https://github.com/Afloat16/craft-anything/commit/61fdab39da4849eb5a84196df53c55e19c869134) passed [formats tests, fmt and clippy](https://github.com/Afloat16/claude-mem/actions/runs/42636776430/job/129226892042)
       and [layers, locks, secret scanning, wasm checks and Cargo.lock stability](https://github.com/Afloat16/claude-mem/actions/runs/42640688213/job/129240669663).
       The [unchanged-code baseline](https://github.com/Afloat16/claude-mem/actions/runs/42636776430/job/129226895582) reproduces the new regression cases.
+- [x] Report ECE and CWR alongside the existing TCP flags in packet inventories.
+      — claimed: Plastic-time, branch bugfix/r3.12-tcp-ecn-flags
 - [x] Stop decoding extension headers inside noninitial IPv6 fragments.
       — claimed: Afloat16, branch bugfix/r3.12-ipv6-fragment-payload-20261105
 - [x] Enforce the expanded DNS name wire-length limit.
@@ -2381,6 +2673,10 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch bugfix/r3.12-android-script-locale
 - [x] Bound decoded Android string-pool bytes and disclose partial pools in binary XML and resource tables, so shared offsets cannot multiply a small chunk into unbounded retained strings.
       — claimed: Afloat16, branch bugfix/r3.12-android-pool-retained-bytes-20261110
+- [x] Use the effective Android target SDK when inferring a component's exported state.
+      — claimed: Plastic-time, branch bugfix/r3.12-android-provider-sdk-default
+- [x] Read integer-typed boolean attributes and the unnamespaced manifest package attribute in Android binary XML manifests.
+      — claimed: Plastic-time, branch bugfix/r3.12-axml-typed-booleans
 - [x] Carry incomplete Android manifest decoding into package and component evidence coverage, including the last component page, without substituting ZIP-entry counts for document completeness.
       — claimed: Afloat16, branch bugfix/r3.12-android-manifest-coverage-20261110
 - [x] Read 16-bit native pointers without consuming adjacent bytes.
@@ -2390,6 +2686,8 @@ Owner: open · Status: in progress
 - [x] Preserve a unique versioned ELF import slot when relocation records omit the library name (follow-up to #1365).
       — claimed: Afloat16, branch bugfix/r3.12-elf-versioned-import-slot-fallback-20261109
       — completed: 1179870c55203d946bb8a7412b9b8f1088352fe3
+- [x] Require a NUL terminator in Mach-O load-command paths before reporting path evidence.
+      — claimed: Plastic-time, branch bugfix/r3.12-macho-complete-command-paths
 - [x] Keep Mach-O load-command facts within their command.
       — claimed: Afloat16, branch bugfix/r3.12-macho-load-command-framing-20261105
 - [x] Resolve Mach-O UNIXTHREAD entry points from a complete state record for the image CPU, including later state records.
@@ -2623,6 +2921,8 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch bugfix/r3.12-source-map-data-url-fragment
 - [x] Apply WebAssembly name and producer inventory limits across repeated custom sections and report truncation.
       — claimed: Afloat16, branch bugfix/r3.12-wasm-custom-inventory-budget-20261109
+- [x] List top-level WebAssembly component sections without counting embedded module sections as component sections.
+      — claimed: Plastic-time, branch bugfix/r3.12-wasm-component-layout
 - [x] Bound bytes retained when WebAssembly types and function names are expanded through references, reuse formatted type signatures, and disclose omitted derived metadata.
       — claimed: Afloat16, branch bugfix/r3.12-wasm-reference-bytes-20261110
       Source `232100030ace`; [format checks](https://github.com/Afloat16/claude-mem/actions/runs/42642340046/job/129246412808) and [compatibility gates](https://github.com/Afloat16/claude-mem/actions/runs/42642340046/job/129246412808) passed.
@@ -2630,6 +2930,10 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch bugfix/r3.12-wasm-metadata-limits-20261110
 - [x] Accept only valid WebAssembly names when reporting custom-section debug and source map URLs.
       — claimed: Afloat16, branch bugfix/r3.12-wasm-debug-names
+- [x] Find source map annotations after every ECMAScript line terminator.
+      — claimed: Plastic-time, branch bugfix/r3.12-sourcemap-line-endings
+- [x] Read source map hints inside complete trailing block comments with either annotation marker.
+      — claimed: Plastic-time, branch bugfix/r3.12-sourcemap-block-boundaries
 - [x] Decode the full signed 32-bit source map VLQ range and refuse mapping fields outside it.
       — claimed: Afloat16, branch bugfix/r3.12-sourcemap-vlq-range
 - [x] Reject source map mappings with missing source or name entries.
@@ -2654,14 +2958,24 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch bugfix/r3.12-cli-array-shapes-20261111
 - [x] Recognize volatile type notation from required `System.Runtime.CompilerServices.IsVolatile` modifiers across the complete modifier list.
       — claimed: Afloat16, branch bugfix/r3.12-dotnet-volatile-modifiers-20261110
+- [x] Distribute CLI `GENERICINST` type arguments across `/`-separated nested type segments according to each segment's declared arity (`Outer<int>/Inner`, `Outer<string>/Inner2<int>`). — claimed: Plastic-time, branch bugfix/r3.12-dotnet-nested-generic-signatures
 - [x] Preserve complete Unicode characters in shortened .NET strings.
       — claimed: Afloat16, branch bugfix/r3.12-dotnet-user-string-surrogate-limit-20261105
+- [x] Treat `@`-prefixed C# verbatim identifiers (`@namespace`, `@class`, `@record`, `@event`, `@operator`, `@ref`) as identifiers rather than keywords when scanning declarations.
+      — claimed: Plastic-time, branch bugfix/r3.12-csharp-verbatim-identifiers
+- [x] Check the token `kw` flag before stripping `checked` in C# conversion and checked operators so `@checked` keeps its target type name. — claimed: Plastic-time, branch bugfix/r3.12-csharp-verbatim-checked-conversion
+- [x] Normalize C# metadata `/` nested-type separators, `global::` qualifiers, `ref` parameter modifiers, non-`System` built-in-named types, and zero-based multidimensional array bounds in `dotnet::csharp` reconciliation. — claimed: Plastic-time, branch bugfix/r3.12-csharp-type-normalization
+- [x] Resolve unqualified CLR built-in aliases inside C# conversion targets (including generic arguments under qualified outer types) against enclosing scopes and known types so unshadowed `String` matches `string` even alongside `Other.String` while local `App.String` stays distinct. — claimed: Plastic-time, branch bugfix/r3.12-csharp-conversion-builtin-aliases
+- [x] Resolve C# contextual type keywords (`nint`, `nuint`, `dynamic`) against declared types before built-in fallback, and prefer scope-resolved generic arguments over alias expansion in conversion terminal fallback. — claimed: Plastic-time, branch bugfix/r3.12-csharp-contextual-keywords-and-fallback
+- [x] Keep CLR alias-expanded `nint`/`nuint` generic arguments (`List<IntPtr>`, `List<UIntPtr>`) exact-match-only rather than falling back to imported `Other.nint`/`Other.nuint`.
+      — claimed: Plastic-time, branch bugfix/r3.12-csharp-alias-expanded-nint-fallback
 - [x] Reject CIL branch and switch destinations outside the method body without wrapping signed displacements.
       — claimed: Afloat16, branch bugfix/r3.12-cil-branch-target-ranges-20261111
 - [x] Validate CIL method exception-section kinds, extents and complete clause records before reading exception handlers.
       — claimed: Afloat16, branch bugfix/r3.12-cil-exception-framing-20261110
 - [x] Preserve distinct nonfinite floating-point constants when hashing normalized CIL instructions instead of collapsing them to JSON null, retaining original single-precision NaN bits before widening.
       — claimed: Afloat16, branch bugfix/r3.12-cil-nonfinite-hashes-20261110
+- [x] Propagate enclosing type and method `GenCtx` generic parameters when decoding CLI `Event` types and method-body `TypeSpec`, `MemberRef`, and `MethodSpec` token operands. — claimed: Plastic-time, branch bugfix/r3.12-dotnet-member-body-generic-context
 - [x] Read Dart version hashes and feature strings only from the bytes belonging to that snapshot.
       — claimed: Afloat16, branch bugfix/r3.12-dart-snapshot-extent
 - [x] Keep Dart string-pool duplicate tracking within the retained URI and token limits.
@@ -2672,6 +2986,8 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch bugfix/r3.12-elf-core-file-name-count-cap-20261105
 - [x] Advance ELF core NT_FILE path cursors by complete original byte strings, even when a displayed path is lossy or capped.
       — claimed: Afloat16, branch bugfix/r3.12-elf-core-path-cursor-20261109
+- [x] Build indexed source-map inventories from the section maps.
+      — claimed: Plastic-time, branch bugfix/r3.12-indexed-map-source-inventory
 - [x] Validate index source map section offsets and stop an unresolved section from borrowing mappings from the preceding section.
       — claimed: Afloat16, branch bugfix/r3.12-index-map-boundaries
 - [x] Preserve the URL delimiter in source-map roots when resolving a relative source file.
@@ -2702,12 +3018,18 @@ Owner: open · Status: in progress
       — claimed: Plastic-time, branch bugfix/r3.12-sourcemap-annotation-spacing-1111
 - [x] Keep source map annotation URL suffixes intact.
       — claimed: Plastic-time, branch rrfz/bugfix-r3.12-annotation-20261110
+- [x] Use the legacy HTML script language to classify scripts without a type attribute.
+      — claimed: Plastic-time, branch bugfix/r3.12-html-legacy-script-language
+- [x] Require the exact module keyword in HTML script inventories while retaining whitespace trimming for classic MIME types.
+      — claimed: Plastic-time, branch bugfix/r3.12-html-exact-module-keyword
 - [x] Match HTML script types against complete JavaScript MIME names and the exact module keyword.
       — claimed: Plastic-time, branch bugfix/r3.12-html-types-1116
 - [x] The JavaScript crate's `sourceMappingURL` reader is the formats reader, so the standard
       no-space annotation is found, tabs and repeated spaces are accepted, and a URL containing
       whitespace is rejected, on the parsed and lexer paths alike.
       — claimed: AlexJoaquimPereira, branch bugfix/r3.12-js-sourcemap-annotation
+- [x] Require the full PE signature at the DOS extended-header offset.
+      — claimed: Plastic-time, branch bugfix/r3.12-dos-extended-pe-signature
 - [x] Keep DOS relocations inside the declared executable header.
       — claimed: Afloat16, branch bugfix/r3.12-dos-relocation-header-boundary-20261105
 - [x] Report contradictory DOS executable size declarations as header problems.
@@ -2729,6 +3051,8 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch feature/r3.12-squashfs-lz4-20261110
 - [x] Report truncated SquashFS metadata blocks and retain previously recovered blocks.
       — claimed: Afloat16, branch bugfix/r3.12-squashfs-metadata-warning
+- [x] Bound SquashFS inode and directory metadata tables by every following superblock table (`fragment`, `export`, `id`, `xattr`) and the filesystem size.
+      — claimed: Plastic-time, branch bugfix/r3.12-squashfs-table-bounds
 - [x] Require each raw or decoded file block to cover exactly its logical range, including the partial final block, so short blocks cannot shift later contents and long blocks cannot be hidden by truncation.
       — claimed: Afloat16, branch bugfix/r3.12-squashfs-block-output-size-20261110
 - [x] Recover zero-filled cramfs hole blocks at full and partial page boundaries while retaining the existing recovery budgets.
@@ -2774,6 +3098,8 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch bugfix/r3.12-firmware-zip-extent-20261110
 - [x] Exercise signed PAX lengths, empty keys and equals signs inside a path value.
       — claimed: Afloat16, branch bugfix/r3.12-pax-record-framing
+- [x] Apply valid PAX size overrides before reading the TAR member's legacy size field.
+      — claimed: Plastic-time, branch bugfix/r3.12-tar-pax-size-precedence
 - [x] Reject invalid local PAX sizes before listing the affected TAR member.
       — claimed: Plastic-time, branch bugfix/r3.12-tar-local-pax-size-1112
 - [x] Apply global PAX archive attributes to later members, honor local overrides and global deletions, and bound inherited name copies before extraction.
@@ -2805,6 +3131,8 @@ Owner: open · Status: in progress
       the WITHOUT ROWID marker: find the list's closing parenthesis by tokens, not `rfind(')')`.
       — claimed: Chr0mium24, branch bugfix/r3.12-sqlite-options-after-comment
 
+- [x] Include the legacy uses-permission-sdk-m tag in Android manifest permission inventories.
+      — claimed: Plastic-time, branch bugfix/r3.12-android-sdk-m-permissions
 - [x] Keep Android binary XML events within their document, chunk and attribute bounds.
       — claimed: Afloat16, branch bugfix/r3.12-android-xml-events
 - [x] Reject Java Long and Double constants without their reserved constant-pool slot, including the maximum u16 pool boundary.
@@ -2820,6 +3148,8 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch feature/r3.12-jvm-bootstrap-references
 - [x] Find the method parameter terminator outside object type names in JVM descriptors.
       — claimed: Afloat16, branch bugfix/r3.12-java-descriptor-boundary
+- [x] Report incomplete Java class attribute tables while keeping readable attributes.
+      — claimed: Plastic-time, branch bugfix/r3.12-java-truncated-attributes
 - [x] Validate complete JVM switch payloads before reserving pairs, and reject duplicate or descending lookup keys instead of emitting invalid control-flow facts.
       — claimed: Afloat16, branch bugfix/r3.12-java-switch-tables-20261110
 - [x] Stop JVM bytecode decoding on invalid primitive array type codes or zero-dimensional multidimensional allocations while retaining valid allocations.
@@ -2853,6 +3183,8 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch bugfix/r3.12-nib-utf16-detection-20261111
 - [x] Distinguish the keyed archive's null sentinel at object zero from ordinary stored strings containing the same text.
       — claimed: Afloat16, branch bugfix/r3.12-keyed-archive-null-string-20261110
+- [x] Resolve UID-referenced `NS.bytes` string payloads within the retained-byte budget and project integer `NSDate` `NS.time` values in keyed archives.
+      — claimed: Plastic-time, branch bugfix/r3.12-keyed-archive-nsbytes-nsdate
 - [x] Reject NIB variable-length integers whose tenth byte exceeds the unsigned 64-bit range, instead of letting truncated high bits become an unrelated length or index.
       — claimed: Afloat16, branch bugfix/r3.12-nib-integer-overflow-20261110
 - [x] Accept binary plist arrays and sets that name one stored value many times; repeated data and
@@ -2860,6 +3192,10 @@ Owner: open · Status: in progress
       — claimed: Plastic-time, branch bugfix/r3.12-plist-shared-array-values
 - [x] Bound NIB object copies by their retained data, key and class bytes so shared value ranges cannot amplify a small archive beyond the byte budget.
       — claimed: Afloat16, branch bugfix/r3.12-nib-retained-bytes-20261110
+- [x] Use the complete SQLite type spelling to decide whether a quoted primary key aliases the rowid.
+      — claimed: Plastic-time, branch bugfix/r3.12-sqlite-type-boundaries
+- [x] Read a quoted SQLite column type as its type name, including an INTEGER rowid alias.
+      — claimed: Plastic-time, branch bugfix/r3.12-sqlite-quoted-types
 - [x] Separate SQLite column names from their types at carriage returns and form feeds.
       — claimed: Plastic-time, branch bugfix/r3.12-sqlite-column-whitespace-1112
 - [x] SQLite column names read whole when quoted: a doubled quote inside one stands for a quote,
@@ -2980,6 +3316,8 @@ Owner: open · Status: in progress
 
 - [x] Require call syntax for tRPC client hooks in JavaScript lexer fallback facts.
       — claimed: Plastic-time, branch bugfix/r3.12-trpc-calls-1116
+- [x] Keep literal dynamic imports with options or a trailing comma in JavaScript lexer fallback facts.
+      — claimed: Plastic-time, branch bugfix/r3.12-dynamic-import-options
 - [x] Keep side-effect imports in JavaScript lexer fallback facts.
       — claimed: Plastic-time, branch bugfix/r3.12-js-side-effect-imports-1115
 - [x] Bound the JavaScript lexer fallback's `endpoints` (fetch calls and URL literals) and
@@ -2987,6 +3325,15 @@ Owner: open · Status: in progress
       in `truncated` when a fetch call is dropped, so a huge or unparsable bundle can't grow the
       lists without limit.
       — claimed: AlexJoaquimPereira, branch bugfix/r3.12-js-fallback-list-bounds
+- [x] Deduplicate URL literal endpoints against `fetch(...)` calls and earlier literals, decouple
+      URL literal endpoints from `MAX_STRINGS`, raise `.node` native module retention to `MAX_LIST`,
+      and record `strings`, `ipc`, `exposed`, and literal `endpoints` in `truncated` when capped in
+      JavaScript lexer fallback facts.
+      — claimed: Plastic-time, branch bugfix/r3.12-js-fallback-caps-and-truncation
+- [x] Update or invalidate tracked JavaScript constants and module aliases on reassignment,
+      compound/update operations, destructuring or loop bindings, and conditional or loop writes
+      so later calls do not report stale literal endpoints or module calls.
+      — claimed: Plastic-time, branch bugfix/r3.12-js-reassigned-const-aliases
 
 - [x] A source-to-bundle comparison with more scripts than `max_rows` now says how many it examined
       (`scripts_examined`), keeps the unclaimed-unit total complete, marks `rows_capped`, and adds a
@@ -3003,6 +3350,21 @@ Owner: open · Status: in progress
       with left/right labels.
       — claimed: AlexJoaquimPereira, branch bugfix/r3.12-compare-graph-limitations
 
+- [x] Match modules, bundle modules, and export outlines in `js_compare` across exclusive
+      priority passes so each right-hand module is claimed at most once and lower-priority
+      matches cannot steal later exact-path or higher-tier pairs.
+      — claimed: Plastic-time, branch bugfix/r3.12-js-compare-exclusive-tiers
+- [x] Preserve non-empty and distinct vendor versions across duplicate markers or banners in
+      `js_compare::compare_versions` so trailing empty or later versions do not overwrite
+      earlier version evidence.
+      — claimed: Plastic-time, branch bugfix/r3.12-js-compare-vendor-versions
+- [x] Honour leading backslash wildcard escapes, escaped trailing spaces, slash-bounded `**`
+      segments, and excluded parent-directory propagation in `js_source::Ignore`.
+      — claimed: Plastic-time, branch bugfix/r3.12-gitignore-pattern-rules
+- [x] Recognize an escaped slash (`\/`) after a `**` globstar segment in `js_source::Ignore`
+      while preserving the separate literal slash token.
+      — claimed: Plastic-time, branch bugfix/r3.12-gitignore-globstar-escaped-slash
+
 
 - [x] Take target file signatures from the shared craft-sniff table. The app still breaks ties
       that need its own parsers (managed PE, Java class versus a universal Mach-O, APK by name
@@ -3013,10 +3375,26 @@ Owner: open · Status: in progress
 Owner: open · Status: in progress
 - [x] Decode character references in HTML page titles before returning their displayed text.
       — claimed: Plastic-time, branch rrfz/bugfix-r3.13-html-title-entities
+- [x] Resolve embedded source snippets, `ignoreList` flags and total source counts from the active section map when tracing generated locations in indexed source maps.
+      — claimed: Plastic-time, branch bugfix/r3.13-indexed-sourcemap-trace-context
+- [x] Deduplicate exported web-capture script paths case-insensitively, preserve uppercase `.JS`/`.MJS`/`.CJS` extensions, and keep flat `.hash.N` occurrence suffixes in `web_scripts::plan_layout`.
+      — claimed: Plastic-time, branch bugfix/r3.13-web-scripts-layout-collisions
+- [x] Share `recover::module_path_key` and `recover::ancestor_dir_keys` across `recover_modules` and `web_scripts::plan_layout`, expanding APFS multi-character case foldings (`ß`/`ss`) and resolving file/parent-directory collisions in either order.
+      — claimed: Plastic-time, branch bugfix/r3.13-share-path-collision-key
+- [x] Write captured HAR request body MIME types from the retained request headers.
+      — claimed: Plastic-time, branch bugfix/r3.13-har-request-mime
 - [x] Report received HAR response body sizes separately from decoded content sizes and identify entries whose sizes are unknown.
       — claimed: Afloat16, branch bugfix/r3.13-har-transfer-size
 - [x] Read HAR captures with the permitted UTF-8 byte order mark.
       — claimed: Afloat16, branch bugfix/r3.13-har-bom-bounds-20261107
+- [x] Retain multiple HTML meta Content-Security-Policy values in page evidence.
+      — claimed: Plastic-time, branch bugfix/r3.13-html-meta-csp-list
+- [x] Require complete HTML start tags before recording scripts, preloads and page metadata.
+      — claimed: Plastic-time, branch bugfix/r3.13-html-incomplete-tags
+- [x] Resume scanning after an HTML comment that a browser closes with `--!>` or an abrupt empty end.
+      — claimed: Plastic-time, branch bugfix/r3.13-html-comment-endings
+- [x] Skip bogus HTML comments opened by unknown declarations and malformed end tags before listing scripts or preloads.
+      — claimed: Plastic-time, branch bugfix/r3.13-html-bogus-comments
 - [x] The HTML scanner finds script preloads in `rel` token lists, decodes asset URLs once (numeric
       and named references), keeps script and title text through lookalike closing tags, and skips
       raw-text elements, markup inside attribute values and custom tag names such as
@@ -3025,12 +3403,34 @@ Owner: open · Status: in progress
       backend matches older recordings the same way), redact declared secrets in every kept field
       (names, methods, hosts, versions, timings), count body bytes before text conversion, and
       template only real calendar dates in API paths (#602–#605, by Afloat16)
+- [x] Redact declared HAR secrets in `application/x-www-form-urlencoded` spellings (`+` with `%XX`), mixed-case percent escapes and encoded form field names.
+      — claimed: Plastic-time, branch bugfix/r3.13-har-secret-encodings
+- [x] Redact declared secrets across `application/x-www-form-urlencoded` (`+` with `%XX`), ASCII case variants, and mixed-case percent-hex escapes in `web_common::Secrets` used by live browser and Electron capture tools. — claimed: Plastic-time, branch bugfix/r3.13-web-common-secret-encodings
+- [x] Share `encode_query`, `contains_ascii_ci`, and overlapping span-merging `replace_needles_with` from `analysis::web_har` across HAR, stand-in, and `web_common::Secrets` redaction. — claimed: Plastic-time, branch bugfix/r3.13-share-secret-redaction-helpers
 - [x] Preserve empty query pairs when matching older stand-in recordings, without treating raw
       query separators as pairs — claimed: Afloat16, branch `bugfix/r3.13-preserve-empty-query-pairs-20261103`
 - [x] A walkthrough's `keep_bodies` keeps response bodies only for the first 200 requests and says
       nothing about the rest (#1811; `web_page_show`'s outlines were fixed in #1845): count the kept
       bodies and say how many were left out and why.
       — claimed: htcom-code, branch bugfix/r3.13-body-outline-cap
+- [x] A page that opens an `alert` on load makes `web_site_open` time out (#2010): answer the
+      page's JavaScript dialogs (accept `alert`/`beforeunload`, dismiss `confirm`/`prompt`) and say
+      which ones it opened. — claimed: htcom-code, branch bugfix/r3.13-js-dialog-blocks-open
+- [x] The tools that connect to a page on their own (`browser_tools.rs`: walkthroughs and
+      `web_page_show`; `web_runtime_tools.rs`; `electron_runtime_tools.rs`) don't answer JavaScript
+      dialogs yet, so a page that opens one mid-run still stalls them: give them
+      `CdpClient::answering_dialogs` and report the dialogs the same way (#2010). Done: they answer
+      the page's dialogs (alerts and leave-page questions accepted, confirm and prompt dismissed)
+      and list each one with its answer in the result and summary; fake-CDP regressions cover
+      `web_page_show`, a walkthrough, coverage measurement, listeners and the module graph.
+      — claimed: AlexJoaquimPereira, branch bugfix/r3.13-page-tools-dialogs
+- [x] `web_page_js_analyze` and `web_page_watch` still attach to a page without answering its
+      dialogs, as do `web_mcp_tools_list` and `web_page_screenshot_take`: a page that opens one
+      mid-run can still stall them. Done: all four use the answering connect, which enables Page
+      so Page.javascriptDialogOpening arrives; each result and summary lists the dialogs, with
+      declared secrets redacted where the tool has hidden values. Fake-CDP regressions cover all
+      four
+      — claimed: AlexJoaquimPereira, branch bugfix/r3.13-remaining-page-dialogs
 
 ---
 

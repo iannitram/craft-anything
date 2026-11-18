@@ -665,6 +665,13 @@ fn an_ais_model_is_changed() {
     assert_eq!(h.options().get("Claude Code").and_then(|o| o.cli_model.clone()), None);
     assert!(!h.set_model("Nobody", "m").unwrap());
     assert!(h.set_model("Box", " ").is_err());
+    // #2109: Codex takes a model the same way, and its default clears it, so no -m is passed.
+    let codex = BackendConfig { name: "Codex".into(), kind: BackendKind::AgentCli, model: "codex".into(), base_url: None, ssh_host: None, enabled: true };
+    h.add_backend(codex, None).unwrap();
+    assert!(h.set_model("Codex", "first").unwrap());
+    assert_eq!(h.options().get("Codex").and_then(|o| o.cli_model.clone()).as_deref(), Some("first"));
+    assert!(h.set_model("Codex", crate::anthropic::CLAUDE_CODE_DEFAULT).unwrap());
+    assert_eq!(h.options().get("Codex").and_then(|o| o.cli_model.clone()), None);
 
     // The Claude Code adapter is also registered as `claude`; the default must clear for that id
     // too, or a run would pass `--model default` (#470 review).
@@ -926,7 +933,8 @@ pub(crate) fn serve_routes(routes: &'static [(&'static str, &'static str)]) -> S
 
 /// #1434: FastFlowLM's `/models` lists every model it can download; taking the first started a
 /// 5.5 GB download and unloaded the model in use. A chat model the server says is loaded comes
-/// first; without `/api/ps`, or with nothing loaded, the first chat model listed is still used.
+/// first; without `/api/ps`, or with nothing loaded, the person chooses between several chat
+/// models, and the only one is used.
 #[test]
 fn a_server_added_without_a_model_gets_the_one_it_has_loaded() {
     let (h, _d) = hub();
@@ -938,9 +946,21 @@ fn a_server_added_without_a_model_gets_the_one_it_has_loaded() {
     assert_eq!(h.add_server("Npu", &flm, None, None).unwrap(), "qwen3.8-mtp-uncensored:27b", "the loaded chat model, not an embedding one");
     assert_eq!(h.add_server("Named", &flm, Some("gemma3:1b"), None).unwrap(), "gemma3:1b", "a named model still wins");
     let idle = serve_routes(&[("/v1/models", CATALOGUE), ("/api/ps", r#"{"models":[]}"#)]);
-    assert_eq!(h.add_server("Idle", &idle, None, None).unwrap(), "deepseek-r1:8b", "nothing loaded: the list's first");
     let no_ps = serve_routes(&[("/v1/models", CATALOGUE)]);
-    assert_eq!(h.add_server("Studio", &no_ps, None, None).unwrap(), "deepseek-r1:8b", "no /api/ps: the list's first");
+    for (name, url) in [("Idle", &idle), ("Studio", &no_ps)] {
+        let e = h.add_server(name, url, None, None).unwrap_err();
+        assert_eq!(e.code, ErrorCode::BadInput, "{name}: {e:?}");
+        assert_eq!(models_to_choose(&e), ["deepseek-r1:8b", "gemma3:1b", "qwen3.8-mtp-uncensored:27b"], "{name}");
+        assert!(e.message.contains("lists 3 chat models"), "{e:?}");
+        assert!(e.remediation.as_deref().is_some_and(|r| r.contains("deepseek-r1:8b, gemma3:1b")), "{e:?}");
+    }
+    assert_eq!(h.add_server("Studio", &no_ps, Some("gemma3:1b"), None).unwrap(), "gemma3:1b", "the chosen one is added");
+    // One chat model beside an embedding one: nothing to choose.
+    let one = serve_routes(&[("/v1/models", r#"{"object":"list","data":[{"id":"nomic-embed-text"},{"id":"qwen3:8b"}]}"#)]);
+    assert_eq!(h.add_server("One", &one, None, None).unwrap(), "qwen3:8b");
+    assert!(models_to_choose(&ToolError::invalid("other")).is_empty(), "other errors offer nothing");
+    let names: Vec<_> = h.backends().into_iter().map(|b| b.name).collect();
+    assert!(!names.iter().any(|n| n == "Idle"), "nothing added while a choice is owed: {names:?}");
 }
 
 /// #54, #98: a server on another computer is added by its address, with a model that can chat

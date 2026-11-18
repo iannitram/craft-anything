@@ -305,6 +305,7 @@ Couldn't look through that folder.	无法查看该文件夹。
 Couldn't open it.	无法打开。
 Couldn't open the folder.	无法打开文件夹。
 Couldn't open {}: {}	无法打开 {}：{}
+Couldn't save your settings.	无法保存设置。
 Couldn't start a worker thread: {e}	无法启动工作线程：{e}
 Couldn't start it.	无法启动。
 Coverage unknown	覆盖范围未知
@@ -987,6 +988,7 @@ Saved in	保存位置
 Saves space: copies the program and code, and shares dependencies and media with the project. A shared file rewritten in place changes here too.	节省空间：复制程序和代码，与项目共享依赖和媒体文件。共享文件被原位重写时，此处的内容也会改变。
 Say what you want	描述你的需求
 Say what you want first.	请先描述你的需求。
+This applies once you choose something to recreate above.	在上方选择要重现的内容后，此项才会生效。
 Say what you want to make, or drop an app or file on the window to look inside it. Everything runs in Clean room mode unless you switch on Deep.	描述你想制作的内容，或将应用或文件拖到窗口中查看其内部。除非开启深度模式，否则所有操作都在净室模式下进行。
 Screenshot	截图
 Screenshot a page	截取网页图片
@@ -1192,6 +1194,7 @@ Use the projects folder	使用项目文件夹
 Use this	使用此项
 Use {name}	使用 {name}
 Value flow	值流向
+About	关于
 Version	版本
 Waiting	等待中
 Waiting for another build to finish: this one starts next.	等待另一个构建完成：接下来就会开始。
@@ -1447,6 +1450,7 @@ Zoom	缩放
 Bring all to front	前置全部窗口
 Drag to give the plan more or less room; double-click to reset	拖动以调整计划占用的空间；双击恢复默认
 Copy the message	复制这条消息
+Copy the version	复制版本号
 Choose what the builder's approvals get	选择如何处理构建助手的审批
 Reading the web	读取网页
 Other commands	其他命令
@@ -1493,3 +1497,8 @@ You're up to date.	已是最新版本。
 Forget a website sign-in	忘记网站登录
 Sign in to a website	登录网站
 Some shared files could not be hard-linked and were copied instead ({size}).	部分共享文件无法建立硬链接，已改为复制（{size}）。
+This server lists several chat models. Choose one:	此服务器提供多个聊天模型。请选择一个：
+Choose a model	选择模型
+
+# Saved-builder notice: English until native-speaker review.
+The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

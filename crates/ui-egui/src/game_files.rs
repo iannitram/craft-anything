@@ -3,13 +3,13 @@
 //! Everything runs through the engine's `game_*` tools; this screen only shows and asks.
 
 use crate::i18n::tr;
-use crate::state::{GameFiles, Modal, PendingPicture};
+use crate::state::{GameFiles, GameJob, Modal, PendingPicture};
 use crate::theme::{self, Tokens};
 use crate::{CraftApp, Pick, icons, widgets};
 use craft_anything_engine::evidence::ToolError;
 use egui::{RichText, Sense, Ui, Vec2};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Rows shown at once in an archive (the filter narrows the rest).
 const SHOWN: usize = 400;
@@ -180,6 +180,7 @@ fn archives(app: &mut CraftApp, ui: &mut Ui, w: f32) {
 
 fn open_archive(app: &mut CraftApp, path: String, kind: String) {
     let g = &mut app.state.game;
+    g.supersede(GameJob::Listing);
     g.open = Some(path.clone());
     g.open_kind = kind.clone();
     g.rows.clear();
@@ -192,7 +193,8 @@ fn open_archive(app: &mut CraftApp, path: String, kind: String) {
         "unreal_iostore" => ("game_iostore_list", json!({"path": path, "limit": 2000})),
         _ => ("game_unity_bundle_list", json!({"path": path, "limit": 2000})),
     };
-    app.act(tool, params, tr("Read a game's files"));
+    let job = app.act(tool, params, tr("Read a game's files"));
+    app.state.game.start(job, GameJob::Listing);
 }
 
 fn contents(app: &mut CraftApp, ui: &mut Ui) {
@@ -310,9 +312,24 @@ pub fn permission_modal(app: &mut CraftApp, ui: &mut Ui, close: &mut bool) {
 
 /// The game's folder was picked: look for its archives.
 pub fn folder_picked(app: &mut CraftApp, folder: PathBuf) {
-    app.state.game = GameFiles { folder: Some(folder.clone()), looking: true, permitted: app.state.game.permitted.clone(), ..Default::default() };
-    app.act("game_archives_list", json!({"path": folder.display().to_string()}), tr("Find a game's files"));
-    app.act("core_target_triage", json!({"path": folder.display().to_string()}), tr("Look at a game"));
+    // The tools take paths as text, so a name that isn't text can't be looked through; say so
+    // instead of sending a lossy path that names something else.
+    let Some(path) = folder.to_str() else {
+        app.toast(tr("That folder's name has characters Craft Anything can't read. Pick another folder."), true);
+        return;
+    };
+    let path = path.to_string();
+    // A job from the folder shown before stays known (so its failure is logged, not said), but
+    // the screen no longer waits for it.
+    let mut jobs = std::mem::take(&mut app.state.game.jobs);
+    for pending in jobs.values_mut() {
+        pending.current = false;
+    }
+    app.state.game = GameFiles { folder: Some(folder), looking: true, permitted: app.state.game.permitted.clone(), jobs, ..Default::default() };
+    let archives = app.act("game_archives_list", json!({"path": path.clone()}), tr("Find a game's files"));
+    let triage = app.act("core_target_triage", json!({"path": path}), tr("Look at a game"));
+    app.state.game.start(archives, GameJob::FolderScan);
+    app.state.game.start(triage, GameJob::Triage);
 }
 
 /// Where to save the pending picture was picked: save it.
@@ -341,8 +358,30 @@ pub fn suggested_name(app: &CraftApp) -> String {
     app.state.game.pending.as_ref().map_or_else(|| "picture.png".to_string(), |p| p.name.clone())
 }
 
+/// The Game files tools whose answer belongs to a job the screen started.
+fn looked_up(tool: &str) -> bool {
+    matches!(tool, "game_archives_list" | "core_target_triage" | "game_pak_list" | "game_unity_list" | "game_iostore_list" | "game_unity_bundle_list")
+}
+
+/// A finished save belongs to the archive still on screen.
+fn still_showing(app: &CraftApp, params: &Value) -> bool {
+    let Some(asked) = params.get("path").and_then(Value::as_str) else { return false };
+    let asked = craft_anything_engine::workspace::normalized(Path::new(asked));
+    app.state.game.open.as_deref().is_some_and(|shown| craft_anything_engine::workspace::normalized(Path::new(shown)) == asked)
+}
+
 /// A game tool finished.
-pub fn tool_done(app: &mut CraftApp, tool: &str, result: Result<Value, ToolError>) {
+pub fn tool_done(app: &mut CraftApp, job: u64, tool: &str, params: &Value, result: Result<Value, ToolError>) {
+    if looked_up(tool) {
+        // The job id, not the folder or archive path, says whether the screen still waits for
+        // this answer: picking A, B and A again leaves the first A's answer stale.
+        let Some(pending) = app.state.game.finish(job) else { return };
+        if !pending.current {
+            return;
+        }
+    } else if !still_showing(app, params) {
+        return;
+    }
     let g = &mut app.state.game;
     match (tool, result) {
         ("game_archives_list", Ok(v)) => {
@@ -360,6 +399,10 @@ pub fn tool_done(app: &mut CraftApp, tool: &str, result: Result<Value, ToolError
             let msg = format!("{} {}", tr("Saved"), v["output"].as_str().unwrap_or_default());
             app.toast(msg, false);
         }
+        // A failed save says so; it isn't the archive's listing failing.
+        ("game_unreal_texture_export" | "game_unity_asset_export", Err(e)) => {
+            app.toast(e.for_people(), true);
+        }
         (_, Ok(v)) => {
             g.loading = false;
             g.rows = v["files"].as_array().or_else(|| v["objects"].as_array()).cloned().unwrap_or_default();
@@ -368,5 +411,207 @@ pub fn tool_done(app: &mut CraftApp, tool: &str, result: Result<Value, ToolError
             g.loading = false;
             app.toast(e.for_people(), true);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jobs::Finished;
+    use crate::state::PendingGameJob;
+    use crate::{Done, demo};
+    use craft_anything_engine::Mode;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    fn app() -> CraftApp {
+        demo::app(demo::engine(Mode::Beginner, true))
+    }
+
+    fn two_folders() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let a = d.path().join("a");
+        let b = d.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        (d, a, b)
+    }
+
+    /// The id of the job of `kind` the screen is (or isn't) still waiting for.
+    fn job_of(app: &CraftApp, kind: GameJob, current: bool) -> u64 {
+        app.state.game.jobs.iter().find(|(_, pending)| pending.kind == kind && pending.current == current).map(|(id, _)| *id).expect("a game job of that kind")
+    }
+
+    #[test]
+    fn a_look_for_another_game_folder_is_ignored() {
+        let (_d, a, b) = two_folders();
+        let mut app = app();
+        app.state.game.folder = Some(b.clone());
+        app.state.game.looking = true;
+        app.state.game.jobs.insert(1, PendingGameJob { kind: GameJob::FolderScan, current: false });
+        app.state.game.jobs.insert(2, PendingGameJob { kind: GameJob::Triage, current: false });
+        app.state.game.jobs.insert(5, PendingGameJob { kind: GameJob::FolderScan, current: true });
+        app.state.game.jobs.insert(6, PendingGameJob { kind: GameJob::Triage, current: true });
+        tool_done(
+            &mut app,
+            1,
+            "game_archives_list",
+            &json!({"path": a.display().to_string()}),
+            Ok(json!({"folder": a.display().to_string(), "archives": [{"path": "a.pak"}]})),
+        );
+        assert!(app.state.game.archives.is_empty(), "an old look doesn't fill the new game: {:?}", app.state.game.archives);
+        assert!(app.state.game.looking, "the new game's look is still running");
+        tool_done(&mut app, 2, "core_target_triage", &json!({"path": a.display().to_string()}), Ok(json!({"game": {"engine": "Unreal"}})));
+        assert!(app.state.game.profile.is_none(), "an old profile isn't the new game's");
+
+        tool_done(
+            &mut app,
+            5,
+            "game_archives_list",
+            &json!({"path": b.display().to_string()}),
+            Ok(json!({"folder": b.display().to_string(), "archives": [{"path": "b.pak"}]})),
+        );
+        assert_eq!(app.state.game.archives.len(), 1);
+        assert!(!app.state.game.looking);
+        tool_done(&mut app, 6, "core_target_triage", &json!({"path": b.display().to_string()}), Ok(json!({"game": {"engine": "Unity"}})));
+        assert_eq!(app.state.game.profile.as_ref().unwrap()["game"]["engine"], "Unity");
+    }
+
+    #[test]
+    fn a_stale_look_for_the_same_folder_is_ignored() {
+        let (_d, a, _b) = two_folders();
+        let mut app = app();
+        // Both picks run through the screen's own path, and results arrive through the app's dispatch.
+        folder_picked(&mut app, a.clone());
+        let first = job_of(&app, GameJob::FolderScan, true);
+        folder_picked(&mut app, a.clone());
+        let second = job_of(&app, GameJob::FolderScan, true);
+        assert_ne!(first, second, "the second pick starts a new look");
+        app.handle_done(Finished {
+            job: first,
+            result: Ok(Done::Acted {
+                tool: "game_archives_list",
+                params: json!({"path": a.display().to_string()}),
+                result: Ok(json!({"folder": a.display().to_string(), "archives": [{"path": "old.pak"}]})),
+            }),
+        });
+        assert!(app.state.game.archives.is_empty(), "the first A look is stale after A was picked again: {:?}", app.state.game.archives);
+        assert!(app.state.game.looking, "the newer A look is still running");
+        app.handle_done(Finished {
+            job: second,
+            result: Ok(Done::Acted {
+                tool: "game_archives_list",
+                params: json!({"path": a.display().to_string()}),
+                result: Ok(json!({"folder": a.display().to_string(), "archives": [{"path": "new.pak"}]})),
+            }),
+        });
+        assert_eq!(app.state.game.archives.len(), 1);
+        assert!(!app.state.game.looking);
+    }
+
+    #[test]
+    fn a_failed_worker_settles_only_its_own_game_request() {
+        let (_d, a, _b) = two_folders();
+        let mut app = app();
+        folder_picked(&mut app, a.clone());
+        let scan = job_of(&app, GameJob::FolderScan, true);
+        let triage = job_of(&app, GameJob::Triage, true);
+        // A failed triage is said, but it holds neither spinner.
+        app.handle_done(Finished { job: triage, result: Err("triage failed".into()) });
+        assert!(app.state.game.looking, "a failed triage doesn't stop the folder scan");
+        assert_eq!(app.state.toasts.len(), 1, "the current triage's failure is said");
+        // The folder scan's own failure settles its spinner.
+        app.handle_done(Finished { job: scan, result: Err("scan failed".into()) });
+        assert!(!app.state.game.looking, "a failed folder scan stops its own spinner");
+        assert_eq!(app.state.toasts.len(), 2);
+    }
+
+    #[test]
+    fn a_superseded_game_failure_is_logged_without_a_toast() {
+        let (_d, a, _b) = two_folders();
+        let mut app = app();
+        folder_picked(&mut app, a.clone());
+        let first = job_of(&app, GameJob::FolderScan, true);
+        folder_picked(&mut app, a.clone());
+        let second = job_of(&app, GameJob::FolderScan, true);
+        app.handle_done(Finished { job: first, result: Err("worker failed".into()) });
+        assert!(app.state.toasts.is_empty(), "a superseded failure isn't said: {:?}", app.state.toasts);
+        assert!(app.state.game.looking, "the newer look still runs");
+        app.handle_done(Finished { job: second, result: Err("worker failed".into()) });
+        assert_eq!(app.state.toasts.len(), 1);
+        assert!(!app.state.game.looking);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_text_folder_is_refused_before_a_look_starts() {
+        use std::os::unix::ffi::OsStringExt;
+        let d = tempfile::tempdir().unwrap();
+        let mut name = b"game-".to_vec();
+        name.push(0xFF);
+        let folder = d.path().join(std::ffi::OsString::from_vec(name));
+        std::fs::create_dir(&folder).unwrap();
+        assert!(folder.to_str().is_none(), "the folder's name isn't text");
+        let (_d2, a, _b) = two_folders();
+        let mut app = app();
+        app.state.game.folder = Some(a.clone());
+        folder_picked(&mut app, folder);
+        assert!(!app.state.game.looking, "a folder the tools can't name doesn't start a look");
+        assert!(app.state.game.jobs.is_empty(), "nothing was sent");
+        assert_eq!(app.state.game.folder, Some(a), "the screen stays with the folder it showed");
+        assert_eq!(app.state.toasts.len(), 1, "the refusal is said");
+    }
+
+    #[test]
+    fn a_listing_for_another_archive_is_ignored() {
+        let (_d, a, b) = two_folders();
+        let mut app = app();
+        let open = b.join("b.pak");
+        app.state.game.open = Some(open.display().to_string());
+        app.state.game.loading = true;
+        app.state.game.jobs.insert(1, PendingGameJob { kind: GameJob::Listing, current: false });
+        app.state.game.jobs.insert(3, PendingGameJob { kind: GameJob::Listing, current: true });
+        tool_done(&mut app, 1, "game_pak_list", &json!({"path": a.join("a.pak").display().to_string()}), Ok(json!({"files": [{"path": "A.uasset"}]})));
+        assert!(app.state.game.rows.is_empty(), "an old archive's rows don't fill the new one");
+        assert!(app.state.game.loading, "the new archive is still loading");
+        tool_done(&mut app, 3, "game_pak_list", &json!({"path": open.display().to_string()}), Ok(json!({"files": [{"path": "B.uasset"}]})));
+        assert_eq!(app.state.game.rows.len(), 1);
+        assert!(!app.state.game.loading);
+    }
+
+    #[test]
+    fn an_export_error_does_not_stop_the_archive_listing() {
+        let (_d, _a, b) = two_folders();
+        let mut app = app();
+        let open = b.join("b.pak");
+        app.state.game.open = Some(open.display().to_string());
+        app.state.game.loading = true;
+        app.state.game.jobs.insert(3, PendingGameJob { kind: GameJob::Listing, current: true });
+        // The save names the archive on screen; a reopened listing may share that path.
+        tool_done(
+            &mut app,
+            9,
+            "game_unreal_texture_export",
+            &json!({"path": open.display().to_string(), "output": "x.png"}),
+            Err(ToolError::invalid("no room")),
+        );
+        assert!(app.state.game.loading, "a failed save isn't the listing failing");
+        assert_eq!(app.state.toasts.len(), 1, "the save's error is said");
+        tool_done(&mut app, 3, "game_pak_list", &json!({"path": open.display().to_string()}), Err(ToolError::invalid("no")));
+        assert!(!app.state.game.loading, "the listing's own error ends loading");
+        assert_eq!(app.state.toasts.len(), 2);
+    }
+
+    #[test]
+    fn a_look_error_for_another_game_folder_is_not_shown() {
+        let (_d, a, b) = two_folders();
+        let mut app = app();
+        app.state.game.folder = Some(b.clone());
+        app.state.game.jobs.insert(1, PendingGameJob { kind: GameJob::FolderScan, current: false });
+        app.state.game.jobs.insert(2, PendingGameJob { kind: GameJob::FolderScan, current: true });
+        tool_done(&mut app, 1, "game_archives_list", &json!({"path": a.display().to_string()}), Err(ToolError::invalid("no")));
+        assert!(app.state.toasts.is_empty(), "an old folder's error isn't the new game's: {:?}", app.state.toasts);
+        tool_done(&mut app, 2, "game_archives_list", &json!({"path": b.display().to_string()}), Err(ToolError::invalid("no")));
+        assert_eq!(app.state.toasts.len(), 1, "the shown game's error is said");
     }
 }

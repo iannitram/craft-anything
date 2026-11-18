@@ -275,7 +275,7 @@ fn packets_fields_show(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, T
     let limit = p.limit.clamp(1, 1000);
     let input = load(ctx, p.path.as_deref())?;
     ctx.report(None, format!("Decoding packets in {}", input.name));
-    let mut cap = Capture::new(&input.bytes).map_err(|e| format_err(e, "a packet capture"))?;
+    let mut cap = Capture::new(&input.bytes).map_err(|e| format_err(e.into(), "a packet capture"))?;
     let mut flows = FlowTable::default();
     let (mut total, mut matched) = (0u64, 0u64);
     let mut rows: Vec<Value> = Vec::new();
@@ -388,7 +388,10 @@ fn engines_tshark_check(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, 
     let summary = match (&found, &version) {
         (Some(p), Some(v)) => format!("{v} is available at {}. packets_inventory_show will use it; the built-in decoder works without it.", p.display()),
         (Some(p), None) => format!("tshark was found at {} but did not report a version. The built-in decoder works without it.", p.display()),
-        (None, _) => "Wireshark's tshark is not installed. That's fine: the packet tools use Craft Anything's built-in decoder.".into(),
+        (None, _) => format!(
+            "{} That's fine: the packet tools use Craft Anything's built-in decoder.",
+            super::external_disasm_tools::set_path_problem(ctx, "tshark").unwrap_or_else(|| "Wireshark's tshark is not installed.".into())
+        ),
     };
     let mut lims = Vec::new();
     if let Some(e) = &error {
@@ -529,8 +532,8 @@ fn packets_inventory_show(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     let limit = p.limit.clamp(1, pcap::MAX_INVENTORY);
     let tshark = if p.engine == CaptureEngine::BuiltIn { None } else { find_tshark(ctx) };
     if p.engine == CaptureEngine::Tshark && tshark.is_none() {
-        return Err(ToolError::new(ErrorCode::EngineMissing, "Wireshark's tshark is not installed.")
-            .with_remediation("Install Wireshark and set tshark's path in Settings → Engines, or use engine=built_in."));
+        let (reason, fix) = ctx.session.settings.engine_not_found("tshark");
+        return Err(ToolError::new(ErrorCode::EngineMissing, reason).with_remediation(format!("{fix} Or use engine=built_in.")));
     }
     let mut lims = Vec::new();
     let (engine, inv) = match &tshark {

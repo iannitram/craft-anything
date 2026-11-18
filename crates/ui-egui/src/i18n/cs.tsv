@@ -305,6 +305,7 @@ Couldn't look through that folder.	Složku se nepodařilo prohledat.
 Couldn't open it.	Nepodařilo se otevřít.
 Couldn't open the folder.	Složku se nepodařilo otevřít.
 Couldn't open {}: {}	Nepodařilo se otevřít {}: {}
+Couldn't save your settings.	Nastavení se nepodařilo uložit.
 Couldn't start a worker thread: {e}	Nepodařilo se spustit pracovní vlákno: {e}
 Couldn't start it.	Nepodařilo se spustit.
 Coverage unknown	Pokrytí neznámé
@@ -987,6 +988,7 @@ Saved in	Uloženo v
 Saves space: copies the program and code, and shares dependencies and media with the project. A shared file rewritten in place changes here too.	Šetří místo: kopíruje program a kód, závislosti a média sdílí s projektem. Přepsání sdíleného souboru na místě jej změní i zde.
 Say what you want	Popište, co chcete
 Say what you want first.	Nejprve popište, co chcete.
+This applies once you choose something to recreate above.	Platí, jakmile výše vyberete, co chcete znovu vytvořit.
 Say what you want to make, or drop an app or file on the window to look inside it. Everything runs in Clean room mode unless you switch on Deep.	Popište, co chcete vytvořit, nebo do okna přetáhněte aplikaci či soubor a prozkoumejte je. Vše běží v režimu Čistá místnost, dokud nezapnete Hloubkový režim.
 Screenshot	Snímek obrazovky
 Screenshot a page	Pořídit snímek stránky
@@ -1192,6 +1194,7 @@ Use the projects folder	Použít složku projektů
 Use this	Použít toto
 Use {name}	Použít {name}
 Value flow	Tok hodnot
+About	O aplikaci
 Version	Verze
 Waiting	Čeká
 Waiting for another build to finish: this one starts next.	Čeká na dokončení jiného sestavení: toto je další na řadě.
@@ -1447,6 +1450,7 @@ Zoom	Zvětšit
 Bring all to front	Vše do popředí
 Drag to give the plan more or less room; double-click to reset	Přetažením dáte plánu víc nebo míň místa; dvojklikem vrátíte výchozí výšku
 Copy the message	Zkopírovat zprávu
+Copy the version	Zkopírovat verzi
 Choose what the builder's approvals get	Vybrat, jak se naloží se schvalováním sestavovacího agenta
 Reading the web	Čtení webu
 Other commands	Ostatní příkazy
@@ -1493,3 +1497,8 @@ You're up to date.	Máte nejnovější verzi.
 Forget a website sign-in	Zapomenout přihlášení k webu
 Sign in to a website	Přihlásit se na web
 Some shared files could not be hard-linked and were copied instead ({size}).	Některé sdílené soubory nešlo pevně propojit a byly zkopírovány ({size}).
+This server lists several chat models. Choose one:	Tento server nabízí několik chatovacích modelů. Vyberte jeden:
+Choose a model	Vyberte model
+
+# Saved-builder notice: English until native-speaker review.
+The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

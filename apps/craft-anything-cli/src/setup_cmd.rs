@@ -188,7 +188,10 @@ pub fn uninstall(_a: &UninstallArgs, f: Format) -> u8 {
             out(&format!("removed {}", p.display()));
         }
         for b in &report.blocking {
-            out(&format!("blocked by {} — fix or move that file first", b.display));
+            out(&format!("blocked by {}: {}", b.display, b.reason.as_deref().unwrap_or("its config can't be changed safely")));
+            if let Some(fix) = &b.remediation {
+                out(&format!("  {fix}"));
+            }
         }
         out(&format!("status: {}", report.status));
     } else {

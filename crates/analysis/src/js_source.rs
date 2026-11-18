@@ -23,24 +23,33 @@ enum Tok {
     Class(Vec<(char, char)>, bool),
 }
 
-fn tokenize_glob(p: &str) -> Vec<Tok> {
+/// Tokenize a `.gitignore` pattern into glob tokens; returns `None` on a trailing unescaped `\`.
+fn tokenize_glob(p: &str) -> Option<Vec<Tok>> {
     let chars: Vec<char> = p.chars().collect();
     let mut out = Vec::new();
     let mut i = 0;
     while let Some(&c) = chars.get(i) {
         match c {
-            '*' if chars.get(i + 1) == Some(&'*') => {
-                if chars.get(i + 2) == Some(&'/') {
-                    out.push(Tok::GlobstarSlash);
-                    i += 3;
-                } else {
-                    out.push(Tok::Globstar);
-                    i += 2;
-                }
-            }
             '*' => {
-                out.push(Tok::Star);
-                i += 1;
+                let mut end = i + 1;
+                while chars.get(end) == Some(&'*') {
+                    end += 1;
+                }
+                let at_seg_start = out.is_empty() || matches!(out.last(), Some(Tok::Lit('/') | Tok::GlobstarSlash));
+                let escaped_slash = chars.get(end) == Some(&'\\') && chars.get(end + 1) == Some(&'/');
+                let at_seg_end = end == chars.len() || chars.get(end) == Some(&'/') || escaped_slash;
+                if end - i >= 2 && at_seg_start && at_seg_end {
+                    if chars.get(end) == Some(&'/') {
+                        out.push(Tok::GlobstarSlash);
+                        i = end + 1;
+                    } else {
+                        out.push(Tok::Globstar);
+                        i = end;
+                    }
+                } else {
+                    out.push(Tok::Star);
+                    i = end;
+                }
             }
             '?' => {
                 out.push(Tok::Any);
@@ -75,9 +84,8 @@ fn tokenize_glob(p: &str) -> Vec<Tok> {
                 }
             }
             '\\' => {
-                if let Some(&n) = chars.get(i + 1) {
-                    out.push(Tok::Lit(n));
-                }
+                let &n = chars.get(i + 1)?;
+                out.push(Tok::Lit(n));
                 i += 2;
             }
             _ => {
@@ -86,7 +94,7 @@ fn tokenize_glob(p: &str) -> Vec<Tok> {
             }
         }
     }
-    out
+    Some(out)
 }
 
 /// Glob match by dynamic programming (no backtracking blow-up).
@@ -135,17 +143,33 @@ pub struct Ignore {
     rules: Vec<Rule>,
 }
 
+/// Strip unescaped trailing ASCII spaces per `gitignore(5)` while preserving `\ ` and literal tabs.
+fn trim_trailing_spaces(line: &str) -> &str {
+    let trimmed = line.trim_end_matches(' ');
+    if trimmed.len() == line.len() {
+        return line;
+    }
+    let backslashes = trimmed.bytes().rev().take_while(|&b| b == b'\\').count();
+    if backslashes % 2 == 1 { line.get(..trimmed.len() + 1).unwrap_or(line) } else { trimmed }
+}
+
+/// Split a relative path into non-empty `/` segments, dropping `.` segments.
+fn norm_rel_segments(path: &str) -> Vec<&str> {
+    path.split('/').filter(|s| !s.is_empty() && *s != ".").collect()
+}
+
 impl Ignore {
     /// Add the rules of a `.gitignore` found in `base_dir` (relative, "" for the root).
     pub fn add_file(&mut self, base_dir: &str, text: &str) {
-        for line in text.lines().take(10_000) {
-            let line = line.trim_end();
+        let base = norm_rel_segments(base_dir).join("/");
+        for raw_line in text.lines().take(10_000) {
+            let line = trim_trailing_spaces(raw_line);
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let (negate, pat) = match line.strip_prefix('!') {
                 Some(p) => (true, p),
-                None => (false, line.strip_prefix("\\").unwrap_or(line)),
+                None => (false, line),
             };
             let dir_only = pat.ends_with('/');
             let pat = pat.trim_end_matches('/');
@@ -154,12 +178,14 @@ impl Ignore {
             }
             let anchored = pat.contains('/');
             let pat = pat.trim_start_matches('/');
-            self.rules.push(Rule { base: base_dir.trim_matches('/').to_string(), tokens: tokenize_glob(pat), negate, dir_only, anchored });
+            if let Some(tokens) = tokenize_glob(pat) {
+                self.rules.push(Rule { base: base.clone(), tokens, negate, dir_only, anchored });
+            }
         }
     }
 
-    /// Whether `path` (relative to the walk root) is ignored.
-    pub fn is_ignored(&self, path: &str, is_dir: bool) -> bool {
+    /// Evaluate the final ignored state of one normalized path without checking parent prefixes.
+    fn matches_entry(&self, path: &str, is_dir: bool) -> bool {
         let mut ignored = false;
         for r in &self.rules {
             if r.dir_only && !is_dir {
@@ -179,6 +205,26 @@ impl Ignore {
             }
         }
         ignored
+    }
+
+    /// Whether `path` (relative to the walk root) is ignored.
+    pub fn is_ignored(&self, path: &str, is_dir: bool) -> bool {
+        let segs = norm_rel_segments(path);
+        if segs.is_empty() {
+            return false;
+        }
+        let mut prefix = String::new();
+        for seg in segs.iter().take(segs.len().saturating_sub(1)) {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(seg);
+            if self.matches_entry(&prefix, true) {
+                return true;
+            }
+        }
+        let normalized = segs.join("/");
+        self.matches_entry(&normalized, is_dir)
     }
 }
 
@@ -512,10 +558,10 @@ mod tests {
         assert!(ig.is_ignored("src/gen/x.js", false));
         assert!(ig.is_ignored("pkg/secret.txt", false));
         assert!(!ig.is_ignored("secret.txt", false));
-        assert!(glob_match(&tokenize_glob("[a-c]?.js"), "bz.js"));
-        assert!(!glob_match(&tokenize_glob("[!a-c]?.js"), "bz.js"));
+        assert!(glob_match(&tokenize_glob("[a-c]?.js").unwrap(), "bz.js"));
+        assert!(!glob_match(&tokenize_glob("[!a-c]?.js").unwrap(), "bz.js"));
         // Pathological patterns stay fast.
-        let _ = glob_match(&tokenize_glob(&"*a".repeat(100)), &"a".repeat(2000));
+        let _ = glob_match(&tokenize_glob(&"*a".repeat(100)).unwrap(), &"a".repeat(2000));
     }
 
     #[test]

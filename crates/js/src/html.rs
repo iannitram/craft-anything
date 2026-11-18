@@ -20,14 +20,15 @@ pub struct HtmlScript {
 pub struct HtmlFacts {
     pub scripts: Vec<HtmlScript>,
     pub preloads: Vec<String>,
+    /// Nonempty meta policies in document order, separated by a comma and space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub csp: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 }
 
-/// Attributes of the tag starting at `start` (just after the tag name). Returns (attrs, end of tag).
-fn attributes(src: &str, lower: &str, mut i: usize) -> (Vec<(String, String)>, usize) {
+/// Attributes and end offset of a complete tag, starting just after its name.
+fn attributes(src: &str, lower: &str, mut i: usize) -> Option<(Vec<(String, String)>, usize)> {
     let b = lower.as_bytes();
     let mut out = Vec::new();
     while i < b.len() {
@@ -36,7 +37,7 @@ fn attributes(src: &str, lower: &str, mut i: usize) -> (Vec<(String, String)>, u
         }
         match b.get(i) {
             None => break,
-            Some(b'>') => return (out, i + 1),
+            Some(b'>') => return Some((out, i + 1)),
             _ => {}
         }
         let ns = i;
@@ -79,7 +80,7 @@ fn attributes(src: &str, lower: &str, mut i: usize) -> (Vec<(String, String)>, u
             out.push((name, decode_entities(&value)));
         }
     }
-    (out, i.min(b.len()))
+    None
 }
 
 fn decode_entities(s: &str) -> String {
@@ -136,6 +137,22 @@ fn closing_tag(lower: &str, from: usize, name: &str) -> Option<usize> {
     })
 }
 
+/// The end of a comment, measured from just after `<!--`.
+fn comment_end(rest: &str) -> usize {
+    if rest.starts_with('>') {
+        return 1;
+    }
+    if rest.starts_with("->") {
+        return 2;
+    }
+    rest.match_indices('>')
+        .find_map(|(i, _)| {
+            let before = rest.get(..i)?;
+            (before.ends_with("--") || before.ends_with("--!")).then_some(i + 1)
+        })
+        .unwrap_or(rest.len())
+}
+
 /// Scan an HTML document.
 pub fn scan_html(src: &str) -> HtmlFacts {
     let lower = src.to_ascii_lowercase();
@@ -158,12 +175,12 @@ pub fn scan_html(src: &str) -> HtmlFacts {
         let after = at + 1 + name.len();
         match name {
             "script" => {
-                let (attrs, end) = attributes(src, &lower, after);
+                let Some((attrs, end)) = attributes(src, &lower, after) else { break };
                 let close = closing_tag(&lower, end, "script").unwrap_or(lower.len());
                 let module = get(&attrs, "type").is_some_and(|t| t.eq_ignore_ascii_case("module"));
                 let line = lines.line(u32::try_from(at).unwrap_or(u32::MAX));
                 let src_attr = get(&attrs, "src").map(String::from);
-                let js = javascript_type(get(&attrs, "type"));
+                let js = javascript_type(get(&attrs, "type"), get(&attrs, "language"));
                 let inline = (src_attr.is_none() && close > end && js && src.get(end..close).is_some_and(|t| !t.trim().is_empty()))
                     .then(|| (u32::try_from(end).unwrap_or(u32::MAX), u32::try_from(close).unwrap_or(u32::MAX)));
                 if js && (src_attr.is_some() || inline.is_some()) {
@@ -172,12 +189,12 @@ pub fn scan_html(src: &str) -> HtmlFacts {
                 pos = close.max(end).max(at + 1);
             }
             "style" | "textarea" | "xmp" | "iframe" | "noembed" | "noframes" => {
-                let (_, end) = attributes(src, &lower, after);
+                let Some((_, end)) = attributes(src, &lower, after) else { break };
                 pos = closing_tag(&lower, end, name).unwrap_or(lower.len()).max(at + 1);
             }
             "plaintext" => break,
             "link" => {
-                let (attrs, end) = attributes(src, &lower, after);
+                let Some((attrs, end)) = attributes(src, &lower, after) else { break };
                 let rel_attr = get(&attrs, "rel").unwrap_or("").to_ascii_lowercase();
                 let script_destination = get(&attrs, "as").is_some_and(|value| value.eq_ignore_ascii_case("script"));
                 if rel_attr.split_ascii_whitespace().any(|token| token == "modulepreload" || (token == "preload" && script_destination))
@@ -189,25 +206,37 @@ pub fn scan_html(src: &str) -> HtmlFacts {
                 pos = end.max(at + 1);
             }
             "meta" => {
-                let (attrs, end) = attributes(src, &lower, after);
-                if get(&attrs, "http-equiv").is_some_and(|h| h.eq_ignore_ascii_case("content-security-policy")) {
-                    out.csp = get(&attrs, "content").map(String::from);
+                let Some((attrs, end)) = attributes(src, &lower, after) else { break };
+                if get(&attrs, "http-equiv").is_some_and(|h| h.eq_ignore_ascii_case("content-security-policy"))
+                    && let Some(policy) = get(&attrs, "content").filter(|s| !s.trim_matches(|c: char| c.is_ascii_whitespace()).is_empty())
+                {
+                    let combined = out.csp.get_or_insert_with(String::new);
+                    if !combined.is_empty() {
+                        combined.push_str(", ");
+                    }
+                    combined.push_str(policy);
                 }
                 pos = end.max(at + 1);
             }
             "title" => {
-                let (_, end) = attributes(src, &lower, after);
+                let Some((_, end)) = attributes(src, &lower, after) else { break };
                 let close = closing_tag(&lower, end, "title").unwrap_or(lower.len());
                 out.title = src.get(end..close).map(|t| decode_entities(t).trim().chars().take(200).collect());
                 pos = close.max(at + 1);
             }
-            _ if rest.starts_with("!--") => {
-                pos = lower.get(at..).and_then(|r| r.find("-->")).map_or(lower.len(), |c| at + c + 3);
+            _ if let Some(comment) = rest.strip_prefix("!--") => {
+                pos = at + 4 + comment_end(comment);
+            }
+            _ if (rest.starts_with('!') && !rest.starts_with("!doctype") && !rest.starts_with("![cdata["))
+                || rest.strip_prefix('/').and_then(|s| s.as_bytes().first()).is_some_and(|c| !c.is_ascii_alphabetic()) =>
+            {
+                // The bogus comment state ends at the first greater-than sign, even inside quotes.
+                pos = rest.find('>').map_or(lower.len(), |end| at + 2 + end);
             }
             _ if rest.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
                 || rest.strip_prefix('/').and_then(|s| s.as_bytes().first()).is_some_and(u8::is_ascii_alphabetic) =>
             {
-                let (_, end) = attributes(src, &lower, after);
+                let Some((_, end)) = attributes(src, &lower, after) else { break };
                 pos = end.max(at + 1);
             }
             _ => pos = at + 1,
@@ -216,33 +245,38 @@ pub fn scan_html(src: &str) -> HtmlFacts {
     out
 }
 
-/// Whether a `<script type>` is code the page runs: no type, a JavaScript MIME type or `module`
-/// (and JSX for in-browser Babel, which is code too). Import maps, speculation rules and data
-/// blocks such as JSON or HTML templates aren't JavaScript (#285).
-fn javascript_type(t: Option<&str>) -> bool {
-    let Some(t) = t else { return true };
-    let essence = t.trim_matches(|c: char| c.is_ascii_whitespace()).to_ascii_lowercase();
-    essence.is_empty()
-        || essence == "module"
-        || matches!(essence.as_str(), "text/babel" | "text/jsx" | "text/jscript" | "text/livescript")
-        || [
-            "text/javascript",
-            "text/javascript1.0",
-            "text/javascript1.1",
-            "text/javascript1.2",
-            "text/javascript1.3",
-            "text/javascript1.4",
-            "text/javascript1.5",
-            "application/javascript",
-            "application/ecmascript",
-            "text/ecmascript",
-            "application/x-javascript",
-            "application/x-ecmascript",
-            "text/x-javascript",
-            "text/x-ecmascript",
-        ]
-        .iter()
-        .any(|m| essence == *m)
+const JAVASCRIPT_MIME_TYPES: &[&str] = &[
+    "text/javascript",
+    "text/javascript1.0",
+    "text/javascript1.1",
+    "text/javascript1.2",
+    "text/javascript1.3",
+    "text/javascript1.4",
+    "text/javascript1.5",
+    "application/javascript",
+    "application/ecmascript",
+    "text/ecmascript",
+    "application/x-javascript",
+    "application/x-ecmascript",
+    "text/x-javascript",
+    "text/x-ecmascript",
+    "text/jscript",
+    "text/livescript",
+];
+
+/// Whether a script is executable code to inventory, including explicit in-browser Babel types.
+fn javascript_type(t: Option<&str>, language: Option<&str>) -> bool {
+    let whitespace = |c: char| c.is_ascii_whitespace();
+    if let Some(t) = t {
+        if t.is_empty() || t.eq_ignore_ascii_case("module") {
+            return true;
+        }
+        let essence = t.trim_matches(whitespace);
+        return JAVASCRIPT_MIME_TYPES.iter().chain(&["text/babel", "text/jsx"]).any(|m| m.eq_ignore_ascii_case(essence));
+    }
+    let Some(language) = language.filter(|language| !language.is_empty()) else { return true };
+    // The browser matches `text/<language>` directly for a legacy language value.
+    JAVASCRIPT_MIME_TYPES.iter().filter_map(|m| m.strip_prefix("text/")).any(|m| m.eq_ignore_ascii_case(language))
 }
 
 #[cfg(test)]

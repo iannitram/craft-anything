@@ -70,16 +70,84 @@ pub(crate) struct Redactor {
     log: Vec<Value>,
 }
 
-fn percent_encode(s: &str) -> String {
-    let mut out = String::new();
+/// Percent-encode `s`; when `form` is true, use WHATWG `application/x-www-form-urlencoded` rules
+/// (space becomes `+`, `*` stays literal, `~` is percent-encoded); otherwise keep `~` and encode `*`.
+pub fn encode_query(s: &str, form: bool, upper_hex: bool) -> String {
+    let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+        if form && b == b' ' {
+            out.push('+');
+        } else if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.') || (form && b == b'*') || (!form && b == b'~') {
             out.push(char::from(b));
-        } else {
+        } else if upper_hex {
             out.push_str(&format!("%{b:02X}"));
+        } else {
+            out.push_str(&format!("%{b:02x}"));
         }
     }
     out
+}
+
+/// Percent-encode `s` using uppercase hexadecimal escapes (`%20` for spaces).
+fn percent_encode(s: &str) -> String {
+    encode_query(s, false, true)
+}
+
+/// True when `haystack` contains `needle` under ASCII case-insensitive comparison.
+pub fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
+    !needle.is_empty() && haystack.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+/// Replace ASCII case-insensitive occurrences of `needles` in `s` with `replacement`, merging
+/// overlapping matched spans so an earlier shorter match cannot expose a longer secret's suffix.
+pub fn replace_needles_with(s: &str, needles: &[String], replacement: &str) -> (String, u64) {
+    if needles.is_empty() || !needles.iter().any(|n| contains_ascii_ci(s, n)) {
+        return (s.to_string(), 0);
+    }
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (start, _) in s.char_indices() {
+        let Some(tail) = s.get(start..) else { continue };
+        let max_len = needles
+            .iter()
+            .filter(|n| {
+                !n.is_empty()
+                    && tail.len() >= n.len()
+                    && s.is_char_boundary(start + n.len())
+                    && tail.as_bytes().get(..n.len()).is_some_and(|w| w.eq_ignore_ascii_case(n.as_bytes()))
+            })
+            .map(String::len)
+            .max();
+        if let Some(len) = max_len {
+            let end = start + len;
+            if let Some((_, prev_end)) = spans.last_mut()
+                && start < *prev_end
+            {
+                *prev_end = (*prev_end).max(end);
+            } else {
+                spans.push((start, end));
+            }
+        }
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut count = 0u64;
+    let mut cursor = 0usize;
+    for (start, end) in spans {
+        if let Some(prefix) = s.get(cursor..start) {
+            out.push_str(prefix);
+        }
+        out.push_str(replacement);
+        count = count.saturating_add(1);
+        cursor = end;
+    }
+    if let Some(rest) = s.get(cursor..) {
+        out.push_str(rest);
+    }
+    (out, count)
+}
+
+/// Replace ASCII case-insensitive occurrences of `needles` (merging overlapping matches) with `[redacted]`.
+fn replace_needles(s: &str, needles: &[String]) -> String {
+    replace_needles_with(s, needles, "[redacted]").0
 }
 
 impl Redactor {
@@ -87,7 +155,27 @@ impl Redactor {
         let mut needles: Vec<String> = Vec::new();
         for v in values.iter().filter(|v| !v.is_empty()) {
             let json_escaped = serde_json::to_string(v).ok().and_then(|q| q.get(1..q.len().saturating_sub(1)).map(String::from)).unwrap_or_default();
-            for form in [v.clone(), v.to_ascii_lowercase(), percent_encode(v), percent_encode(v).to_ascii_lowercase(), json_escaped, v.replace(' ', "+")] {
+            let pct_up = percent_encode(v);
+            let pct_lo = encode_query(v, false, false);
+            let form_up = encode_query(v, true, true);
+            let form_lo = encode_query(v, true, false);
+            let quote_plus_up = pct_up.replace("%20", "+");
+            let quote_plus_lo = pct_lo.replace("%20", "+");
+            for form in [
+                v.clone(),
+                v.to_ascii_lowercase(),
+                v.to_ascii_uppercase(),
+                pct_up.clone(),
+                pct_lo,
+                pct_up.to_ascii_lowercase(),
+                form_up.clone(),
+                form_lo,
+                form_up.to_ascii_lowercase(),
+                quote_plus_up,
+                quote_plus_lo,
+                json_escaped,
+                v.replace(' ', "+"),
+            ] {
                 if !form.is_empty() && !needles.contains(&form) {
                     needles.push(form);
                 }
@@ -98,7 +186,7 @@ impl Redactor {
     }
 
     fn contains(&self, s: &str) -> bool {
-        self.needles.iter().any(|n| s.contains(n.as_str()))
+        self.needles.iter().any(|n| contains_ascii_ci(s, n))
     }
 
     /// Replace declared values in kept text.
@@ -106,10 +194,7 @@ impl Redactor {
         if !self.contains(s) {
             return s.to_string();
         }
-        let mut out = s.to_string();
-        for n in &self.needles {
-            out = out.replace(n.as_str(), "[redacted]");
-        }
+        let out = replace_needles(s, &self.needles);
         self.log.push(json!({"pointer": pointer, "reason": "secret-value"}));
         out
     }
@@ -141,7 +226,7 @@ pub(crate) fn split_url(url: &str) -> (String, String, String, Vec<(String, Stri
 }
 
 /// Decode a query name once for privacy checks; malformed escapes stay literal.
-fn decode_query_name(name: &str) -> String {
+pub(crate) fn decode_query_name(name: &str) -> String {
     let mut decoded = Vec::with_capacity(name.len());
     let mut bytes = name.as_bytes().iter().copied().peekable();
     while let Some(b) = bytes.next() {
@@ -278,7 +363,7 @@ pub struct OutlineRedactions<'r> {
 
 impl OutlineRedactions<'_> {
     fn names_hit(&self, k: &str) -> bool {
-        self.needles.iter().any(|n| k.contains(n.as_str()))
+        self.needles.iter().any(|n| contains_ascii_ci(k, n))
     }
 }
 
@@ -334,17 +419,28 @@ fn body_outline(
         red.log.extend(sr.log);
         return json!({"kind": "json", "bytes": bytes, "outline": outline});
     }
+    let filter_form_fields = |names: Vec<String>, red: &mut Redactor| -> Vec<String> {
+        let mut kept = Vec::with_capacity(names.len());
+        for n in names {
+            if red.contains(&n) || red.contains(&decode_query_name(&n)) {
+                red.log.push(json!({"pointer": pointer, "reason": "secret-value", "scope": "form-field"}));
+            } else {
+                kept.push(n);
+            }
+        }
+        kept
+    };
     if mime_l.contains("x-www-form-urlencoded") {
         let names: Vec<String> = if params.is_empty() {
             decoded.as_deref().unwrap_or("").split('&').filter_map(|p| p.split('=').next()).filter(|k| !k.is_empty()).map(String::from).take(200).collect()
         } else {
             params.iter().map(|(k, _)| k.clone()).take(200).collect()
         };
-        let names: Vec<String> = names.into_iter().filter(|n| !red.contains(n)).collect();
-        return json!({"kind": "form", "bytes": bytes, "fields": names});
+        return json!({"kind": "form", "bytes": bytes, "fields": filter_form_fields(names, red)});
     }
     if mime_l.contains("multipart") {
-        return json!({"kind": "multipart", "bytes": bytes, "fields": params.iter().map(|(k, _)| k.clone()).filter(|n| !red.contains(n)).take(200).collect::<Vec<_>>()});
+        let names: Vec<String> = params.iter().map(|(k, _)| k.clone()).take(200).collect();
+        return json!({"kind": "multipart", "bytes": bytes, "fields": filter_form_fields(names, red)});
     }
     if decoded.is_none() {
         return Value::Null;
@@ -571,16 +667,15 @@ pub fn har_from_network(requests: &[Value], started: &str) -> Value {
     })
 }
 
-/// W3C-style headers from a name-to-value map the tools kept. The tools return
-/// `{"kept": {...}, "credentials_present": [...]}` for an outline, or a flat map of every value;
-/// both are read, and a value that isn't text (a length, a list) is dropped rather than guessed.
-fn har_headers(value: Option<&Value>) -> Vec<Value> {
-    let Some(Value::Object(o)) = value else { return Vec::new() };
-    let kept = match o.get("kept") {
-        Some(Value::Object(kept)) => kept,
-        _ => o,
-    };
-    kept.iter().filter_map(|(name, v)| v.as_str().map(|v| json!({"name": name, "value": v}))).collect()
+/// Read a flat header map or the retained values in an outlined one.
+fn har_header_map(value: Option<&Value>) -> Option<&Map<String, Value>> {
+    let map = value?.as_object()?;
+    Some(map.get("kept").and_then(Value::as_object).unwrap_or(map))
+}
+
+/// Write retained textual headers as HAR name-value pairs.
+fn har_headers(headers: Option<&Map<String, Value>>) -> Vec<Value> {
+    headers.into_iter().flatten().filter_map(|(name, v)| v.as_str().map(|v| json!({"name": name, "value": v}))).collect()
 }
 
 /// The text of a body the tools kept, if it is whole: a body cut at the cap would be replayed as
@@ -595,18 +690,25 @@ fn har_body<'a>(r: &'a Value, key: &str) -> Option<&'a str> {
 
 fn har_entry(r: &Value, started: &str) -> Value {
     let text = |key: &str| r.get(key).and_then(Value::as_str).unwrap_or_default();
+    let request_headers = har_header_map(r.get("request_header_values").or_else(|| r.get("request_headers")));
     let mut request = json!({
         "method": if text("method").is_empty() { "GET" } else { text("method") },
         "url": text("url"),
         "httpVersion": "HTTP/1.1",
-        "headers": har_headers(r.get("request_header_values").or_else(|| r.get("request_headers"))),
+        "headers": har_headers(request_headers),
         "queryString": [],
         "cookies": [],
         "headersSize": -1,
         "bodySize": -1,
     });
     if let Some(body) = har_body(r, "request_body") {
-        request["postData"] = json!({"mimeType": text("mime_type"), "text": body});
+        let mime = request_headers
+            .into_iter()
+            .flatten()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .find_map(|(_, value)| value.as_str())
+            .unwrap_or_default();
+        request["postData"] = json!({"mimeType": mime, "text": body});
     }
     let mut content = json!({"size": 0, "mimeType": text("mime_type")});
     if let Some(body) = har_body(r, "response_body") {
@@ -621,7 +723,7 @@ fn har_entry(r: &Value, started: &str) -> Value {
             "status": r.get("status").and_then(Value::as_i64).unwrap_or(0),
             "statusText": "",
             "httpVersion": "HTTP/1.1",
-            "headers": har_headers(r.get("response_header_values").or_else(|| r.get("response_headers"))),
+            "headers": har_headers(har_header_map(r.get("response_header_values").or_else(|| r.get("response_headers")))),
             "cookies": [],
             "content": content,
             "redirectURL": "",

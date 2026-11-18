@@ -518,7 +518,7 @@ pub fn page_claims(page: &str, original: &Value, built: &Value) -> Vec<Claim> {
 /// A `#rrggbb` or `#rrggbbaa` colour as (r, g, b, a).
 fn rgba(c: &str) -> Option<[u8; 4]> {
     let h = c.strip_prefix('#')?;
-    let byte = |i: usize| h.get(i..i + 2).and_then(|x| u8::from_str_radix(x, 16).ok());
+    let byte = |i: usize| h.get(i..i + 2).filter(|x| x.bytes().all(|b| b.is_ascii_hexdigit())).and_then(|x| u8::from_str_radix(x, 16).ok());
     match h.len() {
         6 => Some([byte(0)?, byte(2)?, byte(4)?, 255]),
         8 => Some([byte(0)?, byte(2)?, byte(4)?, byte(6)?]),
@@ -886,6 +886,14 @@ impl Check for WebVisualCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rgba_rejects_non_hex_digits() {
+        for bad in ["#+1+2+3", "#-1-2-3", "#+1+2+3ff", "#12345g"] {
+            assert_eq!(rgba(bad), None, "{bad}");
+        }
+        assert_eq!(rgba("#0a0B0c"), Some([10, 11, 12, 255]));
+    }
 
     /// #736: an empty app/ is said to be empty, so a builder that claims a build can't hide it; a
     /// folder with files, or a project folder (which always holds the workspace's own), isn't.

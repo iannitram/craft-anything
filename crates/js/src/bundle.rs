@@ -3,7 +3,7 @@
 //! esbuild (`__commonJS` / `__esm` wrappers, minified or not) and browserify. Scope-hoisted
 //! bundles (Rollup, Vite production chunks) have no module boundaries left to recover.
 
-use crate::facts::Key;
+use crate::facts::{Key, static_str};
 use crate::fingerprint::Fingerprint;
 use crate::model::{BundleInfo, BundleModule};
 use crate::util::{LineIndex, sha256_hex, slice};
@@ -107,11 +107,10 @@ impl<'a> Visit<'a> for DepVisitor<'_> {
                 _ => false,
             });
             if is_loader && it.arguments.len() == 1 {
-                let dep = match it.arguments.first().and_then(|a| a.as_expression()) {
-                    Some(Expression::NumericLiteral(x)) => Some(x.value.to_js_string()),
-                    Some(Expression::StringLiteral(s)) => Some(s.value.to_string()),
-                    _ => None,
-                };
+                let dep = it.arguments.first().and_then(|a| a.as_expression()).and_then(|e| match e.get_inner_expression() {
+                    Expression::NumericLiteral(x) => Some(x.value.to_js_string()),
+                    other => static_str(other).map(str::to_string),
+                });
                 if let Some(d) = dep
                     && !self.deps.contains(&d)
                     && self.deps.len() < 4096
@@ -353,8 +352,7 @@ impl<'s> BundleVisitor<'s> {
                 .filter_map(|p| match p {
                     ObjectPropertyKind::ObjectProperty(p) => match p.value.get_inner_expression() {
                         Expression::NumericLiteral(n) => Some(n.value.to_js_string()),
-                        Expression::StringLiteral(s) => Some(s.value.to_string()),
-                        _ => None,
+                        other => static_str(other).map(str::to_string),
                     },
                     _ => None,
                 })
@@ -432,8 +430,7 @@ impl<'a> Visit<'a> for BundleVisitor<'_> {
                 .iter()
                 .filter_map(|e| match e.as_expression()?.get_inner_expression() {
                     Expression::NumericLiteral(n) => Some(n.value.to_js_string()),
-                    Expression::StringLiteral(s) => Some(s.value.to_string()),
-                    _ => None,
+                    other => static_str(other).map(str::to_string),
                 })
                 .collect();
             // A table of two or more factories is shape enough; a single one also needs webpack

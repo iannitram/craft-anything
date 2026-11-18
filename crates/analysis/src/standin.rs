@@ -11,7 +11,7 @@
 //!
 //! Replay is read-only. A write answers what was recorded and changes nothing later reads see.
 
-use crate::web_har::{CREDENTIAL_HEADERS, Redactor, is_credential_param, is_uuid, split_url};
+use crate::web_har::{CREDENTIAL_HEADERS, Redactor, contains_ascii_ci, decode_query_name, is_credential_param, is_uuid, replace_needles_with, split_url};
 use craft_anything_formats::har::{self, Har, HarEntry, HarError};
 use craft_anything_formats::sourcemap::base64_decode;
 use serde::{Deserialize, Serialize};
@@ -331,21 +331,15 @@ impl Scrub {
     }
 
     fn holds_hidden(&self, s: &str) -> bool {
-        self.needles.iter().any(|n| s.contains(n.as_str()))
+        self.needles.iter().any(|n| contains_ascii_ci(s, n))
     }
 
     fn hide(&mut self, s: String) -> String {
         if !self.holds_hidden(&s) {
             return s;
         }
-        let mut out = s;
-        for n in &self.needles {
-            let found = out.matches(n.as_str()).count() as u64;
-            if found > 0 {
-                self.dropped.hidden_values = self.dropped.hidden_values.saturating_add(found);
-                out = out.replace(n.as_str(), DROPPED);
-            }
-        }
+        let (out, found) = replace_needles_with(&s, &self.needles, DROPPED);
+        self.dropped.hidden_values = self.dropped.hidden_values.saturating_add(found);
         out
     }
 
@@ -473,18 +467,19 @@ impl Scrub {
         let mut names = Vec::new();
         let mut kept = Vec::new();
         for (k, v) in pairs {
-            if self.holds_hidden(k) {
+            if self.holds_hidden(k) || self.holds_hidden(&decode_query_name(k)) {
                 if count {
                     self.dropped.hidden_values = self.dropped.hidden_values.saturating_add(1);
                 }
                 continue;
             }
             names.push(k.clone());
+            let hidden_val = self.holds_hidden(v) || self.holds_hidden(&decode_query_name(v));
             if v.is_empty() {
                 kept.push(k.clone());
-            } else if is_credential_param(k) || is_secret_json_key(k) || looks_secret(v) || self.holds_hidden(v) {
+            } else if is_credential_param(k) || is_secret_json_key(k) || looks_secret(v) || hidden_val {
                 if count {
-                    if self.holds_hidden(v) {
+                    if hidden_val {
                         self.dropped.hidden_values = self.dropped.hidden_values.saturating_add(1);
                     } else {
                         self.dropped.query_values = self.dropped.query_values.saturating_add(1);
@@ -1016,8 +1011,9 @@ fn make_sample(s: &Seen<'_>, opts: &BuildOptions, scrub: &mut Scrub) -> Sample {
             Err(e) => {
                 // Can't be edited in place, so a named secret or a key in it costs the whole body.
                 let bytes = e.as_bytes();
-                let contains = |needle: &[u8]| !needle.is_empty() && bytes.windows(needle.len()).any(|w| w == needle);
-                if scrub.needles.iter().any(|n| contains(n.as_bytes())) || contains(b"PRIVATE KEY-----") {
+                let contains_ci = |needle: &[u8]| !needle.is_empty() && bytes.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle));
+                let has_pem = bytes.windows(b"PRIVATE KEY-----".len()).any(|w| w == b"PRIVATE KEY-----");
+                if scrub.needles.iter().any(|n| contains_ci(n.as_bytes())) || has_pem {
                     scrub.dropped.body_values = scrub.dropped.body_values.saturating_add(1);
                     sample.body_left_out = Some(BodyLeftOut::HeldSecret);
                     return sample;

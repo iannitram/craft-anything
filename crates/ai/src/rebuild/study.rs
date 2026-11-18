@@ -10,6 +10,12 @@ pub(super) fn is_electron_runtime(program: &Path) -> bool {
     program.parent().is_some_and(|dir| dir.join("resources/app.asar").is_file())
 }
 
+/// Whether runtime study may start the program: only one this computer can start. A Windows `.exe`
+/// found in a game's folder on Linux or macOS is studied ([`studies_as_program`]), never started.
+pub(super) fn may_start(program: &Path) -> bool {
+    program.is_file() && is_program(program)
+}
+
 /// The program a later run reopens for its builder: the one the study looked at, in Deep mode on a
 /// local target, when it is still there. None otherwise (Clean room never opens the original).
 pub(super) fn program_to_reopen(target: &TargetRef, kind: &dyn TargetKind, deep: bool) -> Option<PathBuf> {
@@ -180,7 +186,7 @@ impl Worker {
                 std::fs::create_dir_all(&capture).map_err(|e| ToolError::io(capture.display(), e))?;
                 let runtime = self.engine.session().settings.runtime_study;
                 let mut console = false;
-                if runtime && program.is_file() && kinds::runs::is_console(&program) {
+                if runtime && may_start(&program) && kinds::runs::is_console(&program) {
                     // A console program draws no window: run it with each input instead.
                     self.step(ws, Step::Study, Status::Inspecting, "Running it with a few inputs to see what it prints…")?;
                     if let Some(section) = self.capture_runs(&program, &capture)? {
@@ -188,7 +194,7 @@ impl Worker {
                         console = true;
                     }
                 }
-                if !console && runtime && program.is_file() && is_program(&program) {
+                if !console && runtime && may_start(&program) {
                     notes.push_str(&self.picture_window(ws, &program, &capture)?);
                 }
                 craft_anything_engine::project::write_atomic(&capture.join("README.md"), notes.as_bytes())?;
@@ -262,7 +268,7 @@ impl Worker {
             path.display()
         );
         let runtime = self.engine.session().settings.runtime_study;
-        if runtime && path.is_file() && is_program(path) {
+        if runtime && may_start(path) {
             notes.push_str(&self.picture_window(ws, path, &capture)?);
         }
         craft_anything_engine::project::write_atomic(&capture.join("README.md"), notes.as_bytes())

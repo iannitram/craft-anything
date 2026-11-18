@@ -364,7 +364,7 @@ pub fn parse_thin(data: &[u8]) -> Result<MachoDeps, FormatError> {
             if o < minimum || o >= sz {
                 return None;
             }
-            e.r.cstr(pos + o, sz - o)
+            Some(std::ffi::CStr::from_bytes_until_nul(e.r.slice(pos + o, sz - o)?).ok()?.to_string_lossy().into_owned())
         };
         let dylib = |kind: &'static str| -> Option<DylibRef> {
             Some(DylibRef {

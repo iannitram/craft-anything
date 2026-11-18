@@ -111,6 +111,13 @@ pub struct GenCtx<'g> {
     pub method_params: &'g [String],
 }
 
+/// Member-parent classification of a decoded `TypeSpec` row for `MemberRef` signature binding.
+pub(crate) enum TypeSpecParent {
+    GenericInst(Vec<String>),
+    Array,
+    Other,
+}
+
 /// Type naming over one metadata set (enclosing types and generic parameter names precomputed).
 #[derive(Debug)]
 pub struct Names<'m, 'a> {
@@ -146,10 +153,59 @@ pub fn alias(full: &str) -> Option<&'static str> {
     })
 }
 
+/// Split a single type segment (``Outer`1``) into its clean name (`Outer`) and declared generic
+/// arity (`Some(1)`), or `(segment, Some(0))` when no numeric backtick suffix is present.
+fn segment_arity(segment: &str) -> (&str, Option<usize>) {
+    match segment.rfind('`') {
+        Some(i) if segment.get(i + 1..).is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())) => {
+            let head = segment.get(..i).unwrap_or(segment);
+            let arity = segment.get(i + 1..).and_then(|d| d.parse::<usize>().ok());
+            (head, arity)
+        }
+        _ => (segment, Some(0)),
+    }
+}
+
+#[cfg(test)]
 fn strip_arity(name: &str) -> &str {
-    match name.rfind('`') {
-        Some(i) if name.get(i + 1..).is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())) => name.get(..i).unwrap_or(name),
-        _ => name,
+    segment_arity(name).0
+}
+
+/// Join a CLI `TypeNamespace` and `/`-separated nested type segments into `Namespace.Outer/Inner`.
+fn join_ns_parts(ns: &str, parts: &[String]) -> String {
+    let joined = parts.join("/");
+    if ns.is_empty() { joined } else { format!("{ns}.{joined}") }
+}
+
+/// Format a CLI `GENERICINST` (`0x15`) type by distributing `args` across metadata nested-type
+/// `parts` according to each segment's backtick arity (``Ns.Outer`1/Inner`` + `[int]` ->
+/// `Ns.Outer<int>/Inner`), keeping `ns` untouched and falling back to trailing `<...>` when total
+/// arity does not match.
+fn format_generic_inst(ns: &str, parts: &[String], args: &[String]) -> String {
+    if ns == "System" && parts.len() == 1 && parts.first().map(|p| segment_arity(p)) == Some(("Nullable", Some(1))) && args.len() == 1 {
+        return format!("{}?", args.first().map(String::as_str).unwrap_or("?"));
+    }
+    let segments: Vec<(&str, Option<usize>)> = parts.iter().map(|p| segment_arity(p)).collect();
+    let total_arity = segments.iter().try_fold(0usize, |acc, &(_, arity)| acc.checked_add(arity?));
+    if total_arity == Some(args.len()) {
+        let mut offset = 0usize;
+        let mut formatted = Vec::with_capacity(segments.len());
+        for (head, arity) in segments {
+            let count = arity.unwrap_or(0);
+            if count == 0 {
+                formatted.push(head.to_string());
+            } else {
+                let slice = args.get(offset..offset + count).unwrap_or(&[]);
+                formatted.push(format!("{head}<{}>", slice.join(", ")));
+                offset += count;
+            }
+        }
+        join_ns_parts(ns, &formatted)
+    } else {
+        let cleaned: Vec<String> = segments.iter().map(|&(head, _)| head.to_string()).collect();
+        let full = join_ns_parts(ns, &cleaned);
+        let base = if parts.len() == 1 { alias(&full).unwrap_or(&full) } else { &full };
+        format!("{base}<{}>", args.join(", "))
     }
 }
 
@@ -216,8 +272,8 @@ impl<'m, 'a> Names<'m, 'a> {
         self.enclosing.get(&typedef).copied()
     }
 
-    /// `Namespace.Outer/Inner` (metadata names, arity suffixes kept).
-    pub fn typedef_name(&self, row: u32) -> String {
+    /// Resolve a `TypeDef` row into `(namespace, nested_segments)` without merging `/` characters.
+    fn typedef_parts(&self, row: u32) -> (String, Vec<String>) {
         let mut parts = Vec::new();
         let mut cur = row;
         let mut ns = String::new();
@@ -232,11 +288,17 @@ impl<'m, 'a> Names<'m, 'a> {
             }
         }
         parts.reverse();
-        let joined = parts.join("/");
-        if ns.is_empty() { joined } else { format!("{ns}.{joined}") }
+        (ns, parts)
     }
 
-    pub fn typeref_name(&self, row: u32) -> String {
+    /// `Namespace.Outer/Inner` (metadata names, arity suffixes kept).
+    pub fn typedef_name(&self, row: u32) -> String {
+        let (ns, parts) = self.typedef_parts(row);
+        join_ns_parts(&ns, &parts)
+    }
+
+    /// Resolve a `TypeRef` row into `(namespace, nested_segments)` without merging `/` characters.
+    fn typeref_parts(&self, row: u32) -> (String, Vec<String>) {
         let mut parts = Vec::new();
         let mut cur = row;
         let mut ns = String::new();
@@ -251,8 +313,12 @@ impl<'m, 'a> Names<'m, 'a> {
             }
         }
         parts.reverse();
-        let joined = parts.join("/");
-        if ns.is_empty() { joined } else { format!("{ns}.{joined}") }
+        (ns, parts)
+    }
+
+    pub fn typeref_name(&self, row: u32) -> String {
+        let (ns, parts) = self.typeref_parts(row);
+        join_ns_parts(&ns, &parts)
     }
 
     /// Where a TypeRef resolves (assembly or module name), when known.
@@ -288,6 +354,55 @@ impl<'m, 'a> Names<'m, 'a> {
             }
             _ => "?".into(),
         }
+    }
+
+    /// Decode a `TypeSpec` row in `g`, returning both its formatted display name and its
+    /// `MemberRefParent` classification (`GENERICINST` type arguments or array pseudo-method
+    /// parent) under the same modifier and depth rules as [`Self::type_name`].
+    pub(crate) fn typespec_parent(&self, row: u32, g: &GenCtx<'_>) -> (String, TypeSpecParent) {
+        let blob = self.md.blob_cell(t::TYPE_SPEC, row, 0);
+        let mut probe = Cur::new(blob);
+        let head = self.skip_mods(&mut probe, g, 1).and_then(|is_volatile| Some((is_volatile, probe.u8()?)));
+        if let Some((is_volatile, 0x15)) = head {
+            return match self.generic_inst_body(&mut probe, g, 2) {
+                Some((formatted, args)) => {
+                    let display = if is_volatile { format!("volatile {formatted}") } else { formatted };
+                    (self.finish_signature(&probe, display), TypeSpecParent::GenericInst(args))
+                }
+                None => ("?".into(), TypeSpecParent::Other),
+            };
+        }
+        let mut c = Cur::new(blob);
+        match self.ty(&mut c, g, 1) {
+            Some(display) => {
+                let kind = if matches!(head, Some((_, 0x14 | 0x1d))) { TypeSpecParent::Array } else { TypeSpecParent::Other };
+                (self.finish_signature(&c, display), kind)
+            }
+            None => ("?".into(), TypeSpecParent::Other),
+        }
+    }
+
+    /// Parse the `(CLASS | VALUETYPE) TypeDefOrRef n args` tail of a `GENERICINST` (`0x15`) element.
+    fn generic_inst_body(&self, c: &mut Cur<'_>, g: &GenCtx<'_>, arg_depth: u32) -> Option<(String, Vec<String>)> {
+        let kind = c.u8()?;
+        if kind != 0x11 && kind != 0x12 {
+            return None;
+        }
+        let v = c.cu32()?;
+        let (ns, parts) = match v & 3 {
+            0 => self.typedef_parts(v >> 2),
+            1 => self.typeref_parts(v >> 2),
+            _ => return None,
+        };
+        let n = c.cu32()?;
+        if n == 0 || n > 64 {
+            return None;
+        }
+        let mut args = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            args.push(self.ty(c, g, arg_depth)?);
+        }
+        Some((format_generic_inst(&ns, &parts, &args), args))
     }
 
     fn tdor_encoded(&self, c: &mut Cur<'_>, g: &GenCtx<'_>, depth: u32, allow_type_spec: bool) -> Option<String> {
@@ -377,32 +492,12 @@ impl<'m, 'a> Names<'m, 'a> {
                     .collect::<Vec<_>>();
                 format!("{el}[{}]", dimensions.join(","))
             }
-            0x15 => {
-                let kind = c.u8()?;
-                if kind != 0x11 && kind != 0x12 {
-                    return None;
-                }
-                let base = self.tdor_encoded(c, g, depth + 1, false)?;
-                let n = c.cu32()?;
-                if n == 0 || n > 64 {
-                    return None;
-                }
-                let mut args = Vec::new();
-                for _ in 0..n {
-                    args.push(self.ty(c, g, depth + 1)?);
-                }
-                let base = strip_arity(&base);
-                if base == "System.Nullable" && args.len() == 1 {
-                    format!("{}?", args.first().map(String::as_str).unwrap_or("?"))
-                } else {
-                    format!("{base}<{}>", args.join(", "))
-                }
-            }
+            0x15 => self.generic_inst_body(c, g, depth + 1)?.0,
             0x16 => "TypedReference".into(),
             0x18 => "nint".into(),
             0x19 => "nuint".into(),
             0x1b => {
-                let m = self.method_sig_inner(c, g, depth + 1)?;
+                let m = self.method_sig_inner(c, g, None, depth + 1)?;
                 let mut parts = m.params.clone();
                 parts.push(m.return_type.clone());
                 if m.calling_convention == "default" {
@@ -419,7 +514,7 @@ impl<'m, 'a> Names<'m, 'a> {
         Some(if is_volatile { format!("volatile {s}") } else { s })
     }
 
-    fn method_sig_inner(&self, c: &mut Cur<'_>, g: &GenCtx<'_>, depth: u32) -> Option<MethodSig> {
+    fn method_sig_inner(&self, c: &mut Cur<'_>, g: &GenCtx<'_>, vararg_g: Option<&GenCtx<'_>>, depth: u32) -> Option<MethodSig> {
         if depth > MAX_DEPTH {
             return None;
         }
@@ -432,12 +527,17 @@ impl<'m, 'a> Names<'m, 'a> {
         let return_type = self.ty(c, g, depth + 1)?;
         let mut params = Vec::new();
         let mut vararg_from = None;
+        let is_vararg = (flags & 0x0f) == 5;
         for _ in 0..count {
             if c.peek() == Some(0x41) {
                 c.u8()?;
                 vararg_from = Some(params.len());
             }
-            params.push(self.ty(c, g, depth + 1)?);
+            let param_g = match (is_vararg && vararg_from.is_some(), vararg_g) {
+                (true, Some(vg)) => vg,
+                _ => g,
+            };
+            params.push(self.ty(c, param_g, depth + 1)?);
         }
         let calling_convention = match flags & 0x0f {
             0 => "default",
@@ -459,7 +559,15 @@ impl<'m, 'a> Names<'m, 'a> {
     /// A MethodDefSig, MethodRefSig or PropertySig.
     pub fn method_sig(&self, blob: &[u8], g: &GenCtx<'_>) -> Option<MethodSig> {
         let mut c = Cur::new(blob);
-        let signature = self.method_sig_inner(&mut c, g, 0)?;
+        let signature = self.method_sig_inner(&mut c, g, None, 0)?;
+        Some(self.finish_signature(&c, signature))
+    }
+
+    /// A `MethodRefSig` whose fixed parameters bind to `g` and whose post-`0x41` (`SENTINEL`)
+    /// `vararg` call-site arguments bind to `caller_g`.
+    pub(crate) fn method_ref_sig(&self, blob: &[u8], g: &GenCtx<'_>, caller_g: &GenCtx<'_>) -> Option<MethodSig> {
+        let mut c = Cur::new(blob);
+        let signature = self.method_sig_inner(&mut c, g, Some(caller_g), 0)?;
         Some(self.finish_signature(&c, signature))
     }
 

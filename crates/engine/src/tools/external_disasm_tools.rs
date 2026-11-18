@@ -7,7 +7,7 @@
 use super::native_common::{params_json, spec};
 use super::static_input::{self, builder};
 use crate::tool::{Ctx, Effects, Requires, ToolOutput, ToolSpec, Toolset, parse_params, schema_of};
-use craft_anything_evidence::{Authority, Confidence, Coverage, Limitation, Subject, ToolError};
+use craft_anything_evidence::{Authority, Confidence, Coverage, ErrorCode, Limitation, Subject, ToolError};
 use craft_anything_platform::{Output, Process};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -153,11 +153,27 @@ pub(super) fn input_file(ctx: &Ctx<'_>, path: Option<&str>) -> Result<(PathBuf, 
 }
 
 pub(super) fn locate(ctx: &Ctx<'_>, id: &str) -> Result<PathBuf, ToolError> {
+    locate_as(ctx, id, ErrorCode::FeatureMissing)
+}
+
+/// [`locate`], refusing with `code`.
+pub(super) fn locate_as(ctx: &Ctx<'_>, id: &str, code: ErrorCode) -> Result<PathBuf, ToolError> {
     let s = &ctx.session.settings;
-    craft_anything_engines::locate(id, &s.engines.tools, &s.engine_store_dir()).ok_or_else(|| {
-        ToolError::unavailable(format!("{} is not installed.", craft_anything_engines::display_name(id)))
-            .with_remediation(format!("Install {} and set its path in Settings → Engines.", craft_anything_engines::display_name(id)))
+    // The lookup `Requires::Engine` and `engines_list` use, so they agree on what runs.
+    s.engine_path(id).ok_or_else(|| {
+        // The same words as a tool that requires the engine: they say what's wrong with a path
+        // that's set (missing, or a folder without the program) and whether Settings installs it.
+        let (reason, remediation) = s.engine_not_found(id);
+        ToolError::new(code, reason).with_remediation(remediation)
     })
+}
+
+/// For an optional engine that wasn't found: what's wrong with the path set for it in Settings →
+/// Engines, or `None` when no path is set (then "not installed" is the whole story).
+pub(super) fn set_path_problem(ctx: &Ctx<'_>, id: &str) -> Option<String> {
+    use craft_anything_engines::ToolPathLookup;
+    let s = &ctx.session.settings;
+    s.engines.tools.override_for(id).map(|_| s.engine_not_found(id).0)
 }
 
 /// How to run a located engine: a `.jar` (a single-file install) with the configured Java

@@ -305,6 +305,7 @@ Couldn't look through that folder.	無法檢視該資料夾。
 Couldn't open it.	無法開啟。
 Couldn't open the folder.	無法開啟資料夾。
 Couldn't open {}: {}	無法開啟 {}：{}
+Couldn't save your settings.	無法儲存設定。
 Couldn't start a worker thread: {e}	無法啟動工作執行緒：{e}
 Couldn't start it.	無法啟動。
 Coverage unknown	涵蓋範圍未知
@@ -987,6 +988,7 @@ Saved in	儲存位置
 Saves space: copies the program and code, and shares dependencies and media with the project. A shared file rewritten in place changes here too.	節省空間：複製程式和程式碼，與專案共用相依套件和媒體檔案。共用檔案被直接覆寫時，此處的內容也會改變。
 Say what you want	描述你的需求
 Say what you want first.	請先描述你的需求。
+This applies once you choose something to recreate above.	在上方選擇要重現的內容後，此項才會生效。
 Say what you want to make, or drop an app or file on the window to look inside it. Everything runs in Clean room mode unless you switch on Deep.	描述你想製作的內容，或將應用程式或檔案拖到視窗中查看其內部。除非開啟深度模式，否則所有操作都在淨室模式下進行。
 Screenshot	螢幕截圖
 Screenshot a page	擷取網頁圖片
@@ -1192,6 +1194,7 @@ Use the projects folder	使用專案資料夾
 Use this	使用此項
 Use {name}	使用 {name}
 Value flow	值流向
+About	關於
 Version	版本
 Waiting	等待中
 Waiting for another build to finish: this one starts next.	等待另一個建置完成：接下來就會開始。
@@ -1447,6 +1450,7 @@ Zoom	縮放
 Bring all to front	將全部視窗移至最前
 Drag to give the plan more or less room; double-click to reset	拖曳以調整計畫佔用的空間；按兩下恢復預設
 Copy the message	複製這則訊息
+Copy the version	複製版本號
 Choose what the builder's approvals get	選擇如何處理建置助手的審核
 Reading the web	讀取網頁
 Other commands	其他指令
@@ -1493,3 +1497,8 @@ You're up to date.	已是最新版本。
 Forget a website sign-in	忘記網站登入
 Sign in to a website	登入網站
 Some shared files could not be hard-linked and were copied instead ({size}).	部分共用檔案無法建立硬連結，已改為複製（{size}）。
+This server lists several chat models. Choose one:	此伺服器提供多個聊天模型。請選擇一個：
+Choose a model	選擇模型
+
+# Saved-builder notice: English until native-speaker review.
+The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

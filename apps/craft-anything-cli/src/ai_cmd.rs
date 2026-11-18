@@ -79,9 +79,9 @@ pub enum AiCommand {
     /// CLAUDE_CONFIG_DIR), so this AI uses another account: a full path or one under `~/`, on the
     /// computer it runs on. Leave the path out for its usual folder.
     Folder { name: String, path: Option<String> },
-    /// Set the model an AI uses (Claude Code: the model it's asked for); leave it out to list the
-    /// ones it can use. `default` for Claude Code passes no `--model`, so it uses the model its own
-    /// settings name (which may be a custom model), rather than a built-in default.
+    /// Set the model an AI uses (Claude Code, Codex: the model it's asked for); leave it out to list
+    /// the ones it can use. `default` for Claude Code or Codex passes no model, so it uses the model
+    /// its own settings name (which may be a custom model), rather than a built-in default.
     Model {
         name: String,
         model: Option<String>,

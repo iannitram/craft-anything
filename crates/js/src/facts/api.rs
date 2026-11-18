@@ -26,13 +26,19 @@ struct RouterRead {
     nested: Vec<u32>,
 }
 
-fn joined(t: &TemplateLiteral<'_>, between: &str) -> Option<String> {
+/// Concatenate a template literal's quasis with `between`, requiring cooked segments when untagged.
+fn joined(t: &TemplateLiteral<'_>, between: &str, tagged: bool) -> Option<String> {
     let mut out = String::new();
     for (i, q) in t.quasis.iter().enumerate() {
         if i > 0 {
             out.push_str(between);
         }
-        out.push_str(q.value.cooked.as_ref().map_or(q.value.raw.as_str(), |c| c.as_str()));
+        let seg = match (&q.value.cooked, tagged) {
+            (Some(c), _) => c.as_str(),
+            (None, true) => q.value.raw.as_str(),
+            (None, false) => return None,
+        };
+        out.push_str(seg);
         if out.len() > MAX_DOCUMENT_BYTES {
             return None;
         }
@@ -98,18 +104,18 @@ impl FactVisitor<'_> {
     }
 
     /// A template with `${…}` in it. Without any, it was read as a string already.
-    pub(super) fn api_template(&mut self, t: &TemplateLiteral<'_>) {
+    pub(super) fn api_template(&mut self, t: &TemplateLiteral<'_>, tagged: bool) {
         if t.expressions.is_empty() {
             return;
         }
         let off = t.span.start;
-        if let Some(text) = joined(t, &HOLE.to_string())
+        if let Some(text) = joined(t, &HOLE.to_string(), tagged)
             && api_ops::may_be_document(&text)
             && let Some(doc) = api_ops::read_document(&text, false)
         {
             self.api_rows(api_ops::document_rows(&doc), "document-text", off);
         }
-        if let Some(url) = joined(t, "{…}") {
+        if let Some(url) = joined(t, "{…}", tagged) {
             let rows = api_ops::url_rows(&url);
             self.api_rows(rows, "url", off);
         }
@@ -122,7 +128,7 @@ impl FactVisitor<'_> {
             return;
         }
         let off = it.quasi.span.start;
-        let text = joined(&it.quasi, &HOLE.to_string());
+        let text = joined(&it.quasi, &HOLE.to_string(), true);
         self.api_document(text.as_deref(), "gql-template", off);
     }
 
@@ -151,13 +157,8 @@ impl FactVisitor<'_> {
             }
         }
         let off = o.span.start;
-        if let Some(Expression::StringLiteral(k)) = kind.map(|k| k.get_inner_expression())
-            && k.value == "OperationDefinition"
-        {
-            let op_kind = match operation.map(|e| e.get_inner_expression()) {
-                Some(Expression::StringLiteral(s)) => procedure_method(s.value.as_str()),
-                _ => None,
-            };
+        if kind.and_then(|k| super::static_str(k)) == Some("OperationDefinition") {
+            let op_kind = operation.and_then(|e| super::static_str(e)).and_then(procedure_method);
             // No name, or `void 0`, is an anonymous operation; anything else there can't be read.
             let (op_name, known) = match name.map(|e| e.get_inner_expression()) {
                 None | Some(Expression::UnaryExpression(_) | Expression::NullLiteral(_)) => (None, true),
@@ -235,7 +236,7 @@ impl FactVisitor<'_> {
         match arg.get_inner_expression() {
             Expression::StringLiteral(s) => self.api_document(Some(s.value.as_str()), "gql-call", s.span.start),
             Expression::TemplateLiteral(t) => {
-                let text = joined(t, &HOLE.to_string());
+                let text = joined(t, &HOLE.to_string(), false);
                 self.api_document(text.as_deref(), "gql-call", t.span.start);
             }
             _ => self.api_row(Row::unknown("graphql"), "gql-call", off),
@@ -306,7 +307,7 @@ impl FactVisitor<'_> {
                 ObjectPropertyKind::ObjectProperty(p) => p,
             };
             let off = p.span.start;
-            let key = if p.computed && !matches!(p.key, PropertyKey::StringLiteral(_)) { None } else { p.key.static_name() };
+            let key = if p.computed { p.key.as_expression().and_then(super::static_str).map(std::borrow::Cow::Borrowed) } else { p.key.static_name() };
             let value = p.value.get_inner_expression();
             let name = key.as_deref().map(|k| prefixed(prefix, k));
             if let Some(kind) = procedure_kind(value, loose) {
@@ -372,10 +373,7 @@ fn compiled_name(n: &ObjectExpression<'_>) -> Option<String> {
             ObjectPropertyKind::ObjectProperty(_) => {}
         }
     }
-    match value?.get_inner_expression() {
-        Expression::StringLiteral(s) => Some(s.value.to_string()),
-        _ => None,
-    }
+    super::static_str(value?).map(str::to_string)
 }
 
 /// The kind of procedure this expression defines: `….query(handler)` on a chain that shows it's a

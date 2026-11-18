@@ -312,11 +312,20 @@ impl Session {
 
     /// Open a project: its evidence and unknowns become available.
     ///
-    /// The newest stored records (by write time) are loaded into the ledger, up to
-    /// [`MAX_LOADED_EVIDENCE`] records and a byte budget; the rest stay on disk and resolve by id.
-    /// Every loaded record passes its integrity check; tampered or unreadable ones are skipped.
+    /// Opening a different project while one is already open replaces the session's ledger and
+    /// open questions with the new project's; opening the same project again refreshes its stored
+    /// records in place. The newest stored records (by write time) are loaded into the ledger, up
+    /// to [`MAX_LOADED_EVIDENCE`] records and a byte budget; the rest stay on disk and resolve by
+    /// id. Every loaded record passes its integrity check; tampered or unreadable ones are skipped.
     pub fn open_project(&mut self, project: Project) -> Result<(), ToolError> {
-        for u in project.load_unknowns()? {
+        // Read the new project's questions first: a failed read leaves the current project as it was.
+        let unknowns = project.load_unknowns()?;
+        if self.project.as_ref().is_some_and(|open| crate::workspace::normalized(&open.root) != crate::workspace::normalized(&project.root)) {
+            self.clear_ledger();
+        }
+        // Recomputed below; an old count from a larger open must not survive this one.
+        self.unloaded_evidence = 0;
+        for u in unknowns {
             self.unknowns.insert(u.id.clone(), u);
         }
         let mut stored = project.evidence_files();
@@ -348,5 +357,62 @@ impl Session {
         let investigation = crate::tools::investigation_tools::load(self);
         crate::tools::investigation_tools::cache(self, investigation);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::{Project, Purpose};
+    use craft_anything_evidence::{Environment, Evidence, EvidenceBuilder, Severity, Subject, Unknown};
+
+    /// A record that differs by `tag`, and so gets its own id.
+    fn evidence(tag: &str) -> Evidence {
+        EvidenceBuilder::new("test", Subject::default(), Environment::builtin(true)).result(serde_json::json!({"tag": tag})).build().unwrap()
+    }
+
+    fn ledger_ids(session: &Session) -> Vec<String> {
+        session.ledger().map(|e| e.id.clone()).collect()
+    }
+
+    /// A session that opens a second project must not carry the first project's ledger or open
+    /// questions into it; reopening the same project still refreshes it without clearing it.
+    #[test]
+    fn opening_another_project_starts_from_its_own_evidence() {
+        let dir = crate::testing::temp_dir();
+        let a = Project::create(&dir.join("a.cany"), "A", Purpose::Education).unwrap();
+        let b = Project::create(&dir.join("b.cany"), "B", Purpose::Education).unwrap();
+        let ev_a = evidence("a");
+        let ev_b = evidence("b");
+        let q_a = Unknown::new("A's question", "native", Severity::Medium);
+        a.store_evidence(&ev_a).unwrap();
+        b.store_evidence(&ev_b).unwrap();
+        a.store_unknown(&q_a).unwrap();
+
+        let mut session = crate::testing::session();
+        session.open_project(a.clone()).unwrap();
+        assert_eq!(ledger_ids(&session), vec![ev_a.id.clone()]);
+        assert!(session.unknown(&q_a.id).is_some());
+        session.unloaded_evidence = 9;
+
+        session.open_project(b.clone()).unwrap();
+        assert_eq!(ledger_ids(&session), vec![ev_b.id.clone()], "B starts from its own store");
+        assert_eq!(session.unknowns().count(), 0, "A's open question is gone");
+        assert_eq!(session.unloaded_evidence(), 0, "A's unloaded count is gone");
+
+        // Reopening the same project keeps its ledger and doesn't add the record twice.
+        session.open_project(b).unwrap();
+        assert_eq!(ledger_ids(&session), vec![ev_b.id.clone()]);
+
+        // A's records are still in its own store and come back when it is opened again.
+        session.open_project(a).unwrap();
+        assert_eq!(ledger_ids(&session), vec![ev_a.id.clone()]);
+        assert!(session.unknown(&q_a.id).is_some());
+
+        // A new, empty project starts empty rather than inheriting A's records.
+        let empty = Project::create(&dir.join("empty.cany"), "Empty", Purpose::Education).unwrap();
+        session.open_project(empty).unwrap();
+        assert!(ledger_ids(&session).is_empty(), "a new project starts without evidence");
+        assert_eq!(session.unknowns().count(), 0, "and without open questions");
     }
 }

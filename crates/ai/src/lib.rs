@@ -52,6 +52,17 @@ pub const SERVER_CONNECT_WAIT: Duration = Duration::from_secs(15);
 /// starting, or loading a model before it answers, took longer than the 10 seconds it had (#1429).
 pub const SERVER_ANSWER_WAIT: Duration = Duration::from_secs(60);
 
+/// The chat models a server listed when [`AiHub::add_server`] refused to guess between them
+/// (#1434): empty for any other error.
+pub fn models_to_choose(e: &ToolError) -> Vec<String> {
+    e.details
+        .as_ref()
+        .and_then(|d| d.get("choose_model"))
+        .and_then(serde_json::Value::as_array)
+        .map(|a| a.iter().filter_map(serde_json::Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 /// Kinds of backend. See `plan/05-ai-backends.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -578,8 +589,9 @@ impl AiHub {
 
     /// Add an OpenAI-compatible server by its address: Ollama or LM Studio on another computer, or
     /// a hosted service with its key. It's added only when it answers with its models; without a
-    /// model, a chat model it says is loaded (`/api/ps`) is used, else the first one it lists that
-    /// can chat. Returns the model. Anthropic's own
+    /// model, a chat model it says is loaded (`/api/ps`) is used, else the only one it lists that
+    /// can chat; when it lists several, the person chooses ([`models_to_choose`] reads them from
+    /// the error). Returns the model. Anthropic's own
     /// address is added as an Anthropic backend, as its API isn't OpenAI's.
     pub fn add_server(&self, name: &str, address: &str, model: Option<&str>, key: Option<String>) -> Result<String, ToolError> {
         self.add_server_within(name, address, model, key, SERVER_ANSWER_WAIT, &CancelToken::default())
@@ -649,9 +661,25 @@ impl AiHub {
             }
             detect::chat_model(&openai::OpenAi::compatible(name, address, key.clone(), "").loaded_models(Duration::from_secs(5)))
         };
+        // Several chat models and none known to be loaded: which one is in use can't be told, and
+        // the first may be one the server would download (#1434). The person picks; the list
+        // goes in `details.choose_model` for the form to offer.
+        let several = || {
+            let chats = detect::chat_models(&models);
+            if kind == BackendKind::Anthropic || chats.len() < 2 {
+                return Ok(None);
+            }
+            let some = chats.iter().take(5).map(String::as_str).collect::<Vec<_>>().join(", ");
+            let more = if chats.len() > 5 { ", …" } else { "" };
+            Err(ToolError::new(ErrorCode::BadInput, format!("{address} lists {} chat models and doesn't say which one is loaded.", chats.len()))
+                .with_remediation(format!(
+                    "Choose the model to use ({some}{more}), then add it again: asking for one the server hasn't got may start a download."
+                ))
+                .with_details(serde_json::json!({ "choose_model": chats })))
+        };
         let model = match model.map(str::trim).filter(|m| !m.is_empty()) {
             Some(m) => m.to_string(),
-            None => loaded().or_else(|| detect::chat_model(&models)).ok_or_else(|| {
+            None => loaded().map_or_else(several, |m| Ok(Some(m)))?.or_else(|| detect::chat_model(&models)).ok_or_else(|| {
                 let reason = if models.is_empty() { "has no models yet" } else { "doesn't list a model that can chat" };
                 ToolError::new(ErrorCode::NotFound, format!("{address} {reason}."))
                     .with_remediation("Load a chat model on the server first, or enter the name of a chat model you know is available.")
@@ -779,10 +807,10 @@ impl AiHub {
         let Some(b) = cfg.backends.iter_mut().find(|b| b.config.name == name) else { return Ok(false) };
         match b.config.kind {
             BackendKind::AgentCli => {
-                // Ask the adapter, not the id: Claude Code is also saved as `claude`, and both must
-                // mean "no --model" when the choice is the default.
-                let claude_code = cli_agents::adapter_for(&b.config.model).ids().contains(&"claude-code");
-                let clear = claude_code && model == crate::anthropic::CLAUDE_CODE_DEFAULT;
+                // Ask the adapter, not the id: Claude Code is also saved as `claude`, and both, like
+                // Codex, must mean "no model passed" when the choice is the default.
+                let own_default = cli_agents::adapter_for(&b.config.model).offers_own_default();
+                let clear = own_default && model == crate::anthropic::CLAUDE_CODE_DEFAULT;
                 if model_options::supported(&b.config) && (clear || b.options.cli_model.as_deref() != Some(model)) {
                     b.options.cli_context = None;
                     b.options.cli_reasoning_effort = None;

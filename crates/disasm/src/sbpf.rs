@@ -162,10 +162,9 @@ fn alu_op(nibble: u8) -> Option<&'static str> {
     })
 }
 
-/// The JMP operation mnemonic for a high nibble (without width suffix).
+/// Conditional JMP operation mnemonic for a high nibble (without width suffix).
 fn jmp_op(nibble: u8) -> Option<&'static str> {
     Some(match nibble {
-        0x00 => "ja",
         0x10 => "jeq",
         0x20 => "jgt",
         0x30 => "jge",
@@ -235,36 +234,43 @@ pub fn decode_one(code: &[u8], at: usize, base: u64, version: SbpfVersion) -> Op
             let nib = opcode & 0xf0;
             let use_src = opcode & 0x08 != 0;
             // Branch/jump targets are relative to the *next* slot, counted in slots.
-            let target = branch_target(base, slot, off);
-            match (nib, class) {
-                (0x00, CLS_JMP) => {
-                    // ja: unconditional goto (offset).
+            let target = slot_target(base, slot, i64::from(off));
+            match (nib, use_src, class) {
+                (0x00, false, CLS_JMP) => {
+                    // ja: unconditional goto (16-bit slot offset).
                     mnemonic = "ja".to_string();
                     operands = format!("{target:#x}");
                     flow = Flow::Jump { target };
                 }
-                (0x80, CLS_JMP) => {
-                    // call / callx (CALL op).
-                    if use_src {
-                        // callx: register call. v1 reads the register from imm, v2 from src.
-                        mnemonic = "callx".to_string();
-                        let r = if version == SbpfVersion::V2 { src } else { (imm32 & 0x0f) as u8 };
-                        operands = reg(r);
-                        flow = Flow::CallReg;
-                    } else {
-                        // call imm.
-                        let (m, ops, f) = decode_call(base, slot, src, imm32, version);
-                        mnemonic = m;
-                        operands = ops;
-                        flow = f;
-                    }
+                (0x00, false, CLS_JMP32) => {
+                    // ja32: unconditional goto (32-bit slot offset in imm).
+                    let target32 = slot_target(base, slot, i64::from(imm32));
+                    mnemonic = "ja32".to_string();
+                    operands = format!("{target32:#x}");
+                    flow = Flow::Jump { target: target32 };
                 }
-                (0x90, CLS_JMP) => {
+                (0x80, true, CLS_JMP) => {
+                    // callx: register call. v1 reads the register from imm, v2 from src.
+                    mnemonic = "callx".to_string();
+                    let r = if version == SbpfVersion::V2 { src } else { (imm32 & 0x0f) as u8 };
+                    operands = reg(r);
+                    flow = Flow::CallReg;
+                }
+                (0x80, false, CLS_JMP) => {
+                    // call imm.
+                    let (m, ops, f) = decode_call(base, slot, src, imm32, version);
+                    mnemonic = m;
+                    operands = ops;
+                    flow = f;
+                }
+                (0x90, use_src, CLS_JMP) if !use_src || version == SbpfVersion::V2 => {
+                    // `0x95` is classic `exit` (v1) / `return` (v2); `0x9d` is Solana v2+ `return`
+                    // (SIMD-0178) and undefined in classic eBPF / sBPF v1.
                     mnemonic = if version == SbpfVersion::V2 { "return".to_string() } else { "exit".to_string() };
                     operands = String::new();
                     flow = Flow::Exit;
                 }
-                (n, _) => match jmp_op(n) {
+                (n, _, _) => match jmp_op(n) {
                     Some(op) => {
                         mnemonic = format!("{op}{w}");
                         let rhs = if use_src { reg(src) } else { format!("{imm32:#x}") };
@@ -345,10 +351,10 @@ pub fn decode_one(code: &[u8], at: usize, base: u64, version: SbpfVersion) -> Op
     Some(Insn { addr, slot, size, opcode, dst, src, off, imm, mnemonic, operands, flow })
 }
 
-/// Branch/jump target byte address: relative to the next slot, counted in slots.
-fn branch_target(base: u64, slot: u64, off: i16) -> u64 {
+/// PC-relative target byte address: `delta` slots from the next slot (`slot + 1`).
+fn slot_target(base: u64, slot: u64, delta: i64) -> u64 {
     let next = slot.wrapping_add(1);
-    let t = (next as i64).wrapping_add(off as i64);
+    let t = (next as i64).wrapping_add(delta);
     base.wrapping_add((t as u64).wrapping_mul(8))
 }
 
@@ -357,18 +363,14 @@ fn decode_call(base: u64, slot: u64, src: u8, imm32: i32, version: SbpfVersion) 
     match version {
         SbpfVersion::V2 => {
             // v2: `call imm` is pc-relative (imm counts slots from the next slot).
-            let next = slot.wrapping_add(1);
-            let t = (next as i64).wrapping_add(imm32 as i64);
-            let target = base.wrapping_add((t as u64).wrapping_mul(8));
+            let target = slot_target(base, slot, i64::from(imm32));
             ("call".to_string(), format!("{target:#x}"), Flow::Call { target })
         }
         SbpfVersion::V1 => {
             // v1: `src == 1` marks an internal pc-relative call; otherwise imm is a hash
             // (a syscall, or an internal function looked up in the VM function registry).
             if src == 1 {
-                let next = slot.wrapping_add(1);
-                let t = (next as i64).wrapping_add(imm32 as i64);
-                let target = base.wrapping_add((t as u64).wrapping_mul(8));
+                let target = slot_target(base, slot, i64::from(imm32));
                 ("call".to_string(), format!("{target:#x}"), Flow::Call { target })
             } else {
                 ("call".to_string(), format!("0x{:08x} (hash)", imm32 as u32), Flow::CallHash { imm: imm32 as u32 })

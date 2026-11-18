@@ -125,15 +125,18 @@ const ARITY: &[(&str, u8)] = &[
     ("WinHttpSendRequest", 7),
 ];
 
-/// The argument count of an import, by name. Accepts the decorated spellings loaders use: a
-/// leading `_` (Mach-O, 32-bit cdecl), `__imp_`, and a stdcall `@bytes` suffix, which gives the
-/// count on its own (4 bytes an argument) when the name isn't in the table.
+/// The argument count of an import, by name. Accepts the decorated spellings loaders and stubs
+/// use: a leading `_` (Mach-O, 32-bit cdecl), `__imp_`, ELF `@VERSION` / `@@VERSION` and
+/// `@plt`/`@stub`/`@thunk` suffixes, Darwin `$VARIANT` suffixes, and a Win32 stdcall `@bytes`
+/// suffix, which gives the count on its own (4 bytes an argument) when the name isn't in the table.
 pub fn import_arity(name: &str) -> Option<usize> {
     let bare = name.strip_prefix("__imp_").unwrap_or(name);
-    let (base, stdcall) = match bare.rsplit_once('@') {
-        Some((b, n)) if !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) => (b, n.parse::<usize>().ok().map(|bytes| bytes / 4)),
-        _ => (bare, None),
+    let stdcall = match bare.rsplit_once('@') {
+        Some((_, n)) if !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) => n.parse::<usize>().ok().map(|bytes| bytes / 4),
+        _ => None,
     };
+    let base = bare.split('@').next().unwrap_or(bare);
+    let base = base.split('$').next().unwrap_or(base);
     let lookup = |n: &str| ARITY.iter().find(|(k, _)| *k == n).map(|(_, a)| usize::from(*a));
     lookup(base).or_else(|| lookup(base.trim_start_matches('_'))).or(stdcall)
 }

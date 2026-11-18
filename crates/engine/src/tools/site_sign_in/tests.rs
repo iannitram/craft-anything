@@ -428,7 +428,8 @@ fn signed_in_true_with_nothing_saved_names_the_sign_in_tool() {
 
 #[test]
 fn a_sign_in_needs_a_desktop_and_a_sane_wait() {
-    if cfg!(target_os = "linux") {
+    // Every Unix desktop but macOS's needs X11 or Wayland: FreeBSD's as well as Linux's.
+    if cfg!(all(unix, not(target_os = "macos"))) {
         let e = no_display_error(None, Some(" ".into())).unwrap();
         assert_eq!(e.code, ErrorCode::NotSupported);
         assert!(e.remediation.unwrap_or_default().contains("screen"));

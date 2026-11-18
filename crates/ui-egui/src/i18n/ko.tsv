@@ -305,6 +305,7 @@ Couldn't look through that folder.	그 폴더를 살펴보지 못했습니다.
 Couldn't open it.	열지 못했습니다.
 Couldn't open the folder.	폴더를 열지 못했습니다.
 Couldn't open {}: {}	{} 열기 실패: {}
+Couldn't save your settings.	설정을 저장하지 못했습니다.
 Couldn't start a worker thread: {e}	작업 스레드를 시작하지 못했습니다: {e}
 Couldn't start it.	시작하지 못했습니다.
 Coverage unknown	적용 범위 알 수 없음
@@ -987,6 +988,7 @@ Saved in	저장 위치
 Saves space: copies the program and code, and shares dependencies and media with the project. A shared file rewritten in place changes here too.	공간을 아낍니다. 프로그램과 코드는 복사하고, 의존 파일과 미디어는 프로젝트와 함께 씁니다. 함께 쓰는 파일을 그 자리에서 고치면 여기도 바뀝니다.
 Say what you want	원하는 것을 말하세요
 Say what you want first.	먼저 원하는 것을 말하세요.
+This applies once you choose something to recreate above.	위에서 다시 만들 대상을 고르면 적용됩니다.
 Say what you want to make, or drop an app or file on the window to look inside it. Everything runs in Clean room mode unless you switch on Deep.	만들고 싶은 것을 말하거나, 앱이나 파일을 창에 끌어다 놓아 안을 살펴보세요. 심층 모드를 켜지 않으면 모두 클린룸 모드로 실행됩니다.
 Screenshot	스크린샷
 Screenshot a page	페이지 스크린샷
@@ -1192,6 +1194,7 @@ Use the projects folder	프로젝트 폴더 사용
 Use this	이것 사용
 Use {name}	{name} 사용
 Value flow	값 흐름
+About	정보
 Version	버전
 Waiting	대기 중
 Waiting for another build to finish: this one starts next.	다른 빌드가 끝나기를 기다리는 중입니다. 이 빌드가 다음 차례입니다.
@@ -1447,6 +1450,7 @@ Zoom	확대/축소
 Bring all to front	모두 앞으로 가져오기
 Drag to give the plan more or less room; double-click to reset	끌어서 계획이 차지하는 공간을 조절하고, 두 번 클릭하면 원래대로 돌아갑니다
 Copy the message	메시지 복사
+Copy the version	버전 복사
 Choose what the builder's approvals get	빌더의 승인 요청을 어떻게 처리할지 고르기
 Reading the web	웹 읽기
 Other commands	그 밖의 명령
@@ -1493,3 +1497,8 @@ You're up to date.	최신 버전입니다.
 Forget a website sign-in	웹사이트 로그인 정보 지우기
 Sign in to a website	웹사이트에 로그인
 Some shared files could not be hard-linked and were copied instead ({size}).	일부 공유 파일은 하드 링크할 수 없어 복사했습니다 ({size}).
+This server lists several chat models. Choose one:	이 서버에는 채팅 모델이 여러 개 있습니다. 하나를 고르세요:
+Choose a model	모델 선택
+
+# Saved-builder notice: English until native-speaker review.
+The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

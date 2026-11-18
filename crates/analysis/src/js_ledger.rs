@@ -105,12 +105,18 @@ fn expectation(layer: &str, target: String, title: String, cases: &[&str], stren
 /// Candidate expectations from an application graph.
 pub fn candidate_expectations(g: &AppGraph) -> Vec<Expectation> {
     let mut v = Vec::new();
+    let mut seen_ids = std::collections::BTreeSet::new();
+    let mut push_exp = |exp: Expectation| {
+        if seen_ids.insert(exp.expectation_id.clone()) {
+            v.push(exp);
+        }
+    };
     if let Some(m) = &g.entry_points.main {
-        v.push(expectation("install", format!("entry:{m}"), format!("The app starts from {m}"), &["works"], "built-app", false, format!("module:{m}")));
+        push_exp(expectation("install", format!("entry:{m}"), format!("The app starts from {m}"), &["works"], "built-app", false, format!("module:{m}")));
     }
     for c in &g.ipc {
         if !c.handlers.is_empty() || !c.main_listeners.is_empty() {
-            v.push(expectation(
+            push_exp(expectation(
                 "shell",
                 format!("ipc:{}", c.channel),
                 format!("IPC channel '{}' is handled in the main process", c.channel),
@@ -125,7 +131,7 @@ pub fn candidate_expectations(g: &AppGraph) -> Vec<Expectation> {
         let key = e.get("key").and_then(Value::as_str).unwrap_or("?");
         for m in e.get("members").and_then(Value::as_array).into_iter().flatten() {
             let name = m.get("name").and_then(Value::as_str).unwrap_or("?");
-            v.push(expectation(
+            push_exp(expectation(
                 "shell",
                 format!("bridge:{key}.{name}"),
                 format!("window.{key}.{name} is exposed to the page"),
@@ -139,7 +145,7 @@ pub fn candidate_expectations(g: &AppGraph) -> Vec<Expectation> {
     for w in &g.windows {
         let m = w.get("module").and_then(Value::as_str).unwrap_or("?");
         let line = w.get("line").and_then(Value::as_u64).unwrap_or(0);
-        v.push(expectation(
+        push_exp(expectation(
             "shell",
             format!("window:{m}@{line}"),
             "A window with the same webPreferences and preload".into(),
@@ -149,34 +155,36 @@ pub fn candidate_expectations(g: &AppGraph) -> Vec<Expectation> {
             format!("window:{m}@{line}"),
         ));
     }
-    let mut seen = std::collections::BTreeSet::new();
     for e in &g.endpoints {
         if e.get("api").and_then(Value::as_str) == Some("literal") {
             continue;
         }
-        let label = format!("{} {}", e.get("method").and_then(Value::as_str).unwrap_or("*"), e.get("url").and_then(Value::as_str).unwrap_or(""));
-        if seen.insert(label.clone()) {
-            v.push(expectation(
-                "network",
-                format!("endpoint:{label}"),
-                format!("Request {label}"),
-                &["works", "refuses", "bad-input"],
-                "network-test",
-                true,
-                format!("endpoint:{label}"),
-            ));
-        }
+        let url = e.get("url").and_then(Value::as_str).unwrap_or("");
+        let method = e.get("method").and_then(Value::as_str);
+        let label = format!("{} {url}", method.unwrap_or("*"));
+        let node_label = match method {
+            Some(mm) => format!("{mm} {url}"),
+            None => url.to_string(),
+        };
+        push_exp(expectation(
+            "network",
+            format!("endpoint:{label}"),
+            format!("Request {label}"),
+            &["works", "refuses", "bad-input"],
+            "network-test",
+            true,
+            format!("endpoint:{node_label}"),
+        ));
     }
     for r in &g.routes {
         let p = r.get("path").and_then(Value::as_str).unwrap_or("");
-        if seen.insert(format!("route:{p}")) {
-            v.push(expectation("page", format!("route:{p}"), format!("Route {p}"), &["works"], "page-test", false, format!("route:{p}")));
-        }
+        push_exp(expectation("page", format!("route:{p}"), format!("Route {p}"), &["works"], "page-test", false, format!("route:{p}")));
     }
-    for (list, layer) in [(&g.storage, "storage"), (&g.effects, "system")] {
+    for (list, base_layer) in [(&g.storage, "storage"), (&g.effects, "system")] {
         for u in list {
             let api = u.get("api").and_then(Value::as_str).unwrap_or("");
-            let interesting = layer == "storage"
+            let arg = u.get("arg").and_then(Value::as_str);
+            let interesting = base_layer == "storage"
                 || api.starts_with("fs.write")
                 || api.starts_with("fs.append")
                 || api.starts_with("fs.mkdir")
@@ -184,40 +192,58 @@ pub fn candidate_expectations(g: &AppGraph) -> Vec<Expectation> {
                 || api.starts_with("fs.unlink")
                 || api.starts_with("child_process.")
                 || api.starts_with("shell.");
-            let target = format!("{api} {}", u.get("arg").and_then(Value::as_str).unwrap_or("")).trim().to_string();
-            if interesting && seen.insert(format!("{layer}:{target}")) {
-                let layer = if api.starts_with("fs.") { "storage" } else { layer };
-                v.push(expectation(
-                    layer,
-                    format!("effect:{target}"),
-                    format!("Side effect {target}"),
-                    &["works", "refuses"],
-                    "module-test",
-                    layer == "storage",
-                    format!("effect:{api}"),
-                ));
+            if !interesting {
+                continue;
             }
+            let target = format!("{api} {}", arg.unwrap_or("")).trim().to_string();
+            let layer = if api.starts_with("fs.") { "storage" } else { base_layer };
+            let source_node = match (base_layer, arg) {
+                ("storage", Some(a)) => format!("storage:{api} {a}"),
+                ("storage", None) => format!("storage:{api}"),
+                _ => format!("effect:{api}"),
+            };
+            push_exp(expectation(
+                layer,
+                format!("effect:{target}"),
+                format!("Side effect {target}"),
+                &["works", "refuses"],
+                "module-test",
+                layer == "storage",
+                source_node,
+            ));
         }
     }
     for n in &g.native_modules {
         let name = n.get("name").and_then(Value::as_str).unwrap_or("?");
-        if seen.insert(format!("native:{name}")) {
-            v.push(expectation(
-                "native",
-                format!("native:{name}"),
-                format!("Native module {name}"),
-                &["works"],
-                "native-call",
-                false,
-                format!("native:{name}"),
-            ));
-        }
+        let node_key = n.get("file").and_then(Value::as_str).unwrap_or(name);
+        push_exp(expectation(
+            "native",
+            format!("native:{name}"),
+            format!("Native module {name}"),
+            &["works"],
+            "native-call",
+            false,
+            format!("native:{node_key}"),
+        ));
     }
     v
 }
 
 /// Build the ledger. `evidence_ok(id)` says whether an evidence id resolves and verifies.
+///
+/// Each id is checked once per build and the first answer is kept, so a result can't qualify a
+/// row in one check and fail it in another. A result whose first check failed counts from the
+/// next build; one published before its first check counts in this one.
 pub fn build_ledger(g: &AppGraph, bindings: &[Binding], reviews: &[Review], evidence_ok: &dyn Fn(&str) -> bool) -> Value {
+    let checked = std::cell::RefCell::new(BTreeMap::<String, bool>::new());
+    let evidence_ok = |id: &str| -> bool {
+        if let Some(ok) = checked.borrow().get(id) {
+            return *ok;
+        }
+        let ok = evidence_ok(id);
+        checked.borrow_mut().insert(id.to_string(), ok);
+        ok
+    };
     let expectations = candidate_expectations(g);
     let mut rows = Vec::new();
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -233,7 +259,7 @@ pub fn build_ledger(g: &AppGraph, bindings: &[Binding], reviews: &[Review], evid
             Some("skipped") => "skipped".to_string(),
             Some("waiting") => "waiting".to_string(),
             _ => {
-                let owners: std::collections::BTreeSet<(&str, &str)> = mine.iter().map(|b| (b.owner.module_path.as_str(), b.owner.symbol.as_str())).collect();
+                let owners: std::collections::BTreeSet<(&str, &str)> = mine.iter().map(|b| (b.owner.module_path.trim(), b.owner.symbol.trim())).collect();
                 if mine.is_empty() {
                     missing.push("no owner in the rebuild".into());
                     "no-owner".to_string()
@@ -241,67 +267,85 @@ pub fn build_ledger(g: &AppGraph, bindings: &[Binding], reviews: &[Review], evid
                     missing.push(format!("{} different owners claim it", owners.len()));
                     "disproved".to_string()
                 } else {
-                    let b = mine.first().copied().cloned().unwrap_or_default();
+                    let (mod_path, sym) = owners.iter().next().copied().unwrap_or(("", ""));
+                    let has_owner = !mod_path.is_empty() && !sym.is_empty();
                     let mut unknown = false;
-                    if b.owner.module_path.trim().is_empty() || b.owner.symbol.trim().is_empty() {
+                    if !has_owner {
                         missing.push("owner needs module_path and symbol".into());
                     }
-                    if o.needs_parser_type && b.parser_type.as_deref().is_none_or(|p| p.trim().is_empty()) {
+                    let has_parser_type = mine.iter().any(|b| b.parser_type.as_deref().is_some_and(|p| !p.trim().is_empty()));
+                    if o.needs_parser_type && !has_parser_type {
                         missing.push("parser_type is required for this layer".into());
                     }
+                    let all_cases: Vec<&Case> = mine.iter().flat_map(|b| &b.cases).collect();
                     let mut cases_ok = true;
                     for kind in &o.must_cover {
-                        let covered = b.cases.iter().any(|c| {
-                            if c.kind != *kind {
-                                return false;
-                            }
-                            if !evidence_ok(&c.evidence_id) {
-                                unknown = true;
-                                return false;
-                            }
-                            strength_rank(&c.strength).is_some_and(|r| r >= need)
-                        });
+                        let covered =
+                            all_cases.iter().any(|c| c.kind == *kind && evidence_ok(&c.evidence_id) && strength_rank(&c.strength).is_some_and(|r| r >= need));
                         if !covered {
+                            if all_cases.iter().any(|c| c.kind == *kind && !evidence_ok(&c.evidence_id)) {
+                                unknown = true;
+                            }
                             cases_ok = false;
                             missing.push(format!("{kind} case with {} (or stronger) evidence", o.min_strength));
                         }
                     }
-                    let verifier_state = match &b.verifier {
-                        None => {
-                            missing.push("no verifier".into());
-                            "none"
+                    let verifiers: Vec<&Verifier> = mine.iter().filter_map(|b| b.verifier.as_ref()).collect();
+                    let verifier_failed = verifiers.iter().any(|v| v.status == "fail");
+                    let passed_evidence = (!verifier_failed)
+                        .then(|| {
+                            verifiers
+                                .iter()
+                                .filter(|v| {
+                                    v.status == "pass"
+                                        && strength_rank(&v.strength).is_some_and(|r| r >= need)
+                                        && v.expectation_ids.contains(&o.expectation_id)
+                                        && evidence_ok(&v.result_evidence)
+                                })
+                                .map(|v| v.result_evidence.as_str())
+                                .max()
+                        })
+                        .flatten();
+                    if verifiers.is_empty() {
+                        missing.push("no verifier".into());
+                    } else if !verifier_failed
+                        && passed_evidence.is_none()
+                        && let Some(v) = verifiers.iter().max_by_key(|v| {
+                            (
+                                v.status == "pass",
+                                strength_rank(&v.strength).is_some_and(|r| r >= need),
+                                v.expectation_ids.contains(&o.expectation_id),
+                                !evidence_ok(&v.result_evidence),
+                                v.result_evidence.as_str(),
+                                v.command.as_str(),
+                                v.strength.as_str(),
+                                v.status.as_str(),
+                            )
+                        })
+                    {
+                        if v.status != "pass" {
+                            missing.push(format!("verifier status is {:?}", v.status));
                         }
-                        Some(v) if v.status == "fail" => "failed",
-                        Some(v) => {
-                            let mut ok = v.status == "pass";
-                            if !ok {
-                                missing.push(format!("verifier status is {:?}", v.status));
-                            }
-                            if strength_rank(&v.strength).is_none_or(|r| r < need) {
-                                ok = false;
-                                missing.push(format!("check strength {:?} is below {}", v.strength, o.min_strength));
-                            }
-                            if !v.expectation_ids.contains(&o.expectation_id) {
-                                ok = false;
-                                missing.push("verifier does not list this expectation".into());
-                            }
-                            if !evidence_ok(&v.result_evidence) {
-                                ok = false;
-                                unknown = true;
-                                missing.push("verifier result evidence is missing or tampered".into());
-                            }
-                            if ok { "passed" } else { "too-weak" }
+                        if strength_rank(&v.strength).is_none_or(|r| r < need) {
+                            missing.push(format!("check strength {:?} is below {}", v.strength, o.min_strength));
                         }
-                    };
-                    if verifier_state == "failed" {
+                        if !v.expectation_ids.contains(&o.expectation_id) {
+                            missing.push("verifier does not list this expectation".into());
+                        }
+                        if !evidence_ok(&v.result_evidence) {
+                            unknown = true;
+                            missing.push("verifier result evidence is missing or tampered".into());
+                        }
+                    }
+                    if verifier_failed {
                         missing.push("verifier failed".into());
                         "disproved".to_string()
-                    } else if missing.is_empty() {
-                        closed.push((o.expectation_id.clone(), b.verifier.as_ref().map(|v| v.result_evidence.clone()).unwrap_or_default()));
+                    } else if let (true, Some(result)) = (missing.is_empty(), passed_evidence) {
+                        closed.push((o.expectation_id.clone(), result.to_string()));
                         "proven".to_string()
                     } else if unknown {
                         "unclear".to_string()
-                    } else if cases_ok && !b.owner.symbol.is_empty() {
+                    } else if cases_ok && has_owner {
                         "built".to_string()
                     } else {
                         "described".to_string()

@@ -305,6 +305,7 @@ Couldn't look through that folder.	Não foi possível examinar essa pasta.
 Couldn't open it.	Não foi possível abrir.
 Couldn't open the folder.	Não foi possível abrir a pasta.
 Couldn't open {}: {}	Não foi possível abrir {}: {}
+Couldn't save your settings.	Não foi possível salvar as configurações.
 Couldn't start a worker thread: {e}	Não foi possível iniciar uma thread de trabalho: {e}
 Couldn't start it.	Não foi possível iniciar.
 Coverage unknown	Cobertura desconhecida
@@ -987,6 +988,7 @@ Saved in	Salvo em
 Saves space: copies the program and code, and shares dependencies and media with the project. A shared file rewritten in place changes here too.	Economiza espaço: copia o programa e o código, mas compartilha dependências e arquivos de mídia com o projeto. Se um arquivo compartilhado for alterado diretamente, esta cópia também será afetada.
 Say what you want	Descreva o que você deseja
 Say what you want first.	Primeiro, descreva o que você deseja.
+This applies once you choose something to recreate above.	Isto vale assim que você escolher acima o que recriar.
 Say what you want to make, or drop an app or file on the window to look inside it. Everything runs in Clean room mode unless you switch on Deep.	Descreva o que deseja criar ou arraste um aplicativo ou arquivo para a janela para examinar seu conteúdo. Tudo funciona no modo Sala limpa, a menos que você ative o modo Profundo.
 Screenshot	Captura de tela
 Screenshot a page	Capturar uma página
@@ -1192,6 +1194,7 @@ Use the projects folder	Usar a pasta de projetos
 Use this	Usar esta opção
 Use {name}	Usar {name}
 Value flow	Fluxo de valores
+About	Sobre
 Version	Versão
 Waiting	Aguardando
 Waiting for another build to finish: this one starts next.	Aguardando outra criação terminar: esta será a próxima.
@@ -1446,6 +1449,7 @@ Zoom	Zoom
 Bring all to front	Trazer todas para a frente
 Drag to give the plan more or less room; double-click to reset	Arraste para ajustar o espaço do plano. Clique duas vezes para restaurar o tamanho original
 Copy the message	Copiar a mensagem
+Copy the version	Copiar a versão
 {n} · ${spent} of ${budget}	{n} · ${spent} de ${budget}
 Choose what the builder's approvals get	Escolha o comportamento das aprovações do agente
 Reading the web	Ler a web
@@ -1493,3 +1497,8 @@ You're up to date.	Você está usando a versão mais recente.
 Forget a website sign-in	Esquecer o login de um site
 Sign in to a website	Entrar em um site
 Some shared files could not be hard-linked and were copied instead ({size}).	Alguns arquivos compartilhados não puderam ser vinculados por hard link e foram copiados ({size}).
+This server lists several chat models. Choose one:	Este servidor oferece vários modelos de chat. Escolha um:
+Choose a model	Escolha um modelo
+
+# Saved-builder notice: English until native-speaker review.
+The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

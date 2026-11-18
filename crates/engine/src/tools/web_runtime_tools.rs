@@ -72,7 +72,7 @@ fn connect(
     let targets = cdp::json_list(&browser.endpoint, dl)?;
     let target = web_common::pick_target(&targets, target_id, Some("page"))?;
     let url = web_common::sanitize_url(target.get("url").and_then(Value::as_str).unwrap_or_default());
-    let client = web_common::connect_target(&browser, target, PAGE_MAX_MESSAGE, dl)?;
+    let client = web_common::connect_target_answering_dialogs(&browser, target, PAGE_MAX_MESSAGE, dl)?;
     Ok((browser, client, url))
 }
 
@@ -140,7 +140,8 @@ fn web_coverage_measure(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, 
     let result = run_coverage(&mut client, &page_url, p.watch_ms, p.offset, limit, ctx, &dl);
     browser_tools::cleanup(&mut client, &dl);
     let (result, total, covered) = result?;
-    let summary = format!("Coverage on {page_url}: {covered} of {total} script(s) executed code during the window.");
+    let summary =
+        format!("Coverage on {page_url}: {covered} of {total} script(s) executed code during the window.{}", web_common::dialogs_said_in(&result["dialogs"]));
     let ev = EvidenceBuilder::new(
         "web_coverage_measure",
         Subject { kind: "website".into(), sha256: None, name: Some(page_url.clone()) },
@@ -185,6 +186,7 @@ fn run_coverage(
     let window = browser_tools::window_deadline(ctx, watch_ms, dl);
     client.pump_until(&window)?;
     let events = client.take_events();
+    let dialogs = web_common::dialogs_from(&events);
     let urls = script_urls(&events);
     let taken = client.call("Profiler.takePreciseCoverage", json!({}), None, dl)?;
     let _ = client.call("Profiler.stopPreciseCoverage", json!({}), None, dl);
@@ -225,7 +227,7 @@ fn run_coverage(
     scripts.sort_by(|a, b| a["url"].as_str().unwrap_or("").cmp(b["url"].as_str().unwrap_or("")));
     let total = scripts.len();
     let page: Vec<Value> = scripts.into_iter().skip(offset).take(limit).collect();
-    Ok((json!({"origin": page_url, "scripts": page, "scripts_total": total, "scripts_with_execution": covered}), total, covered))
+    Ok((json!({"origin": page_url, "scripts": page, "scripts_total": total, "scripts_with_execution": covered, "dialogs": dialogs}), total, covered))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -257,17 +259,19 @@ fn web_listeners_list(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, To
     }
     let dl = deadline(ctx, p.timeout_secs)?;
     let (browser, mut client, page_url) = connect(ctx, p.cdp_endpoint.as_deref(), p.launch, p.headless, p.no_sandbox, p.target_id.as_deref(), &dl)?;
-    let listeners = gather_listeners(&mut client, &p.selector, &dl);
+    let gathered = gather_listeners(&mut client, &p.selector, &dl);
+    let later_dialogs = web_common::dialogs_from(&client.take_events());
     browser_tools::cleanup(&mut client, &dl);
-    let listeners = listeners?;
-    let summary = format!("Element {:?} on {page_url} has {} event listener(s).", p.selector, listeners.len());
+    let (listeners, mut dialogs) = gathered?;
+    dialogs.extend(later_dialogs);
+    let summary = format!("Element {:?} on {page_url} has {} event listener(s).{}", p.selector, listeners.len(), web_common::dialogs_said(&dialogs));
     let ev = EvidenceBuilder::new(
         "web_listeners_list",
         Subject { kind: "website".into(), sha256: None, name: Some(page_url.clone()) },
         browser_tools::browser_env(ctx.session.clean_room(), &browser),
     )
     .params(json!({"endpoint": browser.endpoint.origin, "selector": p.selector}))
-    .result(json!({"origin": page_url, "selector": p.selector, "listeners": listeners}))
+    .result(json!({"origin": page_url, "selector": p.selector, "listeners": listeners, "dialogs": dialogs}))
     .summary(summary)
     .confidence(Confidence::Observed)
     .authority(Authority::EarlierRecord)
@@ -278,10 +282,11 @@ fn web_listeners_list(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, To
     Ok(ToolOutput::evidence(ev))
 }
 
-fn gather_listeners(client: &mut CdpClient, selector: &str, dl: &Deadline) -> Result<Vec<Value>, ToolError> {
+fn gather_listeners(client: &mut CdpClient, selector: &str, dl: &Deadline) -> Result<(Vec<Value>, Vec<Value>), ToolError> {
     let _ = client.call("DOM.enable", json!({}), None, dl);
     let _ = client.call("Debugger.enable", json!({}), None, dl);
     let events = client.take_events();
+    let dialogs = web_common::dialogs_from(&events);
     let urls = script_urls(&events);
     let node = browser_tools::query_node(client, selector, dl)?;
     let resolved = client.call("DOM.resolveNode", json!({"nodeId": node}), None, dl)?;
@@ -303,7 +308,7 @@ fn gather_listeners(client: &mut CdpClient, selector: &str, dl: &Deadline) -> Re
             "column": l.get("columnNumber").and_then(Value::as_u64),
         }));
     }
-    Ok(out)
+    Ok((out, dialogs))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -346,6 +351,7 @@ fn web_modules_trace(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Too
     let cap = browser_tools::capture_page(&mut client, &page_url, flags, p.watch_ms, &mut secrets, ctx, &dl);
     browser_tools::cleanup(&mut client, &dl);
     let cap = cap?;
+    let dialogs = cap.result["dialogs"].clone();
 
     let limits = craft_anything_js::Limits::default();
     let mut nodes: Vec<Value> = Vec::new();
@@ -378,10 +384,14 @@ fn web_modules_trace(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Too
     let total_nodes = nodes.len();
     let total_edges = edges.len();
     let node_page: Vec<Value> = nodes.into_iter().skip(p.offset).take(limit).collect();
-    let summary = format!("Module graph of {page_url}: {total_nodes} script(s), {total_edges} import edge(s), {} unresolved.", unresolved.len());
+    let summary = format!(
+        "Module graph of {page_url}: {total_nodes} script(s), {total_edges} import edge(s), {} unresolved.{}",
+        unresolved.len(),
+        web_common::dialogs_said_in(&dialogs)
+    );
     let ev = EvidenceBuilder::new("web_modules_trace", Subject { kind: "website".into(), sha256: None, name: Some(page_url.clone()) }, browser_tools::browser_env(ctx.session.clean_room(), &browser))
         .params(json!({"endpoint": browser.endpoint.origin, "offset": p.offset, "limit": limit}))
-        .result(json!({"origin": page_url, "nodes": node_page, "nodes_total": total_nodes, "edges": edges, "unresolved": unresolved}))
+        .result(json!({"origin": page_url, "nodes": node_page, "nodes_total": total_nodes, "edges": edges, "unresolved": unresolved, "dialogs": dialogs}))
         .summary(summary)
         .confidence(Confidence::Derived)
         .authority(Authority::EarlierRecord)

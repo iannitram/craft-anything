@@ -584,6 +584,19 @@ pub struct CdpClient {
     events: VecDeque<Value>,
     max_events: usize,
     dropped_events: u64,
+    answer_dialogs: bool,
+}
+
+/// The event a page's `alert`, `confirm`, `prompt` or leave-page question raises. Until it's
+/// answered the page's scripts stop, no load event comes and every evaluation waits.
+pub const DIALOG_OPENING: &str = "Page.javascriptDialogOpening";
+
+/// The `Page.handleJavaScriptDialog` answer for a dialog a page opened by itself: an `alert` is
+/// closed and a leave-page question lets the page go (what a visitor's only click would do), while
+/// a `confirm` or `prompt` is dismissed, so nothing the page asks to do is agreed to on our behalf.
+pub fn dialog_answer(opening: &Value) -> Value {
+    let accept = matches!(opening.get("type").and_then(Value::as_str), Some("alert" | "beforeunload"));
+    json!({"accept": accept})
 }
 
 /// A CDP event: domain-qualified method and its params.
@@ -596,11 +609,38 @@ pub struct CdpEvent {
 
 impl CdpClient {
     pub fn new(conn: WsConn) -> Self {
-        CdpClient { conn, next_id: 1, events: VecDeque::new(), max_events: 200_000, dropped_events: 0 }
+        CdpClient { conn, next_id: 1, events: VecDeque::new(), max_events: 200_000, dropped_events: 0, answer_dialogs: false }
+    }
+
+    /// Answer every dialog the page opens by itself ([`dialog_answer`]) as soon as it's seen, so a
+    /// page that greets new visitors with an `alert` loads instead of holding every call until its
+    /// deadline. The [`DIALOG_OPENING`] events stay in the queue for the caller to report.
+    /// Needs `Page.enable` on the session; leave it off where a person answers the page.
+    pub fn answering_dialogs(mut self) -> Self {
+        self.answer_dialogs = true;
+        self
     }
 
     pub fn dropped_events(&self) -> u64 {
         self.dropped_events
+    }
+
+    /// Keep an event, answering it first when it's a dialog this client answers.
+    fn on_event(&mut self, v: Value) {
+        if self.answer_dialogs && v.get("method").and_then(Value::as_str) == Some(DIALOG_OPENING) {
+            let id = self.next_id;
+            self.next_id = self.next_id.wrapping_add(1);
+            let mut msg = json!({"id": id, "method": "Page.handleJavaScriptDialog", "params": dialog_answer(&v["params"])});
+            if let (Some(s), Some(o)) = (v.get("sessionId").cloned(), msg.as_object_mut()) {
+                o.insert("sessionId".into(), s);
+            }
+            // The reply comes back as a stray id and is skipped. A send that fails leaves the page
+            // waiting, and the caller's own deadline ends the wait as before.
+            if let Ok(text) = serde_json::to_string(&msg) {
+                let _ = self.conn.send_text(&text, &Deadline::new(Duration::from_secs(5), CancelToken::default()));
+            }
+        }
+        self.enqueue_event(v);
     }
 
     fn enqueue_event(&mut self, v: Value) {
@@ -641,7 +681,7 @@ impl CdpClient {
             }
             // Anything else is an event or a reply to a different id: keep events, ignore stray replies.
             if v.get("method").is_some() {
-                self.enqueue_event(v);
+                self.on_event(v);
             }
         }
     }
@@ -658,7 +698,7 @@ impl CdpClient {
                     if let Ok(v) = serde_json::from_slice::<Value>(&raw)
                         && v.get("method").is_some()
                     {
-                        self.enqueue_event(v);
+                        self.on_event(v);
                     }
                 }
                 Ok(None) => return Ok(()),
@@ -756,5 +796,16 @@ mod tests {
     fn find_helper() {
         assert_eq!(find(b"abc\r\n\r\nxyz", b"\r\n\r\n"), Some(3));
         assert_eq!(find(b"abc", b"\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn a_dialog_is_closed_but_never_agreed_to() {
+        let answer = |kind: Value| dialog_answer(&json!({"type": kind, "message": "m"}))["accept"].clone();
+        assert_eq!(answer(json!("alert")), json!(true), "an alert has only OK");
+        assert_eq!(answer(json!("beforeunload")), json!(true), "leaving the page lets the navigation go on");
+        assert_eq!(answer(json!("confirm")), json!(false), "what the page asks to do isn't agreed to");
+        assert_eq!(answer(json!("prompt")), json!(false));
+        assert_eq!(answer(json!("something-new")), json!(false), "an unknown kind is dismissed");
+        assert_eq!(answer(Value::Null), json!(false));
     }
 }

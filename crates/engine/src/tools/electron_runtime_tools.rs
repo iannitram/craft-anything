@@ -211,14 +211,14 @@ fn js_electron_page_show(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput,
         .with_remediation("js_electron_page_show only inspects hostless file:// / app:// renderer pages."));
     }
     let page_url = web_common::sanitize_url(url);
-    let mut client = web_common::connect_target(&browser, target, PAGE_MAX_MESSAGE, &dl)?;
+    let mut client = web_common::connect_target_answering_dialogs(&browser, target, PAGE_MAX_MESSAGE, &dl)?;
     let flags = CaptureFlags { script_sources: p.with_script_text, console: true, console_text: p.with_console_text, network: true, ..CaptureFlags::default() };
     let mut secrets = web_common::Secrets::new(&p.hidden_values);
     let cap = browser_tools::capture_page(&mut client, &page_url, flags, p.watch_ms, &mut secrets, ctx, &dl);
     browser_tools::cleanup(&mut client, &dl);
     let cap = cap?;
     let scripts_n = cap.result["scripts"].as_array().map_or(0, Vec::len);
-    let summary = format!("Inspected Electron page {page_url}: {scripts_n} script(s).");
+    let summary = format!("Inspected Electron page {page_url}: {scripts_n} script(s).{}", web_common::dialogs_said_in(&cap.result["dialogs"]));
     let ev = EvidenceBuilder::new(
         "js_electron_page_show",
         Subject { kind: "electron".into(), sha256: None, name: Some(page_url.clone()) },
@@ -300,7 +300,7 @@ fn js_electron_walkthrough_record(ctx: &mut Ctx<'_>, params: Value) -> Result<To
         .find(|t| t.get("type").and_then(Value::as_str) == Some("page"))
         .ok_or_else(|| ToolError::new(craft_anything_evidence::ErrorCode::NotFound, "the launched app exposed no renderer page"))?;
     let start_url = web_common::sanitize_url(target.get("url").and_then(Value::as_str).unwrap_or_default());
-    let mut client = web_common::connect_target(&browser, target, PAGE_MAX_MESSAGE, &dl)?;
+    let mut client = web_common::connect_target_answering_dialogs(&browser, target, PAGE_MAX_MESSAGE, &dl)?;
     let mut secrets = web_common::Secrets::new(&p.hidden_values);
     let _ = client.call("Page.enable", json!({}), None, &dl);
     let _ = client.call("DOM.enable", json!({}), None, &dl);
@@ -327,8 +327,10 @@ fn js_electron_walkthrough_record(ctx: &mut Ctx<'_>, params: Value) -> Result<To
             break;
         }
     }
+    let events = client.take_events();
+    let mut dialogs = web_common::dialogs_from(&events);
+    web_common::redact_dialogs(&mut dialogs, &mut secrets);
     let network = if p.capture_network {
-        let events = client.take_events();
         let mut dropped = 0u64;
         browser_tools::collect_network(&mut client, &events, false, browser_tools::NetworkContent::default(), &mut secrets, &dl, &mut dropped)
     } else {
@@ -336,8 +338,13 @@ fn js_electron_walkthrough_record(ctx: &mut Ctx<'_>, params: Value) -> Result<To
     };
     browser_tools::cleanup(&mut client, &dl);
     let ok_steps = steps.iter().filter(|s| s["status"] == "ok").count();
-    let summary =
-        format!("Ran {} of {} step(s) in the Electron app{}.", ok_steps, p.actions.len(), aborted.as_ref().map(|a| format!(" ({a})")).unwrap_or_default());
+    let summary = format!(
+        "Ran {} of {} step(s) in the Electron app{}.{}",
+        ok_steps,
+        p.actions.len(),
+        aborted.as_ref().map(|a| format!(" ({a})")).unwrap_or_default(),
+        web_common::dialogs_said(&dialogs)
+    );
     let ev = EvidenceBuilder::new(
         "js_electron_walkthrough_record",
         Subject { kind: "electron".into(), sha256: None, name: exe.file_name().map(|n| n.to_string_lossy().into_owned()) },
@@ -350,6 +357,7 @@ fn js_electron_walkthrough_record(ctx: &mut Ctx<'_>, params: Value) -> Result<To
         "steps": steps,
         "network": network,
         "aborted": aborted,
+        "dialogs": dialogs,
         "secret_redactions": secrets.redactions,
     }))
     .summary(summary)

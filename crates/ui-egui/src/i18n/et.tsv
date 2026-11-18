@@ -305,6 +305,7 @@ Couldn't look through that folder.	Seda kausta ei õnnestunud läbi vaadata.
 Couldn't open it.	Seda ei õnnestunud avada.
 Couldn't open the folder.	Kausta ei õnnestunud avada.
 Couldn't open {}: {}	Ei õnnestunud avada {}: {}
+Couldn't save your settings.	Seadeid ei õnnestunud salvestada.
 Couldn't start a worker thread: {e}	Töölõime ei õnnestunud käivitada: {e}
 Couldn't start it.	Seda ei õnnestunud käivitada.
 Coverage unknown	Katvus teadmata
@@ -987,6 +988,7 @@ Saved in	Salvestatud asukohta
 Saves space: copies the program and code, and shares dependencies and media with the project. A shared file rewritten in place changes here too.	Säästab ruumi: kopeerib programmi ja koodi ning jagab projekti sõltuvusi ja meediat. Kohapeal üle kirjutatud jagatud fail muutub ka siin.
 Say what you want	Ütle, mida soovid
 Say what you want first.	Ütle esmalt, mida soovid.
+This applies once you choose something to recreate above.	See kehtib, kui valid ülal, mida uuesti luua.
 Say what you want to make, or drop an app or file on the window to look inside it. Everything runs in Clean room mode unless you switch on Deep.	Ütle, mida soovid luua, või lohista rakendus või fail aknale, et sisse vaadata. Kõik töötab puhta ruumi režiimis, kuni lülitad sisse sügava.
 Screenshot	Ekraanipilt
 Screenshot a page	Tee lehest ekraanipilt
@@ -1192,6 +1194,7 @@ Use the projects folder	Kasuta projektide kausta
 Use this	Kasuta seda
 Use {name}	Kasuta {name}
 Value flow	Väärtuste voog
+About	Teave
 Version	Versioon
 Waiting	Ootab
 Waiting for another build to finish: this one starts next.	Ootab teise ehituse lõppu: see algab järgmisena.
@@ -1447,6 +1450,7 @@ Zoom	Suumi
 Bring all to front	Too kõik ette
 Drag to give the plan more or less room; double-click to reset	Lohista, et anda plaanile rohkem või vähem ruumi; lähtestamiseks tee topeltklõps
 Copy the message	Kopeeri sõnum
+Copy the version	Kopeeri versioon
 Choose what the builder's approvals get	Määra ehitaja kinnituste käitumine
 Reading the web	Veebist lugemine
 Other commands	Muud käsud
@@ -1493,3 +1497,8 @@ You're up to date.	Sul on uusim versioon.
 Forget a website sign-in	Unusta veebisaidi sisselogimine
 Sign in to a website	Logi veebisaidile sisse
 Some shared files could not be hard-linked and were copied instead ({size}).	Mõnda jagatud faili ei saanud kõvasti linkida ja need kopeeriti ({size}).
+This server lists several chat models. Choose one:	See server pakub mitut vestlusmudelit. Vali üks:
+Choose a model	Vali mudel
+
+# Saved-builder notice: English until native-speaker review.
+The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

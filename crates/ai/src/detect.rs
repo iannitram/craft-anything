@@ -102,17 +102,24 @@ const NOT_CHAT: &[&str] = &["embed", "embedding", "embeddings", "embeddinggemma"
 
 /// The first model a server lists that can chat. A specialised model isn't a chat fallback.
 pub(crate) fn chat_model(models: &[String]) -> Option<String> {
+    models.iter().find(|m| can_chat(m)).cloned()
+}
+
+/// Every model a server lists that can chat, in its order.
+pub(crate) fn chat_models(models: &[String]) -> Vec<String> {
+    models.iter().filter(|m| can_chat(m)).cloned().collect()
+}
+
+/// Whether a model's name says it can chat: not an embedding, ranking or speech model.
+fn can_chat(model: &str) -> bool {
     let specialised =
         |name: &str| name.split(|c: char| !c.is_ascii_alphanumeric()).any(|token| NOT_CHAT.contains(&token.trim_end_matches(|c: char| c.is_ascii_digit())));
-    let chats = |m: &&String| {
-        let lower = m.to_ascii_lowercase();
-        let (directory, name) = lower.rsplit_once(['/', '\\']).unwrap_or(("", lower.as_str()));
-        // A generic GGUF filename needs its model directory; arbitrary ancestors do not identify it.
-        let generic_gguf = name == "model.gguf" || name == "ggml-model.gguf" || (name.starts_with("ggml-model-") && name.ends_with(".gguf"));
-        let model_directory = directory.rsplit(['/', '\\']).next().unwrap_or_default();
-        !(specialised(name) || generic_gguf && specialised(model_directory))
-    };
-    models.iter().find(chats).cloned()
+    let lower = model.to_ascii_lowercase();
+    let (directory, name) = lower.rsplit_once(['/', '\\']).unwrap_or(("", lower.as_str()));
+    // A generic GGUF filename needs its model directory; arbitrary ancestors do not identify it.
+    let generic_gguf = name == "model.gguf" || name == "ggml-model.gguf" || (name.starts_with("ggml-model-") && name.ends_with(".gguf"));
+    let model_directory = directory.rsplit(['/', '\\']).next().unwrap_or_default();
+    !(specialised(name) || generic_gguf && specialised(model_directory))
 }
 
 /// One local server: connect, then list models.

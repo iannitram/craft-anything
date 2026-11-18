@@ -45,6 +45,25 @@ impl ThemeKind {
     }
 }
 
+/// `settings.theme` for following the system's light or dark appearance, the default.
+pub const SYSTEM: &str = "system";
+
+/// Whether the stored choice follows the system (an empty one, from an older file, does too).
+pub fn follows_system(choice: &str) -> bool {
+    let c = choice.trim();
+    c.is_empty() || c.eq_ignore_ascii_case(SYSTEM)
+}
+
+/// The theme to draw with: a stored Studio or Studio Light as it is, System by the system's
+/// appearance (`ctx.system_theme()`), and dark when the system doesn't say.
+pub fn resolve(choice: &str, system: Option<egui::Theme>) -> ThemeKind {
+    match (follows_system(choice), system) {
+        (true, Some(egui::Theme::Light)) => ThemeKind::StudioLight,
+        (true, _) => ThemeKind::Studio,
+        (false, _) => ThemeKind::from_id(choice),
+    }
+}
+
 /// Colour and shape tokens.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tokens {
@@ -943,6 +962,21 @@ mod tests {
             assert_eq!(ThemeKind::from_id(k.id()), k);
         }
         assert_eq!(ThemeKind::from_id("nonsense"), ThemeKind::Studio);
+    }
+
+    /// System follows the system's appearance (dark when it doesn't say); a chosen theme ignores it.
+    #[test]
+    fn system_follows_the_systems_appearance() {
+        use egui::Theme::{Dark, Light};
+        for choice in [SYSTEM, "System", " system ", ""] {
+            assert_eq!(resolve(choice, Some(Light)), ThemeKind::StudioLight, "{choice:?}");
+            assert_eq!(resolve(choice, Some(Dark)), ThemeKind::Studio, "{choice:?}");
+            assert_eq!(resolve(choice, None), ThemeKind::Studio, "{choice:?}");
+        }
+        for system in [Some(Light), Some(Dark), None] {
+            assert_eq!(resolve("studio", system), ThemeKind::Studio);
+            assert_eq!(resolve("studio-light", system), ThemeKind::StudioLight);
+        }
     }
 
     /// WCAG 2.x contrast ratio between two opaque colours.

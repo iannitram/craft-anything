@@ -251,6 +251,7 @@ pub(crate) fn lzma_raw_complete(input: &[u8], out_len: u32) -> Result<Vec<u8>, D
 }
 
 /// Decode the property bytes and raw stream of a ZIP method-14 member.
+#[cfg(test)]
 pub(crate) fn lzma_zip(input: &[u8], expected_size: u64, has_end_marker: bool, max_out: u64) -> Result<Vec<u8>, DecompressError> {
     let cap = cap_of(max_out).min(isize::MAX as usize);
     if expected_size > cap as u64 {

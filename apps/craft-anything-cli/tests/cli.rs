@@ -446,3 +446,29 @@ fn mcp_restricted_mode_cli() {
     let err_obj: Value = serde_json::from_str(call_res["content"][0]["text"].as_str().unwrap()).unwrap();
     assert!(err_obj["error"]["message"].as_str().unwrap().contains("turned off in restricted mode"));
 }
+
+/// Uninstall's text output says why a client blocked it and how to fix that, not just the client's name.
+#[test]
+fn uninstall_text_shows_why_a_client_blocks_it_and_the_fix() {
+    let home = tempfile::tempdir().unwrap();
+    let cursor = home.path().join(".cursor");
+    std::fs::create_dir_all(&cursor).unwrap();
+    std::fs::write(cursor.join("mcp.json"), [0xffu8, 0xfe, 0x00]).unwrap();
+    for format in ["text", "md"] {
+        let mut p = Process::new(env!("CARGO_BIN_EXE_craft-anything-cli"))
+            .args(["--format", format, "uninstall"])
+            .env("CRAFT_ANYTHING_CONFIG_DIR", home.path().join("config"))
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path());
+        // Every client location the host reads from the environment stays inside the temporary home.
+        for k in craft_anything_setup::clients::ENV_KEYS {
+            p = p.env(k, home.path().join(k));
+        }
+        let out = p.timeout(Duration::from_secs(60)).run().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.code, Some(1), "{format}: {text}");
+        assert!(text.contains("blocked by Cursor: Can't read ") && text.contains("the file is not valid UTF-8"), "{format}: {text}");
+        assert!(text.contains("save it as UTF-8 where it is, then run uninstall again."), "{format}: {text}");
+    }
+    assert_eq!(std::fs::read(cursor.join("mcp.json")).unwrap(), [0xffu8, 0xfe, 0x00]);
+}

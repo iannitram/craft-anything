@@ -209,7 +209,9 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
     if let Ok(mut h) = site.health.lock() {
         h.clone_from(&health);
     }
-    // Clean room keeps what a visitor sees: not the page's load errors, failed requests or size in elements.
+    // Clean room keeps what a visitor sees: not the page's load errors, failed requests or size in
+    // elements. A dialog the page opened is something a visitor sees, so it's said either way.
+    let dialogs = health.get("dialogs").cloned().unwrap_or_else(|| json!([]));
     let (visitor, mut facts) = (ctx.session.clean_room(), facts);
     let health = if visitor {
         if let Some(f) = facts.as_object_mut() {
@@ -228,6 +230,7 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
         (0, 0) => opened,
         (e, f) => format!("{opened} While loading: {e} error(s), {f} failed request(s)."),
     };
+    let summary = format!("{summary}{}", dialogs_said(&dialogs));
     // Pages opened signed in often land on addresses carrying codes or tokens: keep only the path.
     let (final_url, facts) = if want.is_some() { signed_in_urls(final_url, facts) } else { (final_url, facts) };
     let browser = site.handle();
@@ -237,7 +240,7 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
         browser_env(ctx.session.clean_room(), &browser),
     )
     .params(json!({"url": shown, "width": p.width, "height": p.height}))
-    .result(json!({"url": final_url, "title": title, "facts": facts, "health": health, "browser": site.product, "signed_in": want.is_some(), "signed_in_site": want}))
+    .result(json!({"url": final_url, "title": title, "facts": facts, "health": health, "dialogs": dialogs, "browser": site.product, "signed_in": want.is_some(), "signed_in_site": want}))
     .summary(summary)
     .confidence(Confidence::Observed)
     .authority(Authority::OurRun)
@@ -246,6 +249,11 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
     .location(Location::new("url", shown))
     .build()?;
     Ok(ToolOutput::evidence(ev))
+}
+
+/// The summary's sentence on dialogs the page opened by itself while it loaded (empty when none).
+fn dialogs_said(dialogs: &Value) -> String {
+    web_common::dialogs_said_in(dialogs)
 }
 
 /// Explicit signed-out opens must discard even a matching browser's accumulated state.
@@ -322,7 +330,8 @@ fn page_client(site: &SiteBrowser, dl: &Deadline) -> Result<CdpClient, ToolError
     let b = site.handle();
     let targets = cdp::json_list(&site.endpoint, dl)?;
     let target = web_common::pick_target(&targets, None, Some("page"))?;
-    web_common::connect_target(&b, target, PAGE_MAX_MESSAGE, dl)
+    // Nobody sits at this private browser, so a page's own alert would hold it until the deadline.
+    web_common::connect_target(&b, target, PAGE_MAX_MESSAGE, dl).map(CdpClient::answering_dialogs)
 }
 
 /// Size the page and pin light mode, so captures don't depend on this computer's theme.
@@ -351,7 +360,9 @@ pub(crate) fn navigate(client: &mut CdpClient, url: &str, width: u32, height: u3
     let mut done = false;
     let mut seen: Vec<CdpEvent> = Vec::new();
     let mut keep = |events: Vec<CdpEvent>| {
-        let wanted = events.into_iter().filter(|e| e.method.starts_with("Runtime.") || e.method.starts_with("Log.") || e.method.starts_with("Network."));
+        let wanted = events.into_iter().filter(|e| {
+            e.method.starts_with("Runtime.") || e.method.starts_with("Log.") || e.method.starts_with("Network.") || e.method == cdp::DIALOG_OPENING
+        });
         seen.extend(wanted.take(MAX_HEALTH_EVENTS.saturating_sub(seen.len())));
     };
     while !done && !loaded.expired() && !dl.expired() {
@@ -376,7 +387,8 @@ const MAX_HEALTH_EVENTS: usize = 20_000;
 /// What went wrong while a page loaded, from the browser's events: `errors` (uncaught script
 /// errors, console errors and error log entries, each text once) and `failed_requests` (answers
 /// of 400 or more, and loads that failed). Texts are cut to one line of 300 characters and
-/// addresses lose their query strings, so ids in them aren't kept.
+/// addresses lose their query strings, so ids in them aren't kept. A page that opened dialogs by
+/// itself also gets `dialogs`: each one's kind, first line and how it was answered.
 pub fn page_health(events: &[CdpEvent]) -> Value {
     let line = |s: &str| s.lines().next().unwrap_or_default().chars().take(300).collect::<String>();
     let str_at = |v: &Value, p: &str| v.pointer(p).and_then(Value::as_str).unwrap_or_default().to_string();
@@ -425,7 +437,14 @@ pub fn page_health(events: &[CdpEvent]) -> Value {
             _ => {}
         }
     }
-    json!({"errors": errors, "failed_requests": failed})
+    let dialogs = web_common::dialogs_from(events);
+    let mut health = json!({"errors": errors, "failed_requests": failed});
+    if !dialogs.is_empty()
+        && let Some(o) = health.as_object_mut()
+    {
+        o.insert("dialogs".into(), json!(dialogs));
+    }
+    health
 }
 
 /// Evaluate one of our own read-only scripts in the page and return its JSON value.
@@ -1454,6 +1473,28 @@ mod tests {
         assert!(md.contains("- script error: TypeError: x is undefined") && md.contains("- failed request (404): https://ex.com/logo.png"), "{md}");
         assert!(md.contains("Language: en. Controls without a name: 2. Pictures without alt text: 1."), "{md}");
         assert!(readme(&json!({"health": page_health(&[])}), &[], (0, 0), false).contains("loaded without script errors"));
+    }
+
+    #[test]
+    fn dialogs_a_page_opened_are_kept_with_their_answer_and_said() {
+        let ev = |params: Value| CdpEvent { method: cdp::DIALOG_OPENING.into(), params, session_id: None };
+        let h = page_health(&[
+            ev(json!({"type": "alert", "message": "Settings changed; resetting.\nline two", "url": "https://ex.com/?k=1"})),
+            ev(json!({"type": "confirm", "message": "Delete everything?"})),
+        ]);
+        assert_eq!(
+            h["dialogs"],
+            json!([
+                {"type": "alert", "message": "Settings changed; resetting.", "answered": "accepted"},
+                {"type": "confirm", "message": "Delete everything?", "answered": "dismissed"},
+            ]),
+            "one line each, and a confirm is never agreed to"
+        );
+        assert!(page_health(&[]).get("dialogs").is_none(), "a page without dialogs keeps the old shape");
+        let said = dialogs_said(&h["dialogs"]);
+        assert_eq!(said, " The page opened an alert by itself (\"Settings changed; resetting.\") and 1 more; it was accepted so the page could go on.");
+        assert_eq!(dialogs_said(&json!([])), "");
+        assert_eq!(dialogs_said(&Value::Null), "");
     }
 
     #[test]

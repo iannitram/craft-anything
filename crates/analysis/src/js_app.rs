@@ -241,9 +241,77 @@ pub fn dir_of(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(d, _)| d)
 }
 
+/// Return the path component before any `?` query or `#` fragment.
+fn strip_query_fragment(raw: &str) -> &str {
+    raw.split(['?', '#']).next().unwrap_or(raw)
+}
+
+/// Whether `s` ends with ASCII `suffix`, case-insensitively without allocating.
+fn ends_with_ascii_ci(s: &str, suffix: &str) -> bool {
+    let sb = s.as_bytes();
+    let eb = suffix.as_bytes();
+    sb.len() >= eb.len() && sb[sb.len() - eb.len()..].eq_ignore_ascii_case(eb)
+}
+
+/// Whether `raw` is a scheme (`https:`, `data:`, `blob:`) or scheme-relative external HTML reference.
+///
+/// The scheme is read before the first `/`, `?` or `#` (RFC 3986 section 3.1), so a query that
+/// carries a URL (`./boot.js?origin=https://...`) stays local. A single letter before `:` is a
+/// Windows drive, not a scheme.
+fn is_external_html_ref(raw: &str) -> bool {
+    if raw.starts_with("//") {
+        return true;
+    }
+    let head = raw.split(['/', '?', '#']).next().unwrap_or(raw);
+    head.split_once(':').is_some_and(|(scheme, _)| {
+        let mut chars = scheme.chars();
+        scheme.len() > 1 && chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
+}
+
+/// An HTML URL attribute as a browser reads it (WHATWG URL parsing): leading and trailing C0
+/// controls and spaces removed, then every ASCII tab and newline.
+fn html_url(raw: &str) -> std::borrow::Cow<'_, str> {
+    let trimmed = raw.trim_matches(|c: char| c <= ' ');
+    if trimmed.contains(['\t', '\n', '\r']) { trimmed.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect::<String>().into() } else { trimmed.into() }
+}
+
+/// `p` without a `file://` prefix, in any letter case (URL schemes are case-insensitive). An empty
+/// authority and `localhost` name this computer, so `file://localhost/ui/x` is `/ui/x` like
+/// `file:///ui/x`; another host is left in place.
+fn strip_file_url(p: &str) -> std::borrow::Cow<'_, str> {
+    let Some(rest) = p.get(..7).filter(|s| s.eq_ignore_ascii_case("file://")).map(|_| &p[7..]) else { return p.into() };
+    let (host, path) = rest.split_at(rest.find(['/', '\\']).unwrap_or(rest.len()));
+    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+        return rest.into();
+    }
+    if path.is_empty() {
+        return "/".into();
+    }
+    if let Some(tail) = path.strip_prefix('\\') {
+        return format!("/{tail}").into();
+    }
+    path.into()
+}
+
+/// Whether a path names a folder: it ends in `/` or in a `.` or `..` segment (`./boot.js/.`).
+fn names_a_folder(p: &str) -> bool {
+    p.ends_with(['/', '\\']) || matches!(p.rsplit(['/', '\\']).next(), Some("." | ".."))
+}
+
+/// Whether a window's `loadURL`/`loadFile` target is remote: it has a URL scheme other than `file:`.
+fn is_remote_load(target: &str) -> bool {
+    is_external_html_ref(target) && !target.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("file:"))
+}
+
+/// Whether `path` sits in a `node_modules` folder (a whole directory segment, not `my_node_modules`).
+fn in_node_modules(path: &str) -> bool {
+    path.rsplit_once('/').is_some_and(|(dir, _)| dir.split('/').any(|s| s == "node_modules"))
+}
+
 /// Join and normalise; `None` when the result would escape the root.
 pub fn join_rel(base_dir: &str, rel: &str) -> Option<String> {
-    let rel = rel.split(['?', '#']).next().unwrap_or(rel);
+    let rel = strip_query_fragment(rel);
     let mut parts: Vec<&str> = if rel.starts_with('/') { Vec::new() } else { base_dir.split('/').filter(|p| !p.is_empty()).collect() };
     for p in rel.split(['/', '\\']) {
         match p {
@@ -259,57 +327,157 @@ pub fn join_rel(base_dir: &str, rel: &str) -> Option<String> {
 
 const SCRIPT_EXTS: &[&str] = &[".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts"];
 
+/// Whether `path` names a TypeScript type-declaration file (`.d.ts`, `.d.mts`, `.d.cts`).
+fn is_ts_declaration(path: &str) -> bool {
+    ends_with_ascii_ci(path, ".d.ts") || ends_with_ascii_ci(path, ".d.mts") || ends_with_ascii_ci(path, ".d.cts")
+}
+
+/// Map a compiled JavaScript specifier path (`.js`, `.mjs`, `.cjs`, `.jsx`) to its TypeScript
+/// source counterparts when analysing an unbuilt source tree.
+fn ts_source_fallbacks(path: &str) -> Vec<String> {
+    if let Some(stem) = path.strip_suffix(".js") {
+        vec![format!("{stem}.ts"), format!("{stem}.tsx")]
+    } else if let Some(stem) = path.strip_suffix(".mjs") {
+        vec![format!("{stem}.mts")]
+    } else if let Some(stem) = path.strip_suffix(".cjs") {
+        vec![format!("{stem}.cts")]
+    } else if let Some(stem) = path.strip_suffix(".jsx") {
+        vec![format!("{stem}.tsx")]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether `path` is an executable JavaScript or TypeScript module rather than a declaration file.
 pub fn is_script(path: &str) -> bool {
-    let l = path.to_ascii_lowercase();
-    SCRIPT_EXTS.iter().any(|e| l.ends_with(e)) && !l.ends_with(".d.ts")
+    SCRIPT_EXTS.iter().any(|e| ends_with_ascii_ci(path, e)) && !is_ts_declaration(path)
 }
 
 fn is_html(path: &str) -> bool {
-    let l = path.to_ascii_lowercase();
-    l.ends_with(".html") || l.ends_with(".htm")
+    ends_with_ascii_ci(path, ".html") || ends_with_ascii_ci(path, ".htm")
+}
+
+#[derive(Clone, Copy)]
+enum TailMatch<'a> {
+    None,
+    One(&'a str),
+    Ambiguous,
 }
 
 struct Resolver<'a> {
     files: &'a BTreeSet<String>,
+    /// Every whole-segment tail of a resolvable app file, built on the first tail lookup.
+    tails: std::cell::OnceCell<HashMap<&'a str, TailMatch<'a>>>,
 }
 
-impl Resolver<'_> {
+impl<'a> Resolver<'a> {
+    fn new(files: &'a BTreeSet<String>) -> Self {
+        Resolver { files, tails: std::cell::OnceCell::new() }
+    }
+
+    /// The one app file whose path is `t` or ends with `/t`. Dependency files under
+    /// `node_modules/` and declaration files are never analysed as modules, so they never match.
+    fn unique_tail(&self, t: &str) -> TailMatch<'a> {
+        if t.is_empty() {
+            return TailMatch::None;
+        }
+        let tails = self.tails.get_or_init(|| {
+            let files: &'a BTreeSet<String> = self.files;
+            let mut tails: HashMap<&'a str, TailMatch<'a>> = HashMap::new();
+            for f in files.iter().filter(|f| !in_node_modules(f) && !is_ts_declaration(f)) {
+                let mut rest = f.as_str();
+                loop {
+                    tails.entry(rest).and_modify(|m| *m = TailMatch::Ambiguous).or_insert(TailMatch::One(f));
+                    match rest.split_once('/') {
+                        Some((_, after)) => rest = after,
+                        None => break,
+                    }
+                }
+            }
+            tails
+        });
+        tails.get(t).copied().unwrap_or(TailMatch::None)
+    }
+
     fn resolve(&self, from_dir: &str, spec: &str) -> Option<String> {
         if !(spec.starts_with('.') || spec.starts_with('/')) {
             return None;
         }
         let base = join_rel(from_dir, spec)?;
-        let candidates = [
-            base.clone(),
+        let mut candidates = vec![base.clone()];
+        candidates.extend(ts_source_fallbacks(&base));
+        candidates.extend([
             format!("{base}.js"),
             format!("{base}.mjs"),
             format!("{base}.cjs"),
             format!("{base}.ts"),
             format!("{base}.tsx"),
+            format!("{base}.mts"),
+            format!("{base}.cts"),
             format!("{base}.jsx"),
             format!("{base}.json"),
             format!("{base}/index.js"),
-            format!("{base}/index.ts"),
             format!("{base}/index.mjs"),
-        ];
-        candidates.into_iter().find(|c| self.files.contains(c))
+            format!("{base}/index.cjs"),
+            format!("{base}/index.ts"),
+            format!("{base}/index.tsx"),
+            format!("{base}/index.mts"),
+            format!("{base}/index.cts"),
+            format!("{base}/index.jsx"),
+        ]);
+        candidates.into_iter().find(|c| !is_ts_declaration(c) && self.files.contains(c))
     }
 
-    /// A path written in code (`preload.js`, `renderer/index.html`), tried from the module's
-    /// folder first and then from the app root.
+    /// A path written in code (`preload.js`, `renderer/index.html`), trying exact direct and unique
+    /// exact-tail matches before TypeScript source counterparts.
     fn resolve_path(&self, module_dir: &str, root: &str, p: &str) -> Option<String> {
-        let p = p.trim_start_matches("file://");
+        let path = strip_file_url(strip_query_fragment(p));
+        let p = path.as_ref();
+        // A folder is never the file it would name without its last `/`, `.` or `..`.
+        if names_a_folder(p) {
+            return None;
+        }
         for base in [module_dir, root] {
             if let Some(j) = join_rel(base, p)
+                && !is_ts_declaration(&j)
                 && self.files.contains(&j)
             {
                 return Some(j);
             }
         }
-        // Last resort: a unique file with that tail.
-        let tail = p.trim_start_matches("./").trim_start_matches('/');
-        let hits: Vec<&String> = self.files.iter().filter(|f| f.ends_with(&format!("/{tail}")) || f.as_str() == tail).collect();
-        if hits.len() == 1 { hits.first().map(|s| (*s).clone()) } else { None }
+        // `./chunks/./bridge.js` and `chunks/bridge.js` are the same tail; a path that climbs
+        // above where it starts (`../x.js`) names no tail at all.
+        let tail = join_rel("", p);
+        if let Some(t) = &tail {
+            match self.unique_tail(t) {
+                TailMatch::One(hit) => return Some(hit.to_string()),
+                TailMatch::Ambiguous => return None,
+                TailMatch::None => {}
+            }
+        }
+        for base in [module_dir, root] {
+            if let Some(j) = join_rel(base, p)
+                && let Some(ts) = ts_source_fallbacks(&j).into_iter().find(|c| !is_ts_declaration(c) && self.files.contains(c))
+            {
+                return Some(ts);
+            }
+        }
+        // Last resort: a unique TypeScript source counterpart across all fallback extensions.
+        let tail = tail?;
+        let mut hit: Option<&str> = None;
+        for fb in ts_source_fallbacks(&tail) {
+            match self.unique_tail(&fb) {
+                TailMatch::Ambiguous => return None,
+                TailMatch::One(path) => {
+                    if hit.is_some() {
+                        return None;
+                    }
+                    hit = Some(path);
+                }
+                TailMatch::None => {}
+            }
+        }
+        hit.map(str::to_string)
     }
 }
 
@@ -378,7 +546,7 @@ struct Analysed {
 /// Build the application graph.
 pub fn analyze_application(input: &AppInput, opts: &AppOptions, cancelled: &dyn Fn() -> bool) -> Result<AppGraph, Cancelled> {
     let file_set: BTreeSet<String> = input.files.iter().map(|f| f.path.clone()).chain(input.listing.iter().map(|(p, _)| p.clone())).collect();
-    let resolver = Resolver { files: &file_set };
+    let resolver = Resolver::new(&file_set);
     let mut g = AppGraph { label: input.label.clone(), input_format: input.format.clone(), ..Default::default() };
     for n in &input.notes {
         g.limitations.push(("input".into(), n.clone()));
@@ -389,10 +557,10 @@ pub fn analyze_application(input: &AppInput, opts: &AppOptions, cancelled: &dyn 
     let mut pkg_root = String::new();
     let mut pkgs: Vec<&AppFile> =
         input.files.iter().filter(|f| f.path.ends_with("package.json") && (f.path == "package.json" || f.path.ends_with("/package.json"))).collect();
-    pkgs.sort_by_key(|f| (f.path.contains("node_modules/"), f.path.matches('/').count()));
+    pkgs.sort_by_key(|f| (in_node_modules(&f.path), f.path.matches('/').count()));
     for f in &pkgs {
         let Ok(v) = serde_json::from_slice::<Value>(&f.bytes) else { continue };
-        if f.path.contains("node_modules/") {
+        if in_node_modules(&f.path) {
             if vendor_pkgs.len() < 5000 {
                 vendor_pkgs.push(json!({"name": v.get("name"), "version": v.get("version"), "source": "package-json", "path": f.path}));
             }
@@ -418,7 +586,7 @@ pub fn analyze_application(input: &AppInput, opts: &AppOptions, cancelled: &dyn 
         if i % 8 == 0 && cancelled() {
             return Err(Cancelled);
         }
-        if f.path.contains("node_modules/") {
+        if in_node_modules(&f.path) {
             continue;
         }
         if is_script(&f.path) {
@@ -490,14 +658,19 @@ pub fn analyze_application(input: &AppInput, opts: &AppOptions, cancelled: &dyn 
         if let Some(h) = &a.html {
             for s in &h.scripts {
                 if let Some(src) = &s.src
-                    && !src.contains("://")
+                    && let url = html_url(src)
+                    && !is_external_html_ref(&url)
                 {
-                    let r = join_rel(&dir, src).filter(|p| file_set.contains(p)).or_else(|| resolver.resolve_path(&dir, &pkg_root, src));
+                    let r = resolver.resolve_path(&dir, &pkg_root, &url);
                     v.push(ResolvedImport { kind: "html-script".into(), specifier: src.clone(), resolved: r, line: s.line });
                 }
             }
             for p in &h.preloads {
-                let r = join_rel(&dir, p).filter(|x| file_set.contains(x));
+                let url = html_url(p);
+                let r = (!is_external_html_ref(&url) && !names_a_folder(strip_query_fragment(&url)))
+                    .then(|| join_rel(&dir, &url))
+                    .flatten()
+                    .and_then(|j| std::iter::once(j.clone()).chain(ts_source_fallbacks(&j)).find(|c| !is_ts_declaration(c) && file_set.contains(c)));
                 v.push(ResolvedImport { kind: "modulepreload".into(), specifier: p.clone(), resolved: r, line: 0 });
             }
         }
@@ -518,7 +691,7 @@ pub fn analyze_application(input: &AppInput, opts: &AppOptions, cancelled: &dyn 
         }
         for l in &a.facts.loads {
             if let Some(t) = &l.target
-                && !t.starts_with("http")
+                && !is_remote_load(t)
                 && let Some(r) = resolver.resolve_path(&dir, &pkg_root, t)
             {
                 renderer_roots.push(r);
@@ -617,7 +790,11 @@ pub fn analyze_application(input: &AppInput, opts: &AppOptions, cancelled: &dyn 
         for imp in resolved_imports.get(m).into_iter().flatten() {
             let to = match &imp.resolved {
                 Some(r) => Some(module_id(r)),
-                None if !imp.specifier.starts_with('.') && !imp.specifier.starts_with('/') && !imp.specifier.contains('{') => {
+                None if !matches!(imp.kind.as_str(), "html-script" | "modulepreload")
+                    && !imp.specifier.starts_with('.')
+                    && !imp.specifier.starts_with('/')
+                    && !imp.specifier.contains('{') =>
+                {
                     let pkg = package_name(&imp.specifier);
                     b.node(format!("external:{pkg}"), "external", pkg.clone(), None, None, Value::Null)
                 }
@@ -744,7 +921,7 @@ pub fn analyze_application(input: &AppInput, opts: &AppOptions, cancelled: &dyn 
                 f.loads.iter().filter(|l| l.receiver.is_none() || l.receiver == w.binding || f.windows.len() == 1).filter_map(|l| l.target.clone()).collect();
             let mut resolved_loads = Vec::new();
             for t in &loads {
-                if let Some(r) = resolver.resolve_path(dir_of(m), &pkg_root, t) {
+                if let Some(r) = (!is_remote_load(t)).then(|| resolver.resolve_path(dir_of(m), &pkg_root, t)).flatten() {
                     b.edge(wid.as_deref(), Some(&module_id(&r)), "loads");
                     resolved_loads.push(r);
                 } else {
@@ -990,8 +1167,10 @@ pub fn analyze_application(input: &AppInput, opts: &AppOptions, cancelled: &dyn 
     // all, or its code may not ship.
     for (p, _) in &input.listing {
         let path = unprefixed(p);
-        if path.ends_with(".map") && !path.contains("node_modules/") && !g.source_maps.iter().any(|s| s.resolved.as_deref() == Some(path)) {
-            let script = path.trim_end_matches(".map");
+        if let Some(script) = path.strip_suffix(".map")
+            && !in_node_modules(path)
+            && !g.source_maps.iter().any(|s| s.resolved.as_deref() == Some(path))
+        {
             let mut r = SourceMapRef { script: script.to_string(), resolved: Some(path.to_string()), present: true, ..Default::default() };
             if is_script(script) && analysed.iter().any(|a| a.path == script) {
                 match input.files.iter().find(|f| f.path == path) {
@@ -1211,7 +1390,7 @@ fn read_source_map(
                     format!("The source map for {script} points at {} external map(s) that weren't read, so its sources are incomplete.", r.external_sections),
                 ));
             }
-            r.sources_with_content = map.sources_content.iter().filter(|c| c.is_some()).count();
+            r.sources_with_content = count_sources_with_content(&map);
         }
         // Refused at one of the parser's limits: incomplete rather than unreadable.
         Err(e) if is_limit(&e) => {
@@ -1223,6 +1402,19 @@ fn read_source_map(
         }
         Err(e) => mark_unreadable(r, script, &format!("it is malformed ({e})"), limitations),
     }
+}
+
+/// Count embedded `sourcesContent` entries across a source map and its nested inline `sections`.
+fn count_sources_with_content(root: &craft_anything_formats::sourcemap::SourceMap) -> usize {
+    let mut stack = vec![root];
+    let mut count = 0usize;
+    while let Some(map) = stack.pop() {
+        count = count.saturating_add(map.sources_content.iter().filter(|c| c.is_some()).count());
+        for (_, _, sub) in &map.sections {
+            stack.push(sub);
+        }
+    }
+    count
 }
 
 fn mark_unreadable(r: &mut SourceMapRef, script: &str, why: &str, limitations: &mut Vec<(String, String)>) {

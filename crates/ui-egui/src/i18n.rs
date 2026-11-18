@@ -117,12 +117,35 @@ pub fn tr(s: &str) -> String {
     }
 }
 
-/// Translate, then fill `{name}` placeholders.
+/// Translate, then fill `{name}` placeholders in one pass over the template, so an inserted value
+/// stays literal even when it looks like a placeholder. Unknown names and stray braces are kept.
 pub fn trf(s: &str, args: &[(&str, &str)]) -> String {
-    let mut out = tr(s);
-    for (k, v) in args {
-        out = out.replace(&format!("{{{k}}}"), v);
+    let template = tr(s);
+    if !template.contains('{') {
+        return template;
     }
+    let mut out = String::with_capacity(args.iter().fold(template.len(), |n, (_, v)| n.saturating_add(v.len())));
+    let mut rest = template.as_str();
+    while let Some((before, after)) = rest.split_once('{') {
+        out.push_str(before);
+        // The name runs to the next brace; a `{` first means this one opens no placeholder.
+        let filled = after.find(['{', '}']).and_then(|end| {
+            let (name, tail) = after.split_at_checked(end)?;
+            let tail = tail.strip_prefix('}')?;
+            Some((args.iter().find(|(k, _)| *k == name)?.1, tail))
+        });
+        match filled {
+            Some((value, tail)) => {
+                out.push_str(value);
+                rest = tail;
+            }
+            None => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
     out
 }
 
@@ -137,6 +160,23 @@ mod tests {
         assert!(!m.contains_key("Empty"));
         assert_eq!(trf("Open {name}", &[("name", "a.exe")]), "Open a.exe");
         assert_eq!(tr("Untranslated"), "Untranslated");
+    }
+
+    /// Inserted values stay literal: a value that looks like a placeholder, its own or a later
+    /// one, is never filled in turn.
+    #[test]
+    fn trf_keeps_inserted_values_literal() {
+        let two = "Saved {saved}, using {used}.";
+        assert_eq!(trf(two, &[("saved", "{used}"), ("used", "Claude")]), "Saved {used}, using Claude.");
+        assert_eq!(trf(two, &[("used", "{saved}"), ("saved", "Off")]), "Saved Off, using {saved}.");
+        assert_eq!(trf(two, &[("saved", "{saved}"), ("used", "{used}")]), two);
+        assert_eq!(trf("{a}{a} {b}", &[("a", "{b}"), ("b", "x")]), "{b}{b} x");
+        // Unknown, empty and unbalanced braces are kept as written; the first duplicate key wins.
+        assert_eq!(trf("{x} {} {a {{a}} a}", &[("a", "1")]), "{x} {} {a {1} a}");
+        assert_eq!(trf("{}", &[("", "empty")]), "empty");
+        assert_eq!(trf("{a}", &[("a", "1"), ("a", "2")]), "1");
+        assert_eq!(trf("été {nom} ✓", &[("nom", "Zoë")]), "été Zoë ✓");
+        assert_eq!(trf("", &[("a", "1")]), "");
     }
 
     /// Script and region matching: an explicit script wins over a region, a registered language

@@ -150,6 +150,11 @@ pub trait AgentAdapter: Send + Sync {
     fn model_choices(&self, _config: &BackendConfig, _options: &BackendOptions) -> Result<Vec<String>, ToolError> {
         Ok(Vec::new())
     }
+    /// Whether its choices start with `default` ([`crate::anthropic::CLAUDE_CODE_DEFAULT`]): no
+    /// model is passed, so the agent uses the one its own settings name.
+    fn offers_own_default(&self) -> bool {
+        false
+    }
     /// Whether this adapter offers context and reasoning controls beyond the model selector.
     fn supports_model_tuning(&self) -> bool {
         false
@@ -468,6 +473,10 @@ impl AgentAdapter for ClaudeCode {
         let mut models = vec![crate::anthropic::CLAUDE_CODE_DEFAULT.to_string()];
         models.extend(crate::anthropic::MODELS.iter().map(|model| model.to_string()));
         Ok(models)
+    }
+
+    fn offers_own_default(&self) -> bool {
+        true
     }
 
     fn args(&self, cx: &ArgsCx) -> Vec<String> {
@@ -899,6 +908,29 @@ impl AgentAdapter for Codex {
         Some("Run the selected Codex program with `login` in a terminal, choose Sign in with ChatGPT, then test it again in Settings → AI.".into())
     }
 
+    fn model_in_use(&self, options: Option<&BackendOptions>) -> Option<String> {
+        Some(options.and_then(|options| options.cli_model.clone()).unwrap_or_else(|| "Codex default".into()))
+    }
+
+    /// Codex's own catalogue (`codex debug models`): the models it lists rather than hides, after
+    /// its default (#2109).
+    fn model_choices(&self, config: &BackendConfig, options: &BackendOptions) -> Result<Vec<String>, ToolError> {
+        let program = super::program_of(config, options)?;
+        let ask = [program, "debug".into(), "models".into()];
+        let p = match config.ssh_host.as_deref().filter(|h| !h.trim().is_empty()) {
+            Some(h) => Process::new("ssh").args(crate::ssh::ssh_args(h, &ask)),
+            None => Process::new(&ask[0]).args(&ask[1..]),
+        };
+        let out = p.timeout(Duration::from_secs(15)).stdout_cap(8 * 1024 * 1024).run_checked()?;
+        let mut models = vec![crate::anthropic::CLAUDE_CODE_DEFAULT.to_string()];
+        models.extend(codex_models(&out.stdout_text()));
+        Ok(models)
+    }
+
+    fn offers_own_default(&self) -> bool {
+        true
+    }
+
     /// `codex exec -` reads the message from stdin, so a long one can't pass Windows'
     /// command-line limit (os error 206, #528).
     fn prompt_on_stdin(&self) -> bool {
@@ -1033,6 +1065,27 @@ impl AgentAdapter for Codex {
         }
         out
     }
+}
+
+/// The models `codex debug models` lists for people to pick (`visibility: "list"`), in its own
+/// order (`priority`). Output it can't read lists none, so only the default is offered.
+fn codex_models(json: &str) -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct Catalog {
+        models: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        slug: String,
+        #[serde(default)]
+        visibility: String,
+        #[serde(default)]
+        priority: i64,
+    }
+    let Ok(mut c) = serde_json::from_str::<Catalog>(json) else { return Vec::new() };
+    c.models.retain(|m| m.visibility == "list" && !m.slug.trim().is_empty());
+    c.models.sort_by_key(|m| m.priority);
+    c.models.into_iter().map(|m| m.slug).collect()
 }
 
 /// Unknown output (including future CLI formats) is not a claim that the account is connected.
@@ -1273,6 +1326,30 @@ pub(super) fn remote_failure(host: &str, out: &craft_anything_platform::Output) 
         } else {
             format!("ssh said: {snippet}")
         })
+}
+
+#[cfg(test)]
+mod codex_model_tests {
+    use super::{AgentAdapter, Codex, codex_models};
+
+    /// #2109: Settings offers Codex's listed models in its own order, not the hidden ones, after
+    /// its default, and shows the default until one is chosen.
+    #[test]
+    fn codex_offers_the_models_its_catalogue_lists() {
+        let json = r#"{"models":[
+            {"slug":"hidden-reviewer","visibility":"hide","priority":1},
+            {"slug":"second","visibility":"list","priority":4,"display_name":"Second"},
+            {"slug":"first","visibility":"list","priority":2},
+            {"slug":"","visibility":"list","priority":3}
+        ]}"#;
+        assert_eq!(codex_models(json), ["first", "second"]);
+        assert!(codex_models("not json").is_empty(), "unreadable output lists none: only the default is offered");
+        assert!(codex_models(r#"{"models":[{"visibility":"list"}]}"#).is_empty(), "an entry without a slug");
+        assert!(Codex.offers_own_default());
+        assert_eq!(Codex.model_in_use(None).as_deref(), Some("Codex default"));
+        let chosen = crate::BackendOptions { cli_model: Some("first".into()), ..Default::default() };
+        assert_eq!(Codex.model_in_use(Some(&chosen)).as_deref(), Some("first"));
+    }
 }
 
 #[cfg(test)]

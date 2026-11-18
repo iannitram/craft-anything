@@ -861,12 +861,14 @@ struct InsnRow {
 /// Java source of one class from JADX, or a reason it is missing. Never an error.
 fn jadx_source(ctx: &Ctx<'_>, input: &Path, class_java: &str) -> (Value, Option<Limitation>) {
     let settings = &ctx.session.settings;
-    let Some(jadx) = craft_anything_engines::locate("jadx", &settings.engines.tools, &settings.engine_store_dir()) else {
+    let Some(jadx) = settings.engine_path("jadx") else {
+        let why = super::external_disasm_tools::set_path_problem(ctx, "jadx")
+            .unwrap_or_else(|| "JADX is not installed (Settings → Engines, the engine store, or PATH).".into());
         return (
             json!({"status": "unavailable"}),
             Some(Limitation::new(
                 "jadx_not_installed",
-                "Java source was requested but JADX is not installed (Settings → Engines, the engine store, or PATH). The bytecode listing above is complete without it.",
+                format!("Java source was requested, but it can't be read: {why} The bytecode listing above is complete without it."),
             )),
         );
     };
@@ -878,7 +880,8 @@ fn jadx_source(ctx: &Ctx<'_>, input: &Path, class_java: &str) -> (Value, Option<
     };
     // The Java runtime engine the settings or the engine store hold (the Java Ghidra's setup
     // brings, say), which JADX's launcher wouldn't find on its own.
-    let java = craft_anything_engines::locate_configured("java", &settings.engines.tools, &settings.engine_store_dir());
+    let java =
+        settings.java_set_for_ghidra().or_else(|| craft_anything_engines::locate_configured("java", &settings.engines.tools, &settings.engine_store_dir()));
     let run = craft_anything_engines::jadx::run_single_class(&jadx, java.as_deref(), input, class_java, &out, ctx.cancel.clone());
     let result = match run {
         Ok(o) if o.success => {
@@ -1217,7 +1220,7 @@ fn android_resources_read(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
 fn engines_apktool_check(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
     let _p: ClientParams = parse_params(params)?;
     let settings = &ctx.session.settings;
-    let found = craft_anything_engines::locate("apktool", &settings.engines.tools, &settings.engine_store_dir());
+    let found = settings.engine_path("apktool");
     let mut lims = Vec::new();
     let (version, error) = match &found {
         // A pinned install is apktool's jar, run with Java.
@@ -1250,7 +1253,10 @@ fn engines_apktool_check(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput,
     let summary = match (&found, &version) {
         (Some(p), Some(v)) => format!("Apktool {v} is available at {}. The built-in decoder is used by default and needs nothing installed.", p.display()),
         (Some(p), None) => format!("Apktool was found at {} but did not report a version. The built-in decoder works without it.", p.display()),
-        (None, _) => "Apktool is not installed. That's fine: android_resources_read and android_package_show use Craft Anything's built-in decoders.".into(),
+        (None, _) => format!(
+            "{} That's fine: android_resources_read and android_package_show use Craft Anything's built-in decoders.",
+            super::external_disasm_tools::set_path_problem(ctx, "apktool").unwrap_or_else(|| "Apktool is not installed.".into())
+        ),
     };
     let b = builder(ctx, "engines_apktool_check", Subject { kind: "engine".into(), sha256: None, name: Some("apktool".into()) }, json!({}))
         .result(json!({

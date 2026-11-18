@@ -305,6 +305,7 @@ Couldn't look through that folder.	เข้าไปดูโฟลเดอร
 Couldn't open it.	เปิดไม่ได้
 Couldn't open the folder.	เปิดโฟลเดอร์ไม่ได้
 Couldn't open {}: {}	เปิด {} ไม่ได้: {}
+Couldn't save your settings.	บันทึกการตั้งค่าไม่ได้
 Couldn't start a worker thread: {e}	เริ่ม worker thread ไม่ได้: {e}
 Couldn't start it.	เริ่มไม่ได้
 Coverage unknown	ไม่ทราบความครอบคลุม
@@ -987,6 +988,7 @@ Saved in	บันทึกใน
 Saves space: copies the program and code, and shares dependencies and media with the project. A shared file rewritten in place changes here too.	ประหยัดพื้นที่: คัดลอกโปรแกรมและโค้ด และใช้ dependencies กับมีเดียร่วมกับโปรเจกต์ ไฟล์ที่ใช้ร่วมกันและถูกเขียนทับในที่เดิมจะเปลี่ยนที่นี่ด้วย
 Say what you want	บอกสิ่งที่ต้องการ
 Say what you want first.	บอกสิ่งที่ต้องการก่อน
+This applies once you choose something to recreate above.	ตัวเลือกนี้มีผลเมื่อคุณเลือกสิ่งที่จะสร้างใหม่ด้านบน
 Say what you want to make, or drop an app or file on the window to look inside it. Everything runs in Clean room mode unless you switch on Deep.	บอกสิ่งที่ต้องการสร้าง หรือลากแอปหรือไฟล์มาวางบนหน้าต่างเพื่อดูข้างใน ทุกอย่างรันในโหมด Clean room เว้นแต่เปิด Deep
 Screenshot	ภาพหน้าจอ
 Screenshot a page	จับภาพหน้าเว็บ
@@ -1192,6 +1194,7 @@ Use the projects folder	ใช้โฟลเดอร์โปรเจกต�
 Use this	ใช้สิ่งนี้
 Use {name}	ใช้ {name}
 Value flow	การไหลของค่า
+About	เกี่ยวกับ
 Version	เวอร์ชัน
 Waiting	กำลังรอ
 Waiting for another build to finish: this one starts next.	รอบิลด์อื่นเสร็จ: บิลด์นี้จะเริ่มถัดไป
@@ -1447,6 +1450,7 @@ Zoom	ซูม
 Bring all to front	นำทั้งหมดมาไว้ข้างหน้า
 Drag to give the plan more or less room; double-click to reset	ลากเพื่อให้แผนมีที่มากขึ้นหรือน้อยลง ดับเบิลคลิกเพื่อรีเซ็ต
 Copy the message	คัดลอกข้อความ
+Copy the version	คัดลอกเวอร์ชัน
 Choose what the builder's approvals get	เลือกว่าการอนุมัติของผู้สร้างจะได้อะไร
 Reading the web	อ่านเว็บ
 Other commands	คำสั่งอื่น
@@ -1493,3 +1497,8 @@ You're up to date.	คุณใช้เวอร์ชันล่าสุด�
 Forget a website sign-in	ลืมการลงชื่อเข้าใช้เว็บไซต์
 Sign in to a website	ลงชื่อเข้าใช้เว็บไซต์
 Some shared files could not be hard-linked and were copied instead ({size}).	ไฟล์ที่แชร์บางไฟล์สร้างฮาร์ดลิงก์ไม่ได้ จึงคัดลอกแทน ({size})
+This server lists several chat models. Choose one:	เซิร์ฟเวอร์นี้มีโมเดลแชตหลายตัว เลือกหนึ่งตัว:
+Choose a model	เลือกโมเดล
+
+# Saved-builder notice: English until native-speaker review.
+The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

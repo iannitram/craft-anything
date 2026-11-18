@@ -683,7 +683,7 @@ impl<'a> Scanner<'a> {
         let ver = self.r.u16_le(i + 4)?;
         let method = self.r.u16_le(i + 8)?;
         let name_len = usize::from(self.r.u16_le(i + 26)?);
-        if ver > 100 || !matches!(method, 0 | 1 | 6 | 8 | 9 | 12 | 14 | 93 | 95 | 98 | 99) || name_len == 0 || name_len > 1024 || !self.probe("zip") {
+        if ver > 100 || !matches!(method, 0 | 1 | 6 | 8 | 9 | 12 | 14 | 20 | 93 | 95 | 98 | 99) || name_len == 0 || name_len > 1024 || !self.probe("zip") {
             return None;
         }
         let name = String::from_utf8_lossy(self.r.slice(i + 30, name_len)?).into_owned();

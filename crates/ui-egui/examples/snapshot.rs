@@ -86,6 +86,14 @@ fn main() {
     let w = arg(&args, "--width").and_then(|s| s.parse().ok()).unwrap_or(1440.0);
     let h = arg(&args, "--height").and_then(|s| s.parse().ok()).unwrap_or(900.0);
 
+    if want("builder-replacement") {
+        render(&out, "builder-replacement", w, h, scale, || {
+            let mut app = demo::app(demo::engine(Mode::Beginner, true));
+            app.state.make.ai = Some("Previous AI".into());
+            app
+        });
+    }
+
     if want("first-run-welcome") {
         render(&out, "first-run-welcome", w, h, scale, || demo::app(demo::engine(Mode::Beginner, false)));
     }

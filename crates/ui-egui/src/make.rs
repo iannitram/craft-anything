@@ -3,9 +3,10 @@
 //! the projects made so far.
 
 use crate::i18n::tr;
-use crate::state::MakeDraft;
+use crate::state::{MakeDraft, Screen};
 use crate::theme::{self, Tokens};
 use crate::{CraftApp, Pick, icons, widgets};
+use craft_anything_engine::Mode;
 use craft_anything_engine::workspace::{ExistingFiles, Status, TargetRef};
 use egui::{RichText, Sense, Ui, Vec2};
 
@@ -80,9 +81,25 @@ pub fn own_stack<'a>(kinds: &craft_anything_ai::rebuild::KindRegistry, d: &'a Ma
 /// just look inside something.
 pub fn hero(app: &mut CraftApp, ui: &mut Ui, w: f32) {
     let t = Tokens::get(ui.ctx());
+    let door = if app.state.make.look { 2 } else { usize::from(app.state.make.mine) };
+    // The ways in, with Simple / Advanced at the row's end (it adds no height above Start), or
+    // on a line of its own when the window is too narrow for both.
+    let (picked, fits) = ui
+        .horizontal(|ui| {
+            let picked = widgets::segmented(ui, &["Make my own version", "Work on my project", "Just look inside"], door, theme::ControlSize::Large);
+            let fits = ui.available_width() >= mode_choice_width(ui);
+            if fits {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| mode_choice(app, ui));
+            }
+            (picked, fits)
+        })
+        .inner;
+    if !fits {
+        ui.add_space(theme::space::SM);
+        ui.horizontal(|ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| mode_choice(app, ui)));
+    }
     let d = &mut app.state.make;
-    let door = if d.look { 2 } else { usize::from(d.mine) };
-    if let Some(i) = widgets::segmented(ui, &["Make my own version", "Work on my project", "Just look inside"], door, theme::ControlSize::Large) {
+    if let Some(i) = picked {
         let left = d.mine && i != 1;
         (d.mine, d.look) = (i == 1, i == 2);
         if d.mine {
@@ -113,12 +130,9 @@ pub fn hero(app: &mut CraftApp, ui: &mut Ui, w: f32) {
         step_title(ui, 1, "What do you want to recreate?");
         ui.add_space(theme::space::MD);
         choose_target(app, ui);
-        // How closely the original may be looked at, once there is one.
-        let d = &app.state.make;
-        if matches!(d.target, TargetRef::Local { .. }) || d.editing_url || !d.url.is_empty() {
-            ui.add_space(theme::space::LG);
-            look_inside(app, ui);
-        }
+        // How closely the original may be looked at: in view from the start, chosen once there is one.
+        ui.add_space(theme::space::LG);
+        reach_choice(app, ui);
         ui.add_space(theme::space::LG);
         step_title(ui, 2, "Say what you want");
         ui.add_space(theme::space::MD);
@@ -470,6 +484,47 @@ fn suggestions(app: &mut CraftApp, ui: &mut Ui) {
             }
         }
     });
+}
+
+/// The room [`mode_choice`] takes: the Simple / Advanced switch and its name, measured in the
+/// language shown (a longer translation needs more), with the gaps beside each.
+fn mode_choice_width(ui: &Ui) -> f32 {
+    let t = Tokens::get(ui.ctx());
+    let switch = widgets::segmented_width(ui, &["Simple", "Advanced"], theme::ControlSize::Medium);
+    let name = widgets::label_galley(ui, &tr("Mode"), theme::SMALL, t.text_dim).size().x;
+    switch + name + 2.0 * ui.spacing().item_spacing.x + theme::space::SM
+}
+
+/// Simple or Advanced, beside the ways in. Simple mode's title bar leaves the switch out, so
+/// someone starting here would never see that Advanced exists. It's the app's one setting
+/// (`set_mode`, as in Settings and the title bar). Advanced normally opens on the workbench; from
+/// here it stays on this screen (Advanced shows it too), so the draft stays in view.
+/// Drawn right to left: the switch, then its name.
+fn mode_choice(app: &mut CraftApp, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    let sel = usize::from(app.settings.mode == Mode::Experienced);
+    if let Some(i) = widgets::segmented(ui, &["Simple", "Advanced"], sel, theme::ControlSize::Medium) {
+        let screen = app.state.screen;
+        app.set_mode(if i == 0 { Mode::Beginner } else { Mode::Experienced });
+        if screen == Screen::Home {
+            app.state.screen = Screen::Home;
+        }
+    }
+    ui.label(RichText::new(tr("Mode")).size(theme::SMALL).color(t.text_dim))
+        .on_hover_text(tr("Simple: say what you want and it's handled for you. Advanced: every tool, the evidence and the logs."));
+}
+
+/// Clean room or Deep, shown from the start so the choice is in view before anything is picked.
+/// With no original yet there's nothing to look inside: the tiles are dimmed and say so.
+fn reach_choice(app: &mut CraftApp, ui: &mut Ui) {
+    let d = &app.state.make;
+    let original = matches!(d.target, TargetRef::Local { .. }) || d.editing_url || !d.url.is_empty();
+    ui.add_enabled_ui(original, |ui| look_inside(app, ui));
+    if !original {
+        let t = Tokens::get(ui.ctx());
+        ui.add_space(theme::space::XS);
+        ui.label(RichText::new(tr("This applies once you choose something to recreate above.")).size(theme::SMALL).color(t.text_faint));
+    }
 }
 
 /// Time since `ms` in plain words.

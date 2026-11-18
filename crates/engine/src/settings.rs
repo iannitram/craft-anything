@@ -94,7 +94,8 @@ pub struct Settings {
     /// own engines and with Ghidra when it's installed. Off is Clean room: nothing inside the
     /// original is read, only what can be seen from outside ([`crate::clean_room`]).
     pub deep_mode: bool,
-    /// `studio` (dark) or `studio-light`.
+    /// `system` (follow the system's light or dark appearance, the default), `studio` (dark) or
+    /// `studio-light`.
     pub theme: String,
     /// UI language (BCP 47), empty = system.
     pub language: String,
@@ -205,7 +206,7 @@ impl Default for Settings {
             version: SETTINGS_VERSION,
             mode: Mode::Beginner,
             deep_mode: false,
-            theme: "studio".into(),
+            theme: "system".into(),
             language: String::new(),
             first_run_done: false,
             engines: EngineSettings::default(),
@@ -226,9 +227,31 @@ impl Default for Settings {
     }
 }
 
-/// How many config files that couldn't be used are kept beside config.toml
-/// (`config.toml.broken`, then `.broken.1`…): an earlier copy is never replaced by a later one.
+/// How many config files that couldn't be used are kept beside config.toml: `config.toml.broken`,
+/// then `.broken.1` to `.broken.15`. An earlier copy is never replaced by a later one.
 const BROKEN_KEPT: u32 = 16;
+
+/// What a read of `path` left unsaid when it answered "not found": a link whose target is missing
+/// (a drive that isn't attached, a folder that isn't there yet) answers like a missing file, but
+/// the link is there, and a save would replace it with a file. `None` when nothing is at `path`.
+fn link_without_target(path: &Path) -> Option<String> {
+    link_without_target_from(path, std::fs::symlink_metadata(path).map(|meta| meta.file_type().is_symlink()), std::fs::read_link(path).ok())
+}
+
+/// [`link_without_target`] from what the system said: whether `path` itself is a link, and where
+/// it points if that could be read.
+fn link_without_target_from(path: &Path, is_link: std::io::Result<bool>, target: Option<PathBuf>) -> Option<String> {
+    match is_link {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        // A file put there since the read is another program's save, not something left behind.
+        Ok(false) => None,
+        Ok(true) => Some(match target {
+            Some(target) => format!("{} is a link to {}, which isn't there", path.display(), target.display()),
+            None => format!("{} is a link to a file that isn't there", path.display()),
+        }),
+        Err(e) => Some(format!("{} couldn't be looked at ({e})", path.display())),
+    }
+}
 
 /// Move a settings file that can't be used aside, under the first backup name that is free. On an
 /// error (the system refuses, or every name is taken) the file is still where it was.
@@ -360,7 +383,8 @@ impl Settings {
     /// that is there but can't be used is never a crash and never lost: one that can't be
     /// understood (not TOML, not UTF-8 text) is set aside under a new name and replaced with
     /// defaults; one that can't be read at all, or can't be set aside, stays where it is, and the
-    /// defaults returned refuse to be saved over it ([`Settings::not_loaded`]).
+    /// defaults returned refuse to be saved over it ([`Settings::not_loaded`]). A link whose
+    /// target isn't there is such a file too, not a missing one: a save would replace the link.
     pub fn load_from(path: &Path) -> Settings {
         Settings::from_read(path, std::fs::read(path))
     }
@@ -369,7 +393,13 @@ impl Settings {
     fn from_read(path: &Path, read: std::io::Result<Vec<u8>>) -> Settings {
         let bytes = match read {
             Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Settings::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Only a path with nothing at it is a first start. A link with no target is the
+                // person's own, and saving defaults would put a file where it is.
+                let Some(why) = link_without_target(path) else { return Settings::default() };
+                log::warn!("{why}; using defaults, and changes won't be saved over it");
+                return Settings::standing_in(why);
+            }
             Err(e) => {
                 // It may hold the person's settings (a lock, a permission, a failing disk): the
                 // defaults used meanwhile must never be written over it.
@@ -465,7 +495,10 @@ impl Settings {
         let mut pending = read_settings(&text).map_err(bad_settings)?;
         let current = match std::fs::read_to_string(path) {
             Ok(text) => read_settings(&text).map_err(bad_settings)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match link_without_target(path) {
+                None => Settings::default(),
+                Some(why) => return Err(bad_settings(why)),
+            },
             Err(e) => return Err(ToolError::io(path.display(), e)),
         };
         if current.version > SETTINGS_VERSION || pending.version > SETTINGS_VERSION {
@@ -540,11 +573,25 @@ impl Settings {
         if id == craft_anything_engines::ghidra::get::ID {
             return self.ghidra_launcher();
         }
+        if let Some(java) = (id == "java").then(|| self.java_set_for_ghidra()).flatten() {
+            return Some(java);
+        }
         if self.engines.only_configured {
             craft_anything_engines::locate_configured(id, &self.engines.tools, &self.engine_store_dir())
         } else {
             craft_anything_engines::locate(id, &self.engines.tools, &self.engine_store_dir())
         }
+    }
+
+    /// The `java` in the Java folder set for Ghidra, unless a path is set for the Java runtime
+    /// itself: the other Java tools (Vineflower, JADX…) run on it too.
+    pub fn java_set_for_ghidra(&self) -> Option<PathBuf> {
+        use craft_anything_engines::ToolPathLookup;
+        if self.engines.tools.override_for("java").is_some() {
+            return None;
+        }
+        let home = self.engines.ghidra.java_home.as_deref()?;
+        Some(home.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" })).filter(|p| p.is_file())
     }
 
     /// Why an engine wasn't found and what to do about it, as (reason, remediation).
@@ -633,6 +680,30 @@ auto_mode = true
         assert!(!text.contains("only_configured"), "{text}");
         let loaded: Settings = toml::from_str(&text).unwrap();
         assert!(!loaded.engines.only_configured);
+    }
+
+    #[test]
+    fn a_java_set_for_ghidra_runs_the_other_java_tools_unless_one_is_set_for_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Settings::default();
+        s.engines.store_dir = Some(dir.path().join("engines"));
+        s.engines.only_configured = true;
+        let exe = if cfg!(windows) { "java.exe" } else { "java" };
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        s.engines.ghidra.java_home = Some(empty);
+        assert_eq!(s.engine_path("java"), None, "a folder with no bin/java isn't a Java");
+        let home = dir.path().join("jdk");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::write(home.join("bin").join(exe), "").unwrap();
+        s.engines.ghidra.java_home = Some(home.clone());
+        assert_eq!(s.engine_path("java"), Some(home.join("bin").join(exe)));
+        let own = dir.path().join("own");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join(exe), "").unwrap();
+        s.engines.tools.java = Some(own.clone());
+        assert_eq!(s.java_set_for_ghidra(), None, "a path set for Java itself wins");
+        assert_eq!(s.engine_path("java"), Some(own.join(exe)));
     }
 
     #[test]
@@ -1121,5 +1192,67 @@ default = "Claude Code"
         let v2 = read_settings("version = 2\ndeep_mode = true\n").unwrap();
         assert_eq!(v2.version, SETTINGS_VERSION);
         assert!(v2.project_folders.is_empty() && v2.existing_files.is_none() && v2.deep_mode);
+    }
+
+    /// A config.toml that is a link to a file that isn't there answers "not found" like a missing
+    /// file. Only a path with nothing at it is one: the decision, from what the system says.
+    #[test]
+    fn a_link_without_its_target_isnt_a_missing_file() {
+        use std::io::{Error, ErrorKind};
+        let path = Path::new("cfg").join("config.toml");
+        // Nothing there, or a file another program has saved since the read: plain defaults.
+        assert_eq!(link_without_target_from(&path, Err(Error::from(ErrorKind::NotFound)), None), None);
+        assert_eq!(link_without_target_from(&path, Ok(false), None), None);
+        // A link is named, with where it points when that could be read.
+        let why = link_without_target_from(&path, Ok(true), Some(Path::new("elsewhere").join("config.toml"))).unwrap();
+        assert!(why.contains("config.toml is a link to elsewhere") && why.ends_with("which isn't there"), "{why}");
+        let why = link_without_target_from(&path, Ok(true), None).unwrap();
+        assert!(why.ends_with("config.toml is a link to a file that isn't there"), "{why}");
+        // Not knowing what is there isn't knowing that nothing is.
+        let why = link_without_target_from(&path, Err(Error::from(ErrorKind::PermissionDenied)), None).unwrap();
+        assert!(why.contains("couldn't be looked at"), "{why}");
+        // On disk: no file and an ordinary file are both nothing left behind.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert_eq!(link_without_target(&path), None);
+        assert_eq!(Settings::load_from(&path), Settings::default());
+        std::fs::write(&path, "language = \"de\"\n").unwrap();
+        assert_eq!(link_without_target(&path), None);
+    }
+
+    /// The same through a real link: it used to load as plain defaults, and the next save, or a
+    /// deferred one recovered at the start, put a file where the link was.
+    #[test]
+    fn a_config_link_without_its_target_is_never_saved_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let target = dir.path().join("away").join("config.toml");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&target, &path);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&target, &path);
+        // Only Windows may refuse: creating a link there needs Developer Mode or an admin. Anywhere
+        // else a link that can't be made fails the test rather than passing it unexamined.
+        #[cfg(windows)]
+        if made.is_err() {
+            eprintln!("skipped: this Windows account can't create symbolic links");
+            return;
+        }
+        made.unwrap();
+        let s = Settings::load_from(&path);
+        assert!(s.not_loaded.as_deref().is_some_and(|why| why.contains("is a link to") && why.ends_with("which isn't there")), "{:?}", s.not_loaded);
+        assert_eq!(Settings { not_loaded: None, ..s.clone() }, Settings::default());
+        assert_eq!(s.save_to(&path).unwrap_err().code, ErrorCode::BadSettings);
+        assert_eq!(std::fs::read_link(&path).unwrap(), target, "the link is still there");
+        // Edits kept by a busy exit aren't recovered over it either, and they stay kept.
+        Settings { language: "de".into(), ..Settings::default() }.defer_save_to(&path).unwrap();
+        assert_eq!(Settings::recover_pending(&path).unwrap_err().code, ErrorCode::BadSettings);
+        assert!(path.with_extension("pending.toml").exists());
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        // With its target back, the link is read through as any config.toml is.
+        std::fs::create_dir(dir.path().join("away")).unwrap();
+        std::fs::write(&target, "language = \"fr\"\n").unwrap();
+        let s = Settings::load_from(&path);
+        assert_eq!((s.language.as_str(), s.not_loaded), ("fr", None));
     }
 }

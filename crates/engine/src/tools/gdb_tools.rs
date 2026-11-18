@@ -150,9 +150,7 @@ fn abs_file(p: &str, what: &str) -> Result<PathBuf, ToolError> {
 }
 
 fn locate_gdb(ctx: &Ctx<'_>) -> Result<PathBuf, ToolError> {
-    let s = &ctx.session.settings;
-    craft_anything_engines::locate("gdb", &s.engines.tools, &s.engine_store_dir())
-        .ok_or_else(|| ToolError::unavailable("GDB is not installed.").with_remediation("Install GDB and set its path in Settings → Engines."))
+    super::external_disasm_tools::locate(ctx, "gdb")
 }
 
 /// The session's status with its id.

@@ -6,9 +6,13 @@ use crate::i18n::{tr, trf};
 use crate::state::Modal;
 use crate::theme::{self, Tokens};
 use crate::{CraftApp, icons, widgets};
-use craft_anything_ai::rebuild::replaced_builder_notice;
 use craft_anything_ai::{BackendConfig, BackendKind};
 use egui::{RichText, Ui, Vec2};
+
+/// Localise only the UI notice; headless callers keep the AI layer's English response.
+fn replaced_builder_notice(saved: &str, used: &str) -> String {
+    trf("The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.", &[("saved", saved), ("used", used)])
+}
 
 /// A live agent catalogue and a draft selection, tied to the settings that were queried.
 pub struct AgentModelPicker {
@@ -321,7 +325,8 @@ impl CraftApp {
         let shown = name.clone();
         let job = self.jobs.spawn(trf("Connect {name}", &[("name", &name)]), true, move |j| {
             let result = hub.add_server_until(&name, &address, Some(model.as_str()).filter(|m| !m.is_empty()), key, &j.cancel).map(|_| ());
-            Ok(crate::Done::BackendAdded { name, result, choices })
+            let address = address.trim().to_string();
+            Ok(crate::Done::BackendAdded { name, result, choices, address })
         });
         self.server_form.connecting = Some((job, shown, std::time::Instant::now()));
     }

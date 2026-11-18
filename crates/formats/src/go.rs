@@ -605,22 +605,7 @@ pub fn unquote_prefix(s: &str) -> Option<(String, usize)> {
     None
 }
 
-fn base64(b: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in b.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |acc, (i, &v)| acc | (u32::from(v) << (16 - 8 * i as u32)));
-        for k in 0..4 {
-            if k <= chunk.len() {
-                let idx = ((n >> (18 - 6 * k)) & 63) as usize;
-                out.push(char::from(*T.get(idx).unwrap_or(&b'A')));
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
+use craft_mime::transfer::base64;
 
 /// The package part of a Go function name (`github.com/a/b.(*T).M` → `github.com/a/b`).
 pub fn package_of(name: &str) -> String {

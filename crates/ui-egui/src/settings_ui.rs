@@ -54,9 +54,14 @@ pub fn show(app: &mut CraftApp, ctx: &egui::Context) {
                         (SettingsTab::Builds, "hammer", "Builds"),
                         (SettingsTab::Plugins, "puzzle", "Plugins"),
                         (SettingsTab::Safety, "shield", "Safety"),
+                        (SettingsTab::About, "info", "About"),
                     ] {
+                        // About sits at the bottom of the list, level with the end of the page.
+                        if tab == SettingsTab::About {
+                            ui.add_space((page_height(ctx) - ui.min_rect().height() - TAB_H).max(theme::space::SM));
+                        }
                         let on = app.state.settings_tab == tab;
-                        let (rect, r) = ui.allocate_exact_size(Vec2::new(150.0, 34.0), egui::Sense::click());
+                        let (rect, r) = ui.allocate_exact_size(Vec2::new(150.0, TAB_H), egui::Sense::click());
                         r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, tr(title)));
                         if on {
                             ui.painter().rect_filled(rect, t.radius, t.accent_soft);
@@ -94,8 +99,7 @@ pub fn show(app: &mut CraftApp, ctx: &egui::Context) {
                     let w = ui.available_width();
                     ui.set_width(w);
                     let content_w = w - ui.spacing().scroll.allocated_width();
-                    // As tall as the window allows, so a tab's settings aren't cut off at the fold.
-                    let h = (ctx.content_rect().height() - 220.0).clamp(280.0, 560.0);
+                    let h = page_height(ctx);
                     // Not shrunk to the tab's content: that gave each tab its own width and put the
                     // scroll bar in a different place on every page.
                     let tab = app.state.settings_tab;
@@ -110,6 +114,7 @@ pub fn show(app: &mut CraftApp, ctx: &egui::Context) {
                             SettingsTab::Builds => builds(app, ui),
                             SettingsTab::Plugins => plugins(app, ui),
                             SettingsTab::Safety => safety(app, ui),
+                            SettingsTab::About => about(ui),
                         }
                     });
                 });
@@ -135,6 +140,31 @@ fn row(ui: &mut Ui, title: &str, sub: &str, add: impl FnOnce(&mut Ui)) {
         add(ui);
     });
     ui.add_space(theme::space::MD);
+}
+
+/// A tab's row in Settings' list.
+const TAB_H: f32 = 34.0;
+
+/// How tall a tab's page is: as tall as the window allows, so a tab's settings aren't cut off at
+/// the fold.
+fn page_height(ctx: &egui::Context) -> f32 {
+    (ctx.content_rect().height() - 220.0).clamp(280.0, 560.0)
+}
+
+/// The app's name and version, on every system (only macOS has an About in its menu bar). The
+/// version can be selected, or copied with the button beside it, which the keyboard reaches too
+/// (egui leaves selectable labels out of Tab), for a report.
+fn about(ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    ui.label(theme::heading("Craft Anything", theme::SECTION));
+    ui.add_space(theme::space::XS);
+    let version = format!("{} {}", tr("Version"), env!("CARGO_PKG_VERSION"));
+    ui.horizontal(|ui| {
+        ui.add(egui::Label::new(RichText::new(&version).color(t.text_dim).size(theme::BODY)).selectable(true));
+        if icons::button(ui, "copy", theme::ControlSize::Small, false, "Copy the version").clicked() {
+            ui.ctx().copy_text(version.clone());
+        }
+    });
 }
 
 fn general(app: &mut CraftApp, ui: &mut Ui) {
@@ -182,9 +212,14 @@ fn general(app: &mut CraftApp, ui: &mut Ui) {
         });
     });
     row(ui, "Theme", "", |ui| {
-        let sel = usize::from(app.theme_kind() == ThemeKind::StudioLight);
-        if let Some(i) = widgets::segmented(ui, &["Studio", "Studio Light"], sel, theme::ControlSize::Medium) {
-            app.settings.theme = ThemeKind::ALL.get(i).copied().unwrap_or_default().id().into();
+        // System first: it's the default, and the other two are what it picks between.
+        let sel =
+            if theme::follows_system(&app.settings.theme) { 0 } else { 1 + usize::from(ThemeKind::from_id(&app.settings.theme) == ThemeKind::StudioLight) };
+        if let Some(i) = widgets::segmented(ui, &["System", "Studio", "Studio Light"], sel, theme::ControlSize::Medium) {
+            app.settings.theme = match i.checked_sub(1).and_then(|k| ThemeKind::ALL.get(k)) {
+                Some(k) => k.id().into(),
+                None => theme::SYSTEM.into(),
+            };
             app.settings_changed();
         }
     });
@@ -517,13 +552,13 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                                     ui.label(RichText::new(tr("Asking for its models…")).color(t.text_faint).size(theme::CAPTION));
                                 }
                                 Some((_, Some(models))) => {
-                                    // Claude Code with no choice saved passes no `--model`, so it uses
-                                    // the model its own settings name: `default` is what's shown. An
+                                    // Claude Code or Codex with no choice saved passes no model, so it
+                                    // uses the one its own settings name: `default` is what's shown. An
                                     // API backend's model is its saved `config.model`.
-                                    let claude_code =
-                                        b.kind == BackendKind::AgentCli && craft_anything_ai::cli_agents::adapter_for(&b.model).ids().contains(&"claude-code");
+                                    let own_default =
+                                        b.kind == BackendKind::AgentCli && craft_anything_ai::cli_agents::adapter_for(&b.model).offers_own_default();
                                     let picked = app.backend_options.get(&b.name).and_then(|o| o.cli_model.clone()).unwrap_or_else(|| {
-                                        if claude_code { craft_anything_ai::anthropic::CLAUDE_CODE_DEFAULT.to_string() } else { b.model.clone() }
+                                        if own_default { craft_anything_ai::anthropic::CLAUDE_CODE_DEFAULT.to_string() } else { b.model.clone() }
                                     });
                                     let shown = |m: &str| {
                                         if m == craft_anything_ai::anthropic::CLAUDE_CODE_DEFAULT {
@@ -954,6 +989,16 @@ pub(crate) fn server_form(app: &mut CraftApp, ui: &mut Ui) {
         let w = ui.available_width() - FRAME;
         field(ui, &mut form.address, "address, e.g. http://192.168.1.20:11434/v1", w, "Server address", false);
     });
+    // A model picked from one server's list goes once the address is another, before Add can send
+    // it there (a model the server hasn't got may start a download). One typed by hand stays.
+    if let Some((from, picked)) = form.picked.take() {
+        let still_picked = form.model.trim() == picked;
+        if from == form.address.trim() && still_picked {
+            form.picked = Some((from, picked));
+        } else if still_picked {
+            form.model.clear();
+        }
+    }
     // One server at a time: pressing Add again while it's asked would only start a second wait.
     let ready = !form.name.trim().is_empty() && !form.address.trim().is_empty() && form.connecting.is_none();
     let mut add = false;
@@ -964,6 +1009,24 @@ pub(crate) fn server_form(app: &mut CraftApp, ui: &mut Ui) {
         field(ui, &mut form.key, "API key, if it needs one", w, "API key", true);
         add = widgets::primary_icon(ui, Some("plus"), "Add", ready).clicked() && ready;
     });
+    // The server listed several chat models and didn't say which is loaded: the person chooses
+    // (#1434). A list for another address is out of date and isn't offered.
+    if let Some((address, models)) = form.choices.as_ref().filter(|(a, _)| *a == form.address.trim()) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(tr("This server lists several chat models. Choose one:")).color(t.text_faint).size(theme::CAPTION));
+            let shown = if form.model.trim().is_empty() { tr("Choose a model") } else { form.model.clone() };
+            let r = widgets::dropdown("server-model-choice").selected_text(shown).show_ui(ui, |ui| {
+                for m in models {
+                    if widgets::menu_item(ui, form.model.trim() == m, m.as_str()).clicked() {
+                        form.model = m.clone();
+                        form.picked = Some((address.clone(), m.clone()));
+                    }
+                }
+            });
+            // Named for screen readers (and found by it in tests); the value is the model shown.
+            widgets::named(r.response, "Choose a model");
+        });
+    }
     // A server still starting or loading a model may take up to a minute to answer: say it's being
     // asked and for how long, so the form doesn't look like nothing happened (#1429).
     let mut stop = None;
@@ -1233,6 +1296,18 @@ pub(crate) fn not_loaded_warning(settings: &craft_anything_engine::Settings) -> 
     Some(format!("{why}. Until that's fixed, Craft Anything uses its default settings and won't save over it."))
 }
 
+/// What a settings save that failed says: a line in the person's language first, then what the
+/// engine said and what to do about it. The engine's message is English; its remediation is the
+/// part that tells the person how to get their settings saved again, so it is never left out.
+pub(crate) fn settings_not_saved(e: &craft_anything_engine::evidence::ToolError) -> String {
+    let mut said = format!("{} {}", tr("Couldn't save your settings."), e.message);
+    if let Some(fix) = e.remediation.as_deref().filter(|f| !f.trim().is_empty()) {
+        said.push(' ');
+        said.push_str(fix);
+    }
+    said
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1249,6 +1324,27 @@ mod tests {
         let said = not_loaded_warning(&standing_in).unwrap();
         assert!(said.contains("config.toml") && said.contains("access denied"), "{said}");
         assert!(said.contains("won't save over it"), "{said}");
+    }
+
+    /// A refused save was shown as the engine's English message alone, without what to do: it
+    /// leads with a translated line now, and keeps the remediation.
+    #[test]
+    fn a_refused_settings_save_says_so_with_what_to_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::create_dir(&path).unwrap(); // Something in config.toml's place that can't be read.
+        let standing_in = craft_anything_engine::Settings::load_from(&path);
+        let e = standing_in.save_to(&path).unwrap_err();
+        let fix = e.remediation.clone().unwrap();
+        let said = settings_not_saved(&e);
+        assert!(said.starts_with(&tr("Couldn't save your settings.")), "{said}");
+        assert!(said.contains(&e.message) && said.ends_with(&fix), "{said}");
+        // No remediation: the line and the message, with nothing dangling after them.
+        let bare = craft_anything_engine::evidence::ToolError::invalid("disk full");
+        assert_eq!(settings_not_saved(&bare), format!("{} disk full", tr("Couldn't save your settings.")));
+        // Korean, the language this was found in, has the line.
+        let ko = crate::i18n::LANGUAGES.iter().find(|l| l.code == "ko").unwrap();
+        assert!(ko.source.contains("Couldn't save your settings.\t설정을 저장하지 못했습니다."));
     }
 
     #[test]
@@ -1586,7 +1682,7 @@ mod tests {
     #[test]
     fn a_late_add_does_not_undo_a_choice_made_meanwhile() {
         let mut app = demo::app(demo::engine(craft_anything_engine::Mode::Beginner, false));
-        let added = |choices| Ok(Done::BackendAdded { name: "Home server".into(), result: Ok(()), choices });
+        let added = |choices| Ok(Done::BackendAdded { name: "Home server".into(), result: Ok(()), choices, address: String::new() });
         let started = app.backend_choices;
         app.choose_backend(None);
         app.handle_done(Finished { job: 0, result: added(started) });
@@ -1595,7 +1691,7 @@ mod tests {
         assert_eq!(app.state.backend.as_deref(), Some("Home server"), "with no choice meanwhile, the added AI is chosen");
         // Two adds at once: the first one's selection isn't a choice, so the second is selected too.
         let started = app.backend_choices;
-        let other = |choices| Ok(Done::BackendAdded { name: "Laptop".into(), result: Ok(()), choices });
+        let other = |choices| Ok(Done::BackendAdded { name: "Laptop".into(), result: Ok(()), choices, address: String::new() });
         app.handle_done(Finished { job: 0, result: added(started) });
         app.handle_done(Finished { job: 0, result: other(started) });
         assert_eq!(app.state.backend.as_deref(), Some("Laptop"), "the add that finished last is selected");
@@ -1619,13 +1715,19 @@ mod tests {
         let started = app.backend_choices;
         app.send("Hi");
         assert!(app.conversation.is_some(), "the chat started");
-        app.handle_done(Finished { job: 0, result: Ok(Done::BackendAdded { name: "Laptop".into(), result: Ok(()), choices: started }) });
+        app.handle_done(Finished {
+            job: 0,
+            result: Ok(Done::BackendAdded { name: "Laptop".into(), result: Ok(()), choices: started, address: String::new() }),
+        });
         assert_eq!(app.state.backend.as_deref(), Some("Box"), "the chat's AI stays chosen");
         assert!(app.conversation.is_some(), "the chat keeps going");
         // A follow-up in a chat that started before the add counts the same way.
         let started = app.backend_choices;
         app.send("And then?");
-        app.handle_done(Finished { job: 0, result: Ok(Done::BackendAdded { name: "Laptop".into(), result: Ok(()), choices: started }) });
+        app.handle_done(Finished {
+            job: 0,
+            result: Ok(Done::BackendAdded { name: "Laptop".into(), result: Ok(()), choices: started, address: String::new() }),
+        });
         assert_eq!(app.state.backend.as_deref(), Some("Box"), "a follow-up keeps its AI");
         assert!(app.conversation.is_some(), "the follow-up's answer keeps going");
     }
@@ -1667,25 +1769,80 @@ mod model_options_tests {
             .join("\n")
     }
 
+    /// The text the address form draws.
+    fn draw(app: &mut CraftApp) -> String {
+        let context = egui::Context::default();
+        crate::theme::install_fonts(&context);
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| server_form(app, ui));
+        output.textures_delta.clear();
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) => Some(text.galley.text().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// #1434: a server that lists several chat models and doesn't say which is loaded offers them
+    /// to choose from; the choice fills the model field, and a list for another address isn't shown.
+    #[test]
+    fn a_server_with_several_models_offers_them_to_choose_from() {
+        const A: &str = "http://127.0.0.1:0/v1";
+        let mut app = app_with_backend();
+        app.server_form.name = "Npu".into();
+        app.server_form.address = A.into();
+        let refused = || {
+            craft_anything_engine::evidence::ToolError::invalid("lists 2 chat models")
+                .with_details(serde_json::json!({ "choose_model": ["deepseek-r1:8b", "qwen3:8b"] }))
+        };
+        // The form's request, as `add_server` records it, and its answer for the address asked.
+        let ask = |app: &mut CraftApp, job| app.server_form.connecting = Some((job, "Npu".into(), std::time::Instant::now()));
+        let answer = |job, address: &str, result| crate::jobs::Finished {
+            job,
+            result: Ok(crate::Done::BackendAdded { name: "Npu".into(), result, choices: 0, address: address.into() }),
+        };
+        ask(&mut app, 7);
+        app.handle_done(answer(7, A, Err(refused())));
+        let choices = app.server_form.choices.clone().expect("offered");
+        assert_eq!(choices, (A.to_string(), vec!["deepseek-r1:8b".to_string(), "qwen3:8b".to_string()]));
+        let text = draw(&mut app);
+        assert!(text.contains("This server lists several chat models. Choose one:") && text.contains("Choose a model"), "{text}");
+        app.server_form.model = "qwen3:8b".into();
+        assert!(draw(&mut app).contains("qwen3:8b"), "the choice shows");
+        app.server_form.address = "http://127.0.0.1:0/other/v1".into();
+        assert!(!draw(&mut app).contains("Choose one"), "another address's list isn't offered");
+
+        // Review of #1436: the address is changed to B while A is still answering. A's list is
+        // A's, so it isn't offered for B (where picking from it would ask B for A's model).
+        app.server_form = crate::ServerForm { name: "Npu".into(), address: A.into(), ..Default::default() };
+        ask(&mut app, 8);
+        app.server_form.address = "http://127.0.0.1:0/b/v1".into();
+        app.handle_done(answer(8, A, Err(refused())));
+        assert!(app.server_form.choices.is_none(), "a list for the address that was asked, not the one shown");
+        assert!(!draw(&mut app).contains("Choose one"));
+
+        // An answer to an older Add, replaced by a newer one, is stale and offers nothing.
+        app.server_form = crate::ServerForm { name: "Npu".into(), address: A.into(), ..Default::default() };
+        ask(&mut app, 10);
+        app.handle_done(answer(9, A, Err(refused())));
+        assert!(app.server_form.choices.is_none(), "a stale request's list isn't offered");
+        assert!(app.server_form.connecting.is_some(), "the newer request is still waited for");
+
+        // Another failure of the form's request clears a list it offered before.
+        app.handle_done(answer(10, A, Err(refused())));
+        assert!(app.server_form.choices.is_some());
+        ask(&mut app, 11);
+        app.handle_done(answer(11, A, Err(craft_anything_engine::evidence::ToolError::invalid("down"))));
+        assert!(app.server_form.choices.is_none(), "an unrelated failure leaves no old list");
+    }
+
     /// #1429: while a server is asked for its models the form says so, with the seconds waited, and
     /// Add waits; the line goes when the job ends, whether the server was added or not.
     #[test]
     fn a_server_being_added_shows_that_it_is_connecting() {
-        let draw = |app: &mut CraftApp| {
-            let context = egui::Context::default();
-            crate::theme::install_fonts(&context);
-            let mut output = context.run_ui(egui::RawInput::default(), |ui| server_form(app, ui));
-            output.textures_delta.clear();
-            output
-                .shapes
-                .iter()
-                .filter_map(|shape| match &shape.shape {
-                    egui::epaint::Shape::Text(text) => Some(text.galley.text().to_string()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
         let mut app = app_with_backend();
         assert!(!draw(&mut app).contains("Connecting to"), "nothing to say before Add");
         // Port zero refuses at once: the job never reaches a network.
@@ -1701,7 +1858,12 @@ mod model_options_tests {
         let refused = craft_anything_engine::evidence::ToolError::invalid("refused");
         app.handle_done(crate::jobs::Finished {
             job,
-            result: Ok(crate::Done::BackendAdded { name: "Home box".into(), result: Err(refused), choices: app.backend_choices }),
+            result: Ok(crate::Done::BackendAdded {
+                name: "Home box".into(),
+                result: Err(refused),
+                choices: app.backend_choices,
+                address: "http://127.0.0.1:0/v1".into(),
+            }),
         });
         assert!(app.server_form.connecting.is_none());
         assert!(!draw(&mut app).contains("Connecting to"));
@@ -1729,6 +1891,7 @@ mod model_options_tests {
                 name: "Home box".into(),
                 result: Err(craft_anything_engine::evidence::ToolError::cancelled()),
                 choices: app.backend_choices,
+                address: "http://127.0.0.1:0/v1".into(),
             }),
         });
         assert!(app.server_form.connecting.is_none());

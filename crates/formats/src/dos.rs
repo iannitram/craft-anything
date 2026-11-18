@@ -111,7 +111,7 @@ pub fn parse_mz(data: &[u8]) -> Result<MzImage, FormatError> {
         r.slice(lfanew, 2).and_then(|sig| match sig {
             b"NE" => Some("NE (16-bit Windows)".to_string()),
             b"LE" | b"LX" => Some("LE/LX (OS/2 or VxD)".to_string()),
-            b"PE" => Some("PE (32/64-bit Windows)".to_string()),
+            b"PE" if crate::pe::has_pe_header(data) => Some("PE (32/64-bit Windows)".to_string()),
             _ => None,
         })
     } else {

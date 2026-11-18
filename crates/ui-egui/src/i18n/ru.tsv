@@ -292,6 +292,7 @@ Couldn't look through that folder.	Не удалось просмотреть э
 Couldn't open it.	Не удалось открыть.
 Couldn't open the folder.	Не удалось открыть папку.
 Couldn't open {}: {}	Не удалось открыть {}: {}
+Couldn't save your settings.	Не удалось сохранить настройки.
 Couldn't start a worker thread: {e}	Не удалось запустить рабочий поток: {e}
 Couldn't start it.	Не удалось запустить.
 Coverage unknown	Покрытие неизвестно
@@ -984,6 +985,7 @@ Saved in	Сохранено в
 Saves space: copies the program and code, and shares dependencies and media with the project. A shared file rewritten in place changes here too.	Экономит место: копирует программу и код, а зависимости и медиа делит с проектом. Общий файл, перезаписанный на месте, меняется и здесь.
 Say what you want	Скажите, что хотите
 Say what you want first.	Сначала скажите, что хотите.
+This applies once you choose something to recreate above.	Это применяется, когда вы выберете выше, что воссоздать.
 Say what you want to make, or drop an app or file on the window to look inside it. Everything runs in Clean room mode unless you switch on Deep.	Скажите, что хотите создать, или перетащите приложение или файл на окно, чтобы заглянуть внутрь. Всё выполняется в режиме «Чистая комната», пока вы не включите «Глубокий».
 Screenshot	Скриншот
 Screenshot a page	Сделать скриншот страницы
@@ -1192,6 +1194,7 @@ Use the projects folder	Использовать папку проектов
 Use this	Использовать это
 Use {name}	Использовать {name}
 Value flow	Поток значений
+About	О программе
 Version	Версия
 Waiting	Ожидание
 Waiting for another build to finish: this one starts next.	Ожидание завершения другой сборки: эта начнётся следующей.
@@ -1447,6 +1450,7 @@ Zoom	Изменить масштаб
 Bring all to front	Все окна — на передний план
 Drag to give the plan more or less room; double-click to reset	Перетащите, чтобы дать плану больше или меньше места; двойной щелчок возвращает как было
 Copy the message	Скопировать сообщение
+Copy the version	Скопировать версию
 Choose what the builder's approvals get	Выбрать, что получают разрешения конструктора
 Reading the web	Чтение веба
 Other commands	Другие команды
@@ -1493,3 +1497,8 @@ You're up to date.	Установлена последняя версия.
 Forget a website sign-in	Забыть вход на сайт
 Sign in to a website	Войти на сайт
 Some shared files could not be hard-linked and were copied instead ({size}).	Некоторые общие файлы не удалось связать жёсткими ссылками, и они были скопированы ({size}).
+This server lists several chat models. Choose one:	Этот сервер предлагает несколько моделей для чата. Выберите одну:
+Choose a model	Выберите модель
+
+# Saved-builder notice: English until native-speaker review.
+The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

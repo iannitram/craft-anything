@@ -18,7 +18,9 @@ struct Sb {
     inode_table: u64,
     dir_table: u64,
     frag_table: u64,
+    export_table: u64,
     id_table: u64,
+    xattr_table: u64,
     root_ref: u64,
     frag_count: u32,
 }
@@ -41,7 +43,9 @@ fn superblock(data: &[u8]) -> Option<Sb> {
         inode_table: r.u64_le(64)?,
         dir_table: r.u64_le(72)?,
         frag_table: r.u64_le(80)?,
+        export_table: r.u64_le(88)?,
         id_table: r.u64_le(48)?,
+        xattr_table: r.u64_le(56)?,
     })
 }
 
@@ -142,10 +146,11 @@ pub fn read(data: &[u8], limits: &Limits) -> FsImage {
         img.warn("squashfs uses lzo compression, which is not supported");
         img.complete = false;
     }
-    // Directory table ends at the first following table.
-    let dir_end = [sb.frag_table, sb.id_table].into_iter().filter(|&t| t > sb.dir_table && t != u64::MAX).min().unwrap_or(sb.dir_table);
-    let inodes = Meta::read(data, sb.inode_table, sb.dir_table, sb.compression, &mut img);
-    let dirs = Meta::read(data, sb.dir_table, dir_end, sb.compression, &mut img);
+    // Each metadata table ends at the nearest following table header (or `used` when last).
+    let tables = [sb.inode_table, sb.dir_table, sb.frag_table, sb.export_table, sb.id_table, sb.xattr_table];
+    let table_end = |start: u64| tables.into_iter().filter(|&t| t > start && t != u64::MAX).min().unwrap_or(used).min(used);
+    let inodes = Meta::read(data, sb.inode_table, table_end(sb.inode_table), sb.compression, &mut img);
+    let dirs = Meta::read(data, sb.dir_table, table_end(sb.dir_table), sb.compression, &mut img);
     let mut seen = BTreeSet::new();
     walk(data, &sb, &inodes, &dirs, sb.root_ref, "", limits, &mut img, 0, &mut seen);
     img
@@ -436,7 +441,18 @@ mod tests {
 
     #[test]
     fn reads_extended_regular_file_inodes() {
-        let sb = Sb { block_size: 4096, compression: 1, inode_table: 0, dir_table: 0, frag_table: 0, id_table: 0, root_ref: 0, frag_count: 0 };
+        let sb = Sb {
+            block_size: 4096,
+            compression: 1,
+            inode_table: 0,
+            dir_table: 0,
+            frag_table: 0,
+            export_table: u64::MAX,
+            id_table: 0,
+            xattr_table: u64::MAX,
+            root_ref: 0,
+            frag_count: 0,
+        };
         let body = b"extended file payload";
         let mut data = vec![0u8; 96];
         data.extend_from_slice(body);

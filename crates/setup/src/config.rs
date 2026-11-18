@@ -86,8 +86,7 @@ pub fn remove_entry(client: &Client, text: &str) -> Result<Option<String>, Strin
         }
         Format::Yaml => {
             let table = client.table.first().copied().unwrap_or("mcp_servers");
-            yaml::parse(text)?;
-            Ok(yaml::remove(text, table, SERVER_NAME))
+            yaml::try_remove(text, table, SERVER_NAME)
         }
         Format::Manual => Ok(None),
     }
@@ -171,24 +170,28 @@ fn toml_set(client: &Client, text: &str, entry: &Value) -> Result<String, String
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| e.to_string())?;
     let table_name = client.table.first().copied().unwrap_or("mcp_servers");
     let Value::Object(fields) = entry else { return Err("entry must be a table".into()) };
-    let mut ours = toml_edit::Table::new();
-    for (k, v) in fields {
-        let tv = json_to_toml(v).ok_or_else(|| format!("cannot write {k} as TOML"))?;
-        ours.insert(k, toml_edit::Item::Value(tv));
-    }
     if doc.get(table_name).is_none() {
         let mut t = toml_edit::Table::new();
         t.set_implicit(true);
         doc.insert(table_name, toml_edit::Item::Table(t));
     }
-    let servers = doc.get_mut(table_name).and_then(|t| t.as_table_mut()).ok_or_else(|| format!("`{table_name}` exists but is not a table"))?;
+    let inline_parent = doc.get(table_name).is_some_and(toml_edit::Item::is_inline_table);
+    let servers = doc.get_mut(table_name).and_then(|t| t.as_table_like_mut()).ok_or_else(|| format!("`{table_name}` exists but is not a table"))?;
     // Only our own entry is merged into (a foreign one, such as an HTTP `url` Codex would refuse
     // beside a `command`, is replaced, as the plan says it will be). The person's other settings
-    // and comments stay, whether the entry is a table or written inline.
+    // and comments stay, whether the entry or its parent table is written inline.
     let merge = client.shape == Shape::Codex && old.as_ref().is_some_and(is_owned_entry);
     if merge && let Some(existing) = servers.get_mut(SERVER_NAME).and_then(|i| i.as_table_like_mut()) {
         merge_in_place(existing, fields)?;
+    } else if inline_parent {
+        let inline = json_to_toml(entry).ok_or_else(|| "cannot write entry as TOML".to_string())?;
+        servers.insert(SERVER_NAME, toml_edit::Item::Value(inline));
     } else {
+        let mut ours = toml_edit::Table::new();
+        for (k, v) in fields {
+            let tv = json_to_toml(v).ok_or_else(|| format!("cannot write {k} as TOML"))?;
+            ours.insert(k, toml_edit::Item::Value(tv));
+        }
         match servers.get_mut(SERVER_NAME).and_then(|i| i.as_table_mut()) {
             Some(existing) => {
                 // Keep the existing table's position and decor; replace its keys.

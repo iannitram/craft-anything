@@ -72,7 +72,9 @@ fn convert(ty: &str, key: &str, raw: &str) -> Result<Value, String> {
         "integer" => {
             let t = raw.trim();
             if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-                u64::from_str_radix(h, 16).map(|n| json!(n)).map_err(|_| format!("--{key} expects a number, got {raw:?}"))
+                // `from_str_radix` accepts a leading sign, so check the digits first.
+                let digits = !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit());
+                u64::from_str_radix(h, 16).ok().filter(|_| digits).map(|n| json!(n)).ok_or_else(|| format!("--{key} expects a number, got {raw:?}"))
             } else {
                 t.parse::<i64>().map(|n| json!(n)).map_err(|_| format!("--{key} expects a whole number, got {raw:?}"))
             }
@@ -317,6 +319,15 @@ mod tests {
     }
     fn help(spec: &ToolSpec) -> String {
         super::help(spec, &(spec.input_schema)())
+    }
+
+    #[test]
+    fn integer_hex_rejects_sign() {
+        for bad in ["0x+10", "0x-10", "0x", "0x 10"] {
+            let e = super::convert("integer", "addr", bad).unwrap_err();
+            assert!(e.contains("expects a number"), "{bad}: {e}");
+        }
+        assert_eq!(super::convert("integer", "addr", "0x10").unwrap(), json!(16));
     }
 
     #[test]
